@@ -145,9 +145,12 @@ export class CursorProvider implements LLMProvider {
             if (params.workingDirectory) {
               args.push('--workspace', params.workingDirectory);
             }
-            if (params.model && !params.model.startsWith('claude')) {
-              args.push('--model', params.model);
+            
+            const model = process.env.CTI_CURSOR_MODEL || params.model;
+            if (model && !model.startsWith('claude')) {
+              args.push('--model', model);
             }
+            
             if (params.sdkSessionId) {
               args.push('--resume', params.sdkSessionId);
             }
