@@ -13,6 +13,11 @@ await esbuild.build({
     // breaks that path resolution.
     '@anthropic-ai/claude-agent-sdk',
     '@openai/codex-sdk',
+    // IM platform SDKs - keep external for native dependencies
+    'discord.js',
+    '@larksuiteoapi/node-sdk',
+    'ws',
+    'markdown-it',
     // discord.js optional native deps
     'bufferutil', 'utf-8-validate', 'zlib-sync', 'erlpack',
     // Node.js built-ins

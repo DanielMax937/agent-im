@@ -250,14 +250,6 @@ npm test           # Run tests
 npm run build      # Build bundle
 ```
 
-## Roadmap
-
-- [ ] Convert to a web service (replace local daemon with a hosted HTTP server)
-- [ ] Add install/setup page in the web UI (guided configuration wizard)
-- [ ] Support multiple instances (run several bridge instances with different configs simultaneously)
-- [ ] Agent-to-person routing (let AI agents initiate conversations with specific users)
-- [ ] Kanban board (visual task management for ongoing agent sessions)
-
 ## License
 
 [MIT](LICENSE)

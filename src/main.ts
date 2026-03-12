@@ -9,12 +9,12 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import { ProxyAgent, setGlobalDispatcher } from 'undici';
 
-import { initBridgeContext } from 'claude-to-im/src/lib/bridge/context.js';
-import * as bridgeManager from 'claude-to-im/src/lib/bridge/bridge-manager.js';
+import { initBridgeContext } from './lib/bridge/context.js';
+import * as bridgeManager from './lib/bridge/bridge-manager.js';
 // Side-effect import to trigger adapter self-registration
-import 'claude-to-im/src/lib/bridge/adapters/index.js';
+import './lib/bridge/adapters/index.js';
 
-import type { LLMProvider } from 'claude-to-im/src/lib/bridge/host.js';
+import type { LLMProvider } from './lib/bridge/host.js';
 import { loadConfig, configToSettings, CTI_HOME } from './config.js';
 import type { Config } from './config.js';
 import { JsonFileStore } from './store.js';
@@ -37,8 +37,9 @@ async function resolveProvider(config: Config, pendingPerms: PendingPermissions)
   const runtime = config.runtime;
 
   if (runtime === 'codex') {
-    const { CodexProvider } = await import('./codex-provider.js');
-    return new CodexProvider(pendingPerms);
+    const { CodexProvider, DEFAULT_CODEX_CONFIG } = await import('./codex-provider.js');
+    const wrapperPath = process.env.CTI_CODEX_EXECUTABLE || DEFAULT_CODEX_CONFIG.wrapperPath;
+    return new CodexProvider(pendingPerms, { ...DEFAULT_CODEX_CONFIG, wrapperPath });
   }
 
   if (runtime === 'cursor') {
@@ -63,8 +64,9 @@ async function resolveProvider(config: Config, pendingPerms: PendingPermissions)
     } else {
       console.log('[claude-to-im] Auto: Claude CLI not found, falling back to Codex');
     }
-    const { CodexProvider } = await import('./codex-provider.js');
-    return new CodexProvider(pendingPerms);
+    const { CodexProvider, DEFAULT_CODEX_CONFIG } = await import('./codex-provider.js');
+    const wrapperPath = process.env.CTI_CODEX_EXECUTABLE || DEFAULT_CODEX_CONFIG.wrapperPath;
+    return new CodexProvider(pendingPerms, { ...DEFAULT_CODEX_CONFIG, wrapperPath });
   }
 
   // Default: claude

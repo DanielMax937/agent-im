@@ -112,27 +112,24 @@ describe('CursorProvider stream-json event mapping', () => {
     assert.ok(textEvents.some(e => e.data.includes('Hello!')));
   });
 
-  it('emits each assistant turn text exactly once', async () => {
+  it('streams partial text deltas without duplication', async () => {
     const { CursorProvider } = await import('../cursor-provider.js');
     const mockSpawn = createMockSpawn([
       { type: 'system', subtype: 'init', session_id: 'abc' },
       {
         type: 'assistant',
-        message: { role: 'assistant', content: [{ type: 'text', text: 'Checking...' }] },
-        session_id: 'abc',
-      },
-      {
-        type: 'tool_call', subtype: 'started', call_id: 't1',
-        tool_call: { shellToolCall: { args: { command: 'ls' } } }, session_id: 'abc',
-      },
-      {
-        type: 'tool_call', subtype: 'completed', call_id: 't1',
-        tool_call: { shellToolCall: { args: { command: 'ls' }, result: { success: { stdout: 'ok', exitCode: 0 } } } },
-        session_id: 'abc',
+        message: { role: 'assistant', content: [{ type: 'text', text: 'Hello' }] },
+        session_id: 'abc', timestamp_ms: 1000,
       },
       {
         type: 'assistant',
-        message: { role: 'assistant', content: [{ type: 'text', text: 'All good.' }] },
+        message: { role: 'assistant', content: [{ type: 'text', text: ' world' }] },
+        session_id: 'abc', timestamp_ms: 1001,
+      },
+      // Final message (no timestamp_ms) — should not duplicate
+      {
+        type: 'assistant',
+        message: { role: 'assistant', content: [{ type: 'text', text: 'Hello world' }] },
         session_id: 'abc',
       },
       { type: 'result', subtype: 'success', session_id: 'abc', usage: {} },
@@ -145,8 +142,8 @@ describe('CursorProvider stream-json event mapping', () => {
     const textEvents = events.filter(e => e.type === 'text');
 
     assert.equal(textEvents.length, 2);
-    assert.equal(textEvents[0].data, 'Checking...');
-    assert.equal(textEvents[1].data, 'All good.');
+    assert.equal(textEvents[0].data, 'Hello');
+    assert.equal(textEvents[1].data, ' world');
   });
 
   it('maps tool_call started/completed to tool_use/tool_result', async () => {
