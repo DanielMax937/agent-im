@@ -164,6 +164,16 @@ export class CursorProvider implements LLMProvider {
 
             const env = buildSubprocessEnv();
             
+            // Propagate proxy settings for agent CLI
+            if (process.env.CTI_PROXY) {
+              env.HTTP_PROXY = env.HTTP_PROXY || process.env.CTI_PROXY;
+              env.HTTPS_PROXY = env.HTTPS_PROXY || process.env.CTI_PROXY;
+              env.ALL_PROXY = env.ALL_PROXY || process.env.CTI_PROXY;
+              env.http_proxy = env.http_proxy || process.env.CTI_PROXY;
+              env.https_proxy = env.https_proxy || process.env.CTI_PROXY;
+              env.all_proxy = env.all_proxy || process.env.CTI_PROXY;
+            }
+            
             // Only pass API key if explicitly configured for Cursor.
             // Don't fallback to OPENAI_API_KEY as it might be invalid for Cursor.
             const apiKey = process.env.CTI_CURSOR_API_KEY
