@@ -163,11 +163,17 @@ export class CursorProvider implements LLMProvider {
             args.push('--', params.prompt);
 
             const env = buildSubprocessEnv();
+            
+            // Only pass API key if explicitly configured for Cursor.
+            // Don't fallback to OPENAI_API_KEY as it might be invalid for Cursor.
             const apiKey = process.env.CTI_CURSOR_API_KEY
-              || process.env.CURSOR_API_KEY
-              || process.env.OPENAI_API_KEY;
+              || process.env.CURSOR_API_KEY;
             if (apiKey) {
               env.CURSOR_API_KEY = apiKey;
+            } else {
+              // Explicitly unset these to prevent invalid keys from being inherited
+              delete env.CURSOR_API_KEY;
+              delete env.OPENAI_API_KEY;
             }
 
             const child = self.spawnFn(agentPath, args, {
