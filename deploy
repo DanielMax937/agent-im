@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+# Quick deploy wrapper - always builds and deploys with symlink + force
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+
+# Default to cursor if no argument provided
+TARGET="${1:-cursor}"
+
+echo "🚀 Quick deploy to $TARGET (with build, symlink, force)..."
+echo ""
+
+bash "$SCRIPT_DIR/scripts/deploy.sh" "$TARGET" --link --force

@@ -4,16 +4,17 @@ set -euo pipefail
 # Deploy claude-to-im skill to a target runtime.
 #
 # Usage:
-#   bash scripts/deploy.sh <target> [--link]
+#   bash scripts/deploy.sh <target> [--link] [--force]
 #
 #   target:  claude | codex | cursor
 #   --link:  create a symlink instead of copying (for development)
+#   --force: remove existing installation and redeploy
 
 SKILL_NAME="claude-to-im"
 SOURCE_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 
 usage() {
-  echo "Usage: $0 <target> [--link]"
+  echo "Usage: $0 <target> [--link] [--force]"
   echo ""
   echo "Targets:"
   echo "  claude   Deploy to ~/.claude/skills/$SKILL_NAME"
@@ -22,11 +23,18 @@ usage() {
   echo ""
   echo "Options:"
   echo "  --link   Create a symlink instead of copying (for development)"
+  echo "  --force  Remove existing installation and redeploy"
+  echo ""
+  echo "Examples:"
+  echo "  bash scripts/deploy.sh cursor              # Copy mode"
+  echo "  bash scripts/deploy.sh cursor --link       # Development mode"
+  echo "  bash scripts/deploy.sh cursor --link --force  # Force redeploy with symlink"
   exit 1
 }
 
 TARGET="${1:-}"
 LINK_MODE=false
+FORCE_MODE=false
 
 if [ -z "$TARGET" ]; then
   usage
@@ -36,6 +44,7 @@ shift
 while [ $# -gt 0 ]; do
   case "$1" in
     --link) LINK_MODE=true ;;
+    --force) FORCE_MODE=true ;;
     *) echo "Unknown option: $1"; usage ;;
   esac
   shift
@@ -68,6 +77,7 @@ echo "Deploying $SKILL_NAME skill for $TARGET..."
 echo "  Source:  $SOURCE_DIR"
 echo "  Target:  $TARGET_DIR"
 echo "  Runtime: $RUNTIME"
+echo "  Mode:    $([ "$LINK_MODE" = true ] && echo "symlink" || echo "copy")"
 echo ""
 
 # ── Validate source ──
@@ -82,22 +92,41 @@ if [ ! -f "$SOURCE_DIR/package.json" ]; then
   exit 1
 fi
 
-# ── Check if already installed ──
+# ── Always build before deploying ──
+
+echo "Building daemon bundle..."
+(cd "$SOURCE_DIR" && npm run build)
+echo ""
+
+# ── Handle existing installation ──
 
 if [ -e "$TARGET_DIR" ]; then
-  if [ -L "$TARGET_DIR" ]; then
-    EXISTING=$(readlink "$TARGET_DIR")
-    if [ "$LINK_MODE" = true ] && [ "$EXISTING" = "$SOURCE_DIR" ]; then
-      echo "Already symlinked to the same source."
+  if [ "$FORCE_MODE" = true ]; then
+    echo "Force mode: removing existing installation..."
+    if [ -L "$TARGET_DIR" ]; then
+      rm "$TARGET_DIR"
     else
-      echo "Already installed as symlink → $EXISTING"
-      echo "To reinstall, remove it first: rm $TARGET_DIR"
+      rm -rf "$TARGET_DIR"
+    fi
+    echo "Removed existing installation"
+    echo ""
+  else
+    if [ -L "$TARGET_DIR" ]; then
+      EXISTING=$(readlink "$TARGET_DIR")
+      if [ "$LINK_MODE" = true ] && [ "$EXISTING" = "$SOURCE_DIR" ]; then
+        echo "Already symlinked to the same source."
+        echo "Build complete. Changes are immediately available."
+        exit 0
+      else
+        echo "Already installed as symlink → $EXISTING"
+        echo "To reinstall, use --force flag or remove it first: rm $TARGET_DIR"
+        exit 0
+      fi
+    else
+      echo "Already installed at $TARGET_DIR"
+      echo "To reinstall, use --force flag or remove it first: rm -rf $TARGET_DIR"
       exit 0
     fi
-  else
-    echo "Already installed at $TARGET_DIR"
-    echo "To reinstall, remove it first: rm -rf $TARGET_DIR"
-    exit 0
   fi
 fi
 
@@ -142,19 +171,14 @@ fi
 
 # ── Build ──
 
+# Build is already done at the beginning, so just verify it exists
 if [ ! -f "$WORK_DIR/dist/daemon.mjs" ]; then
   echo ""
-  echo "Building daemon bundle..."
-  (cd "$WORK_DIR" && npm run build)
-else
-  # Check if source is newer than bundle
-  STALE_SRC=$(find "$WORK_DIR/src" -name '*.ts' -newer "$WORK_DIR/dist/daemon.mjs" 2>/dev/null | head -1)
-  if [ -n "$STALE_SRC" ]; then
-    echo ""
-    echo "Source files changed, rebuilding..."
-    (cd "$WORK_DIR" && npm run build)
-  fi
+  echo "Error: Build failed - dist/daemon.mjs not found"
+  exit 1
 fi
+
+echo "Build verified: dist/daemon.mjs"
 
 # ── Prune dev dependencies (copy mode only) ──
 
