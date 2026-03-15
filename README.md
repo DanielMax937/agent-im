@@ -131,6 +131,8 @@ All commands are run inside Claude Code or Codex:
 | `/claude-to-im reconfigure` | "reconfigure" / "修改配置" | Update config interactively |
 | `/claude-to-im doctor` | "doctor" / "诊断" | Diagnose issues |
 
+**API & Interface Reference**: See [references/api.md](references/api.md) for command details, config schema, and bridge host interfaces.
+
 ## Platform Setup Guides
 
 The `setup` wizard provides inline guidance for every step. Here's a summary:
