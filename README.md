@@ -22,7 +22,7 @@ Claude Code / Codex → reads/writes your codebase
 
 ## Features
 
-- **Four IM platforms** — Telegram, Discord, Feishu/Lark, QQ — enable any combination
+- **Five IM platforms** — Telegram, Discord, Feishu/Lark, QQ, Agent (self-conversational loop) — enable any combination
 - **Interactive setup** — guided wizard collects tokens with step-by-step instructions
 - **Permission control** — tool calls require explicit approval via inline buttons (Telegram/Discord) or text `/perm` commands (Feishu/QQ)
 - **Streaming preview** — see Claude's response as it types (Telegram & Discord)
@@ -170,6 +170,49 @@ The `setup` wizard provides inline guidance for every step. Here's a summary:
 3. Configure sandbox access and scan QR code with QQ to add the bot
 4. `CTI_QQ_ALLOWED_USERS` takes `user_openid` values (not QQ numbers) — can be left empty initially
 5. Set `CTI_QQ_IMAGE_ENABLED=false` if the underlying provider doesn't support image input
+
+### Agent (Self-Conversational Loop)
+
+> Agent creates a conversation loop between Claude and OpenAI via Redis. No user interaction — fully autonomous. **Supports multiple concurrent instances.**
+
+1. Install Redis: `brew install redis` (macOS) or `apt install redis` (Linux)
+2. Start Redis: `redis-server`
+3. Configure in `~/.claude-to-im/config.env`:
+   
+   **Single instance:**
+   - `CTI_AGENT_REDIS_URL=redis://127.0.0.1:6379` (default)
+   - `CTI_AGENT_FIRST_PROMPT="Hello, how are you?"` (conversation starter)
+   - `CTI_AGENT_OPENAI_BASE_URL=https://api.openai.com/v1` (or custom endpoint)
+   - `CTI_AGENT_OPENAI_MODEL=gpt-4o-mini` (or any OpenAI-compatible model)
+   - `CTI_AGENT_OPENAI_API_KEY=your-openai-api-key`
+   - `CTI_AGENT_MAX_TURNS=10` (max conversation rounds, default 10)
+
+   **Multiple instances** (numbered: 1, 2, 3... or named: main, debate, test...):
+   ```bash
+   # Instance 1
+   CTI_AGENT_1_REDIS_URL=redis://127.0.0.1:6379
+   CTI_AGENT_1_FIRST_PROMPT="Debate: Is AGI achievable?"
+   CTI_AGENT_1_OPENAI_MODEL=gpt-4o
+   CTI_AGENT_1_OPENAI_API_KEY=sk-your-key
+   CTI_AGENT_1_MAX_TURNS=10
+   
+   # Instance 2
+   CTI_AGENT_2_REDIS_URL=redis://127.0.0.1:6379
+   CTI_AGENT_2_FIRST_PROMPT="Review this code: ..."
+   CTI_AGENT_2_OPENAI_MODEL=gpt-3.5-turbo
+   CTI_AGENT_2_OPENAI_API_KEY=sk-your-key
+   CTI_AGENT_2_MAX_TURNS=5
+   ```
+   
+   See [Multi-Instance Guide](docs/agent-multi-instance.md) for detailed configuration.
+
+**How it works:**
+1. First prompt is stored in Redis input queue
+2. Claude polls Redis and responds (no streaming)
+3. Claude's response is sent to OpenAI API
+4. OpenAI's response goes back to Redis input queue
+5. Loop continues until max turns reached
+6. Multiple instances run concurrently with separate queues
 
 ## Architecture
 

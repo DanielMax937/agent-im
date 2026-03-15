@@ -28,6 +28,13 @@ export interface Config {
   qqAllowedUsers?: string[];
   qqImageEnabled?: boolean;
   qqMaxImageSize?: number;
+  // Agent
+  agentRedisUrl?: string;
+  agentFirstPrompt?: string;
+  agentOpenAIBaseUrl?: string;
+  agentOpenAIModel?: string;
+  agentOpenAIApiKey?: string;
+  agentMaxTurns?: number;
   // HTTP(S) proxy URL for outbound API calls (Telegram, Feishu, etc.)
   proxy?: string;
   // Auto-approve all tool permission requests without user confirmation
@@ -106,6 +113,15 @@ export function loadConfig(): Config {
     qqMaxImageSize: env.get("CTI_QQ_MAX_IMAGE_SIZE")
       ? Number(env.get("CTI_QQ_MAX_IMAGE_SIZE"))
       : undefined,
+    // Agent - collect all agent instance configs
+    agentRedisUrl: env.get("CTI_AGENT_REDIS_URL") || undefined,
+    agentFirstPrompt: env.get("CTI_AGENT_FIRST_PROMPT") || undefined,
+    agentOpenAIBaseUrl: env.get("CTI_AGENT_OPENAI_BASE_URL") || undefined,
+    agentOpenAIModel: env.get("CTI_AGENT_OPENAI_MODEL") || undefined,
+    agentOpenAIApiKey: env.get("CTI_AGENT_OPENAI_API_KEY") || undefined,
+    agentMaxTurns: env.get("CTI_AGENT_MAX_TURNS")
+      ? Number(env.get("CTI_AGENT_MAX_TURNS"))
+      : undefined,
     proxy: env.get("CTI_PROXY") || undefined,
     autoApprove: env.get("CTI_AUTO_APPROVE") === "true",
   };
@@ -163,6 +179,15 @@ export function saveConfig(config: Config): void {
   if (config.qqMaxImageSize !== undefined)
     out += formatEnvLine("CTI_QQ_MAX_IMAGE_SIZE", String(config.qqMaxImageSize));
   out += formatEnvLine("CTI_PROXY", config.proxy);
+
+  // Agent
+  out += formatEnvLine("CTI_AGENT_REDIS_URL", config.agentRedisUrl);
+  out += formatEnvLine("CTI_AGENT_FIRST_PROMPT", config.agentFirstPrompt);
+  out += formatEnvLine("CTI_AGENT_OPENAI_BASE_URL", config.agentOpenAIBaseUrl);
+  out += formatEnvLine("CTI_AGENT_OPENAI_MODEL", config.agentOpenAIModel);
+  out += formatEnvLine("CTI_AGENT_OPENAI_API_KEY", config.agentOpenAIApiKey);
+  if (config.agentMaxTurns !== undefined)
+    out += formatEnvLine("CTI_AGENT_MAX_TURNS", String(config.agentMaxTurns));
 
   fs.mkdirSync(CTI_HOME, { recursive: true });
   const tmpPath = CONFIG_PATH + ".tmp";
@@ -243,6 +268,24 @@ export function configToSettings(config: Config): Map<string, string> {
     m.set("bridge_qq_image_enabled", String(config.qqImageEnabled));
   if (config.qqMaxImageSize !== undefined)
     m.set("bridge_qq_max_image_size", String(config.qqMaxImageSize));
+
+  // ── Agent ──
+  // For backward compatibility, set single instance settings
+  // The adapter will parse all agent_* settings directly from store
+  m.set(
+    "bridge_agent_enabled",
+    config.enabledChannels.includes("agent") ? "true" : "false"
+  );
+  if (config.agentRedisUrl) m.set("bridge_agent_redis_url", config.agentRedisUrl);
+  if (config.agentFirstPrompt) m.set("bridge_agent_first_prompt", config.agentFirstPrompt);
+  if (config.agentOpenAIBaseUrl) m.set("bridge_agent_openai_base_url", config.agentOpenAIBaseUrl);
+  if (config.agentOpenAIModel) m.set("bridge_agent_openai_model", config.agentOpenAIModel);
+  if (config.agentOpenAIApiKey) m.set("bridge_agent_openai_api_key", config.agentOpenAIApiKey);
+  if (config.agentMaxTurns !== undefined)
+    m.set("bridge_agent_max_turns", String(config.agentMaxTurns));
+
+  // Multi-instance agent configs are passed through from env directly
+  // The adapter parses bridge_agent_1_*, bridge_agent_2_*, bridge_agent_name_*, etc.
 
   // ── Defaults ──
   // Upstream keys: bridge_default_work_dir, bridge_default_model, default_model

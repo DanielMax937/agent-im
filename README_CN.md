@@ -22,7 +22,7 @@ Claude Code / Codex → 读写你的代码库
 
 ## 功能特点
 
-- **四大 IM 平台** — Telegram、Discord、飞书、QQ，可任意组合启用
+- **五大 IM 平台** — Telegram、Discord、飞书、QQ、Agent（自对话循环），可任意组合启用
 - **交互式配置** — 引导式向导逐步收集 token，附带详细获取说明
 - **权限控制** — 工具调用需要在聊天中通过内联按钮（Telegram/Discord）或文本 `/perm` 命令（飞书/QQ）明确批准
 - **流式预览** — 实时查看 Claude 的输出（Telegram 和 Discord 支持）

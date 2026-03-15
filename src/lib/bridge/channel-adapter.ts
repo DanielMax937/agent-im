@@ -3,6 +3,9 @@
  *
  * Each adapter (Telegram, Discord, Slack, ...) extends this class to provide
  * platform-specific message consumption and delivery.
+ * 
+ * Supports multi-instance: each adapter can have multiple concurrent instances
+ * with unique instanceId values.
  */
 
 import type {
@@ -14,8 +17,27 @@ import type {
 } from './types.js';
 
 export abstract class BaseChannelAdapter {
-  /** Which channel type this adapter handles */
-  abstract readonly channelType: ChannelType;
+  /** Which channel type this adapter handles (includes instanceId for routing) */
+  readonly channelType: ChannelType;
+  
+  /** Instance identifier for this adapter (e.g., "1", "2", "main", "default") */
+  readonly instanceId: string;
+  
+  /** Base channel type without instance suffix (e.g., "telegram", "discord") */
+  readonly baseChannelType: string;
+
+  /**
+   * Constructor for channel adapters.
+   * @param baseType - Base channel type (e.g., "telegram", "discord")
+   * @param instanceId - Instance identifier (e.g., "1", "main", "default")
+   */
+  constructor(baseType: string, instanceId: string) {
+    this.baseChannelType = baseType;
+    this.instanceId = instanceId;
+    // For routing: telegram:1, discord:main, agent:test, etc.
+    // Special case: "default" instance uses bare type for backward compatibility
+    this.channelType = instanceId === 'default' ? baseType : `${baseType}:${instanceId}`;
+  }
 
   /**
    * Start the adapter (connect, begin polling/websocket, etc.).
@@ -100,15 +122,31 @@ export abstract class BaseChannelAdapter {
 
 // ── Adapter Registry ────────────────────────────────────────────
 
-const adapterFactories = new Map<string, () => BaseChannelAdapter>();
+type AdapterFactory = (instanceId: string) => BaseChannelAdapter;
 
-export function registerAdapterFactory(channelType: string, factory: () => BaseChannelAdapter): void {
+const adapterFactories = new Map<string, AdapterFactory>();
+
+/**
+ * Register a factory function for creating channel adapters.
+ * The factory receives an instanceId and returns a configured adapter.
+ * 
+ * @param channelType - Base channel type (e.g., "telegram", "discord")
+ * @param factory - Function that creates an adapter for a given instance ID
+ */
+export function registerAdapterFactory(channelType: string, factory: AdapterFactory): void {
   adapterFactories.set(channelType, factory);
 }
 
-export function createAdapter(channelType: string): BaseChannelAdapter | null {
+/**
+ * Create a channel adapter instance.
+ * 
+ * @param channelType - Base channel type (e.g., "telegram", "discord")
+ * @param instanceId - Instance identifier (e.g., "1", "main", "default")
+ * @returns Configured adapter or null if factory not found
+ */
+export function createAdapter(channelType: string, instanceId = 'default'): BaseChannelAdapter | null {
   const factory = adapterFactories.get(channelType);
-  return factory ? factory() : null;
+  return factory ? factory(instanceId) : null;
 }
 
 export function getRegisteredTypes(): string[] {
