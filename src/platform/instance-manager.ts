@@ -5,7 +5,7 @@ import { JsonPlatformStore } from './json-platform-store.js';
 import { JiraAdapter, type JiraApiClient } from './jira-adapter.js';
 import { buildRolePrompt } from './prompts.js';
 import { consumeAgentStream } from './stream-consumer.js';
-import type { AgentInstanceRecord, AgentRuntime } from './types.js';
+import type { AgentInstanceRecord, AgentRuntime, TaskConversationEntry } from './types.js';
 
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -149,7 +149,10 @@ class TaskAgentRunner implements ManagedRunner {
     ].filter(Boolean).join('\n\n');
 
     const conversationHistory = currentTaskSession.conversationHistory
-      .filter((entry) => entry.role === 'user' || entry.role === 'assistant')
+      .filter(
+        (entry): entry is TaskConversationEntry & { role: 'user' | 'assistant' } =>
+          entry.role === 'user' || entry.role === 'assistant',
+      )
       .map((entry) => ({ role: entry.role, content: entry.content }));
 
     const stream = this.provider!.streamChat({
