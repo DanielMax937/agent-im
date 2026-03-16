@@ -4,18 +4,25 @@
   "description": "Claude Code Skill: Bridge IM platforms (Telegram, Discord, Feishu, QQ) to Claude Code sessions",
   "type": "module",
   "scripts": {
-    "build": "node scripts/build.js",
+    "build:daemon": "node scripts/build.js",
+    "build:web": "next build",
+    "build": "npm run build:daemon && npm run build:web",
     "typecheck": "tsc --noEmit",
-    "dev": "tsx src/main.ts",
-    "dev:web": "tsx src/web.ts",
+    "dev": "next dev",
+    "dev:bridge": "tsx src/main.ts",
+    "dev:web": "next dev",
+    "start": "next start",
     "test": "CTI_HOME=$(mktemp -d) node --test --import tsx --test-timeout=15000 src/__tests__/*.test.ts"
   },
   "dependencies": {
     "@anthropic-ai/claude-agent-sdk": "^0.2.62",
     "@larksuiteoapi/node-sdk": "^1.59.0",
     "discord.js": "^14.25.1",
-    "express": "^5.2.1",
     "markdown-it": "^14.1.1",
+    "next": "^16.1.6",
+    "pino": "^10.3.1",
+    "react": "^19.2.4",
+    "react-dom": "^19.2.4",
     "undici": "^7.22.0",
     "ws": "^8.18.0"
   },
@@ -24,9 +31,10 @@
     "redis": "^4.7.0"
   },
   "devDependencies": {
-    "@types/express": "^5.0.6",
     "@types/markdown-it": "^14.1.2",
     "@types/node": "^22",
+    "@types/react": "^19.2.14",
+    "@types/react-dom": "^19.2.3",
     "@types/ws": "^8.5.0",
     "esbuild": "^0.25.0",
     "tsx": "^4.21.0",

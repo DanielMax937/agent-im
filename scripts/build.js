@@ -28,10 +28,4 @@ await esbuild.build({
   outfile: 'dist/daemon.mjs',
 });
 
-await esbuild.build({
-  ...sharedConfig,
-  entryPoints: ['src/web.ts'],
-  outfile: 'dist/web.mjs',
-});
-
-console.log('Built dist/daemon.mjs and dist/web.mjs');
+console.log('Built dist/daemon.mjs');

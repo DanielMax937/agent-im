@@ -3,9 +3,10 @@
 ## Target directory layout
 
 - `src/main.ts`: keep the original daemon entrypoint for CLI/bridge compatibility.
-- `src/web.ts`: new Express entrypoint for the multi-tenant web platform.
+- `src/app/`: Next.js app router entrypoint for the multi-tenant web platform.
+- `src/platform/container.ts`: shared Next.js container bootstrap for stores, workflow services, and runtime instances.
 - `src/runtime-provider.ts`: shared Claude/Codex/Cursor runtime resolver.
-- `src/platform/app.ts`: HTTP API surface for sprint, task, approval, and webhook workflows.
+- `src/platform/app.ts`: native HTTP API surface for sprint, task, approval, and webhook workflows, shared by Next.js and tests.
 - `src/platform/json-platform-store.ts`: JSON persistence for `Project`, `Sprint`, `TaskSession`, `AgentInstance`, isolated task queues, and approval records.
 - `src/platform/jira-adapter.ts`: Jira comment polling and comment write-back adapter.
 - `src/platform/instance-manager.ts`: singleton manager that creates, starts, stops, and reconciles runtime instances.

@@ -1,6 +1,7 @@
-import express from 'express';
+import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 
 import * as bridgeManager from '../lib/bridge/bridge-manager.js';
+import { getLogger } from '../logger.js';
 import type {
   PendingApprovalRecord,
   Project,
@@ -52,12 +53,17 @@ export interface CreatePlatformAppOptions {
   instanceManager: InstanceManagerApi;
 }
 
+export interface PlatformApp {
+  handle(request: Request): Promise<Response>;
+  listen(port: number, callback?: () => void): Server;
+}
+
 const DIRECTORY_STRUCTURE_PLAN = {
   src: {
     'main.ts': 'legacy daemon entrypoint for CLI bridge mode',
-    'web.ts': 'Express web entrypoint for the multi-tenant platform',
+    'app': 'Next.js app router entrypoint for the web platform',
     platform: {
-      'app.ts': 'HTTP API routes',
+      'app.ts': 'native HTTP platform router shared by Next.js and tests',
       'json-platform-store.ts': 'JSON persistence for projects, sprints, tasks, instances, approvals, and queues',
       'jira-adapter.ts': 'Jira comment transport adapter',
       'instance-manager.ts': 'singleton runtime registry and task runners',
@@ -68,206 +74,324 @@ const DIRECTORY_STRUCTURE_PLAN = {
   },
 };
 
-export function createPlatformApp(options: CreatePlatformAppOptions) {
-  const app = express();
-  app.use(express.json({ limit: '1mb' }));
+function jsonResponse(body: unknown, status = 200): Response {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: {
+      'content-type': 'application/json',
+    },
+  });
+}
 
-  function sendNotFound(
-    response: express.Response,
-    resource: string,
-    id: string,
-  ): void {
-    response.status(404).json({ error: `${resource} not found: ${id}` });
+function notFoundResponse(resource: string, id: string): Response {
+  return jsonResponse({ error: `${resource} not found: ${id}` }, 404);
+}
+
+async function readRequestBody<T>(request: Request): Promise<T> {
+  const text = await request.text();
+  if (!text) return {} as T;
+  return JSON.parse(text) as T;
+}
+
+function matchPath(pattern: string, pathname: string): Record<string, string> | null {
+  const patternParts = pattern.split('/').filter(Boolean);
+  const pathnameParts = pathname.split('/').filter(Boolean);
+  if (patternParts.length !== pathnameParts.length) {
+    return null;
   }
 
-  app.get('/health', (_request, response) => {
-    response.json({
-      ok: true,
-      bridge: bridgeManager.getStatus(),
-      runningInstances: options.instanceManager.listRunningInstanceIds(),
+  const params: Record<string, string> = {};
+  for (let index = 0; index < patternParts.length; index += 1) {
+    const patternPart = patternParts[index];
+    const pathnamePart = pathnameParts[index];
+    if (patternPart.startsWith(':')) {
+      params[patternPart.slice(1)] = decodeURIComponent(pathnamePart);
+      continue;
+    }
+    if (patternPart !== pathnamePart) {
+      return null;
+    }
+  }
+  return params;
+}
+
+async function toWebRequest(request: IncomingMessage): Promise<Request> {
+  const host = request.headers.host || '127.0.0.1';
+  const url = new URL(request.url || '/', `http://${host}`);
+  const headers = new Headers();
+
+  for (const [key, value] of Object.entries(request.headers)) {
+    if (value === undefined) continue;
+    if (Array.isArray(value)) {
+      for (const entry of value) headers.append(key, entry);
+      continue;
+    }
+    headers.set(key, value);
+  }
+
+  const body =
+    request.method === 'GET' || request.method === 'HEAD'
+      ? undefined
+      : Buffer.concat(
+          await new Promise<Buffer[]>((resolve, reject) => {
+            const chunks: Buffer[] = [];
+            request.on('data', (chunk) => chunks.push(Buffer.from(chunk)));
+            request.on('end', () => resolve(chunks));
+            request.on('error', reject);
+          }),
+        );
+
+  return new Request(url, {
+    method: request.method,
+    headers,
+    body,
+  });
+}
+
+async function writeNodeResponse(response: ServerResponse, result: Response): Promise<void> {
+  response.statusCode = result.status;
+  result.headers.forEach((value, key) => {
+    response.setHeader(key, value);
+  });
+  const body = Buffer.from(await result.arrayBuffer());
+  response.end(body);
+}
+
+export function createPlatformApp(options: CreatePlatformAppOptions): PlatformApp {
+  const logger = getLogger().child({ scope: 'platform-app' });
+
+  async function handle(request: Request): Promise<Response> {
+    const url = new URL(request.url);
+    const { pathname, searchParams } = url;
+    const requestLogger = logger.child({
+      method: request.method,
+      pathname,
     });
-  });
 
-  app.get('/api/structure', (_request, response) => {
-    response.json(DIRECTORY_STRUCTURE_PLAN);
-  });
+    try {
+      if (request.method === 'GET' && pathname === '/health') {
+        return jsonResponse({
+          ok: true,
+          bridge: bridgeManager.getStatus(),
+          runningInstances: options.instanceManager.listRunningInstanceIds(),
+        });
+      }
 
-  app.get('/api/projects', (_request, response) => {
-    response.json(options.store.listProjects());
-  });
+      if (request.method === 'GET' && pathname === '/api/structure') {
+        return jsonResponse(DIRECTORY_STRUCTURE_PLAN);
+      }
 
-  app.get('/api/projects/:projectId', (request, response) => {
-    const project = options.store.getProject(request.params.projectId);
-    if (!project) {
-      sendNotFound(response, 'Project', request.params.projectId);
-      return;
+      if (request.method === 'GET' && pathname === '/api/projects') {
+        return jsonResponse(options.store.listProjects());
+      }
+
+      const projectParams = matchPath('/api/projects/:projectId', pathname);
+      if (request.method === 'GET' && projectParams) {
+        const project = options.store.getProject(projectParams.projectId);
+        return project
+          ? jsonResponse(project)
+          : notFoundResponse('Project', projectParams.projectId);
+      }
+
+      if (request.method === 'GET' && pathname === '/api/sprints') {
+        return jsonResponse(options.store.listSprints(searchParams.get('projectId') ?? undefined));
+      }
+
+      const sprintParams = matchPath('/api/sprints/:sprintId', pathname);
+      if (request.method === 'GET' && sprintParams) {
+        const sprint = options.store.getSprint(sprintParams.sprintId);
+        return sprint
+          ? jsonResponse(sprint)
+          : notFoundResponse('Sprint', sprintParams.sprintId);
+      }
+
+      if (request.method === 'GET' && pathname === '/api/tasks') {
+        return jsonResponse(options.store.listTaskSessions());
+      }
+
+      const taskParams = matchPath('/api/tasks/:taskSessionId', pathname);
+      if (request.method === 'GET' && taskParams) {
+        const taskSession = options.store.getTaskSession(taskParams.taskSessionId);
+        return taskSession
+          ? jsonResponse(taskSession)
+          : notFoundResponse('Task session', taskParams.taskSessionId);
+      }
+
+      if (request.method === 'GET' && pathname === '/api/instances') {
+        return jsonResponse(options.store.listAgentInstances());
+      }
+
+      const instanceParams = matchPath('/api/instances/:instanceId', pathname);
+      if (request.method === 'GET' && instanceParams) {
+        const instance = options.store.getAgentInstance(instanceParams.instanceId);
+        return instance
+          ? jsonResponse(instance)
+          : notFoundResponse('Agent instance', instanceParams.instanceId);
+      }
+
+      if (request.method === 'GET' && pathname === '/api/approvals') {
+        return jsonResponse(
+          options.store.listPendingApprovals(searchParams.get('taskSessionId') ?? undefined),
+        );
+      }
+
+      const approvalParams = matchPath('/api/approvals/:approvalId', pathname);
+      if (request.method === 'GET' && approvalParams) {
+        const approval = options.store.getPendingApproval(approvalParams.approvalId);
+        return approval
+          ? jsonResponse(approval)
+          : notFoundResponse('Approval', approvalParams.approvalId);
+      }
+
+      if (request.method === 'POST' && pathname === '/api/projects') {
+        return jsonResponse(options.store.upsertProject(await readRequestBody<Project>(request)), 201);
+      }
+
+      if (request.method === 'POST' && pathname === '/api/workflows/sprints/start') {
+        return jsonResponse(
+          await options.workflowService.startSprint(await readRequestBody<unknown>(request)),
+          201,
+        );
+      }
+
+      if (request.method === 'POST' && pathname === '/api/workflows/tasks/assign') {
+        return jsonResponse(
+          await options.workflowService.assignTask(await readRequestBody<unknown>(request)),
+          201,
+        );
+      }
+
+      const submitReviewParams = matchPath('/api/workflows/tasks/:taskSessionId/submit-review', pathname);
+      if (request.method === 'POST' && submitReviewParams) {
+        const payload = await readRequestBody<{ commitMessage: string; prTitle: string; prBody: string }>(request);
+        return jsonResponse(
+          await options.workflowService.submitTaskForReview({
+            taskSessionId: submitReviewParams.taskSessionId,
+            commitMessage: payload.commitMessage,
+            prTitle: payload.prTitle,
+            prBody: payload.prBody,
+          }),
+        );
+      }
+
+      const testingStartParams = matchPath('/api/workflows/tasks/:taskSessionId/start-testing', pathname);
+      if (request.method === 'POST' && testingStartParams) {
+        return jsonResponse(
+          await options.workflowService.startTesting(testingStartParams.taskSessionId),
+        );
+      }
+
+      const testingFailParams = matchPath('/api/workflows/tasks/:taskSessionId/testing/fail', pathname);
+      if (request.method === 'POST' && testingFailParams) {
+        const payload = await readRequestBody<{ summary: string; log: string }>(request);
+        return jsonResponse(
+          await options.workflowService.handleTestFailure({
+            taskSessionId: testingFailParams.taskSessionId,
+            summary: payload.summary,
+            log: payload.log,
+          }),
+        );
+      }
+
+      const closeTaskParams = matchPath('/api/workflows/tasks/:taskSessionId/close', pathname);
+      if (request.method === 'POST' && closeTaskParams) {
+        return jsonResponse(
+          await options.workflowService.closeTask(closeTaskParams.taskSessionId),
+        );
+      }
+
+      if (request.method === 'POST' && approvalParams) {
+        return jsonResponse({
+          ok: options.workflowService.resolveApproval(
+            approvalParams.approvalId,
+            await readRequestBody<unknown>(request),
+          ),
+        });
+      }
+
+      if (request.method === 'POST' && pathname === '/api/instances/reconcile') {
+        await options.instanceManager.reconcile();
+        return jsonResponse({
+          ok: true,
+          runningInstances: options.instanceManager.listRunningInstanceIds(),
+        });
+      }
+
+      const instanceStartParams = matchPath('/api/instances/:instanceId/start', pathname);
+      if (request.method === 'POST' && instanceStartParams) {
+        await options.instanceManager.startInstance(instanceStartParams.instanceId);
+        return jsonResponse({
+          ok: true,
+          instanceId: instanceStartParams.instanceId,
+          runningInstances: options.instanceManager.listRunningInstanceIds(),
+        });
+      }
+
+      const instanceStopParams = matchPath('/api/instances/:instanceId/stop', pathname);
+      if (request.method === 'POST' && instanceStopParams) {
+        await options.instanceManager.stopInstance(instanceStopParams.instanceId);
+        return jsonResponse({
+          ok: true,
+          instanceId: instanceStopParams.instanceId,
+          runningInstances: options.instanceManager.listRunningInstanceIds(),
+        });
+      }
+
+      if (request.method === 'POST' && pathname === '/api/webhooks/jira') {
+        return jsonResponse({
+          ok: true,
+          result: await options.workflowService.handleJiraWebhook(
+            await readRequestBody<unknown>(request),
+          ),
+        });
+      }
+
+      if (request.method === 'GET' && pathname === '/api/bridge/status') {
+        return jsonResponse(bridgeManager.getStatus());
+      }
+
+      const bridgeActionParams = matchPath('/api/bridge/:action', pathname);
+      if (request.method === 'POST' && bridgeActionParams) {
+        if (bridgeActionParams.action === 'start') {
+          await bridgeManager.start();
+          return jsonResponse(bridgeManager.getStatus());
+        }
+        if (bridgeActionParams.action === 'stop') {
+          await bridgeManager.stop();
+          return jsonResponse(bridgeManager.getStatus());
+        }
+        if (bridgeActionParams.action === 'auto-start') {
+          bridgeManager.tryAutoStart();
+          return jsonResponse(bridgeManager.getStatus());
+        }
+        return jsonResponse({ error: `Unknown bridge action: ${bridgeActionParams.action}` }, 404);
+      }
+
+      return jsonResponse({ error: `Route not found: ${request.method} ${pathname}` }, 404);
+    } catch (error) {
+      requestLogger.error({ error }, 'Platform request failed');
+      return jsonResponse(
+        { error: error instanceof Error ? error.message : String(error) },
+        500,
+      );
+    } finally {
+      requestLogger.info('Platform request completed');
     }
-    response.json(project);
-  });
+  }
 
-  app.get('/api/sprints', (request, response) => {
-    const projectId = typeof request.query.projectId === 'string' ? request.query.projectId : undefined;
-    response.json(options.store.listSprints(projectId));
-  });
+  let server: Server | null = null;
 
-  app.get('/api/sprints/:sprintId', (request, response) => {
-    const sprint = options.store.getSprint(request.params.sprintId);
-    if (!sprint) {
-      sendNotFound(response, 'Sprint', request.params.sprintId);
-      return;
-    }
-    response.json(sprint);
-  });
-
-  app.get('/api/tasks', (_request, response) => {
-    response.json(options.store.listTaskSessions());
-  });
-
-  app.get('/api/tasks/:taskSessionId', (request, response) => {
-    const taskSession = options.store.getTaskSession(request.params.taskSessionId);
-    if (!taskSession) {
-      sendNotFound(response, 'Task session', request.params.taskSessionId);
-      return;
-    }
-    response.json(taskSession);
-  });
-
-  app.get('/api/instances', (_request, response) => {
-    response.json(options.store.listAgentInstances());
-  });
-
-  app.get('/api/instances/:instanceId', (request, response) => {
-    const instance = options.store.getAgentInstance(request.params.instanceId);
-    if (!instance) {
-      sendNotFound(response, 'Agent instance', request.params.instanceId);
-      return;
-    }
-    response.json(instance);
-  });
-
-  app.get('/api/approvals', (request, response) => {
-    const taskSessionId = typeof request.query.taskSessionId === 'string' ? request.query.taskSessionId : undefined;
-    response.json(options.store.listPendingApprovals(taskSessionId));
-  });
-
-  app.get('/api/approvals/:approvalId', (request, response) => {
-    const approval = options.store.getPendingApproval(request.params.approvalId);
-    if (!approval) {
-      sendNotFound(response, 'Approval', request.params.approvalId);
-      return;
-    }
-    response.json(approval);
-  });
-
-  app.post('/api/projects', (request, response) => {
-    const project = options.store.upsertProject(request.body);
-    response.status(201).json(project);
-  });
-
-  app.post('/api/workflows/sprints/start', async (request, response) => {
-    const sprint = await options.workflowService.startSprint(request.body);
-    response.status(201).json(sprint);
-  });
-
-  app.post('/api/workflows/tasks/assign', async (request, response) => {
-    const taskSession = await options.workflowService.assignTask(request.body);
-    response.status(201).json(taskSession);
-  });
-
-  app.post('/api/workflows/tasks/:taskSessionId/submit-review', async (request, response) => {
-    const result = await options.workflowService.submitTaskForReview({
-      taskSessionId: request.params.taskSessionId,
-      commitMessage: request.body.commitMessage,
-      prTitle: request.body.prTitle,
-      prBody: request.body.prBody,
-    });
-    response.json(result);
-  });
-
-  app.post('/api/workflows/tasks/:taskSessionId/start-testing', async (request, response) => {
-    const taskSession = await options.workflowService.startTesting(request.params.taskSessionId);
-    response.json(taskSession);
-  });
-
-  app.post('/api/workflows/tasks/:taskSessionId/testing/fail', async (request, response) => {
-    const taskSession = await options.workflowService.handleTestFailure({
-      taskSessionId: request.params.taskSessionId,
-      summary: request.body.summary,
-      log: request.body.log,
-    });
-    response.json(taskSession);
-  });
-
-  app.post('/api/workflows/tasks/:taskSessionId/close', async (request, response) => {
-    const taskSession = await options.workflowService.closeTask(request.params.taskSessionId);
-    response.json(taskSession);
-  });
-
-  app.post('/api/approvals/:approvalId', async (request, response) => {
-    const resolved = options.workflowService.resolveApproval(request.params.approvalId, request.body);
-    response.json({ ok: resolved });
-  });
-
-  app.post('/api/instances/reconcile', async (_request, response) => {
-    await options.instanceManager.reconcile();
-    response.json({
-      ok: true,
-      runningInstances: options.instanceManager.listRunningInstanceIds(),
-    });
-  });
-
-  app.post('/api/instances/:instanceId/start', async (request, response) => {
-    await options.instanceManager.startInstance(request.params.instanceId);
-    response.json({
-      ok: true,
-      instanceId: request.params.instanceId,
-      runningInstances: options.instanceManager.listRunningInstanceIds(),
-    });
-  });
-
-  app.post('/api/instances/:instanceId/stop', async (request, response) => {
-    await options.instanceManager.stopInstance(request.params.instanceId);
-    response.json({
-      ok: true,
-      instanceId: request.params.instanceId,
-      runningInstances: options.instanceManager.listRunningInstanceIds(),
-    });
-  });
-
-  app.post('/api/webhooks/jira', async (request, response) => {
-    const result = await options.workflowService.handleJiraWebhook(request.body);
-    response.json({ ok: true, result });
-  });
-
-  app.get('/api/bridge/status', (_request, response) => {
-    response.json(bridgeManager.getStatus());
-  });
-
-  app.post('/api/bridge/:action', async (request, response) => {
-    const action = request.params.action;
-    if (action === 'start') {
-      await bridgeManager.start();
-      response.json(bridgeManager.getStatus());
-      return;
-    }
-    if (action === 'stop') {
-      await bridgeManager.stop();
-      response.json(bridgeManager.getStatus());
-      return;
-    }
-    if (action === 'auto-start') {
-      bridgeManager.tryAutoStart();
-      response.json(bridgeManager.getStatus());
-      return;
-    }
-    response.status(404).json({ error: `Unknown bridge action: ${action}` });
-  });
-
-  app.use((error: unknown, _request: express.Request, response: express.Response, _next: express.NextFunction) => {
-    response.status(500).json({
-      error: error instanceof Error ? error.message : String(error),
-    });
-  });
-
-  return app;
+  return {
+    handle,
+    listen(port: number, callback?: () => void): Server {
+      if (!server) {
+        server = createServer(async (request, response) => {
+          const webRequest = await toWebRequest(request);
+          const result = await handle(webRequest);
+          await writeNodeResponse(response, result);
+        });
+      }
+      return server.listen(port, callback);
+    },
+  };
 }
