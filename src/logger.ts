@@ -101,14 +101,39 @@ export function setupLogger(): Logger {
   const logger = getLogger();
   if (consolePatched) return logger;
 
+  const logWithLevel = (level: 'info' | 'warn' | 'error', args: unknown[]) => {
+    if (args.length === 0) {
+      logger[level]({});
+      return;
+    }
+
+    const [first, ...rest] = args;
+    if (typeof first === 'string') {
+      if (rest.length === 0) {
+        logger[level](first);
+        return;
+      }
+      logger[level]({ args: rest }, first);
+      return;
+    }
+
+    if (rest.length > 0 && typeof rest[0] === 'string') {
+      const [message, ...messageArgs] = rest;
+      logger[level](first, message, ...messageArgs);
+      return;
+    }
+
+    logger[level]({ payload: first, args: rest });
+  };
+
   console.log = (...args: unknown[]) => {
-    logger.info(...(args as [unknown, ...unknown[]]));
+    logWithLevel('info', args);
   };
   console.warn = (...args: unknown[]) => {
-    logger.warn(...(args as [unknown, ...unknown[]]));
+    logWithLevel('warn', args);
   };
   console.error = (...args: unknown[]) => {
-    logger.error(...(args as [unknown, ...unknown[]]));
+    logWithLevel('error', args);
   };
   consolePatched = true;
   return logger;
