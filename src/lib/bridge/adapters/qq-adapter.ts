@@ -34,8 +34,6 @@ import {
 } from './qq-api';
 
 export class QQAdapter extends BaseChannelAdapter {
-  readonly channelType: ChannelType = 'qq';
-
   private _running = false;
   private queue: InboundMessage[] = [];
   private waiters: Array<(msg: InboundMessage | null) => void> = [];
@@ -47,6 +45,10 @@ export class QQAdapter extends BaseChannelAdapter {
   private reconnectAttempts = 0;
   private maxReconnectAttempts = 10;
   private shouldReconnect = false;
+
+  constructor(instanceId = 'default') {
+    super('qq', instanceId);
+  }
 
   // ── Lifecycle ───────────────────────────────────────────────
 
@@ -549,4 +551,4 @@ interface QQAttachment {
 }
 
 // Self-register so bridge-manager can create QQAdapter via the registry.
-registerAdapterFactory('qq', () => new QQAdapter());
+registerAdapterFactory('qq', (instanceId: string) => new QQAdapter(instanceId));

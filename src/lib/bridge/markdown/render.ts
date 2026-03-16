@@ -34,7 +34,7 @@ const STYLE_RANK = new Map<MarkdownStyle, number>(
 );
 
 function sortStyleSpans(spans: MarkdownStyleSpan[]): MarkdownStyleSpan[] {
-  return [...spans].toSorted((a: MarkdownStyleSpan, b: MarkdownStyleSpan) => {
+  return [...spans].sort((a: MarkdownStyleSpan, b: MarkdownStyleSpan) => {
     if (a.start !== b.start) {
       return a.start - b.start;
     }
@@ -102,7 +102,7 @@ export function renderMarkdownWithMarkers(ir: MarkdownIR, options: RenderOptions
     }
   }
 
-  const points = [...boundaries].toSorted((a: number, b: number) => a - b);
+  const points = [...boundaries].sort((a: number, b: number) => a - b);
   const stack: { close: string; end: number }[] = [];
   type OpeningItem =
     | { end: number; open: string; close: string; kind: 'link'; index: number }

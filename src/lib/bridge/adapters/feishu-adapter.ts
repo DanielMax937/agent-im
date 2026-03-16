@@ -80,8 +80,6 @@ const MIME_BY_TYPE: Record<string, string> = {
 };
 
 export class FeishuAdapter extends BaseChannelAdapter {
-  readonly channelType: ChannelType = 'feishu';
-
   private running = false;
   private queue: InboundMessage[] = [];
   private waiters: Array<(msg: InboundMessage | null) => void> = [];
@@ -95,6 +93,10 @@ export class FeishuAdapter extends BaseChannelAdapter {
   private lastIncomingMessageId = new Map<string, string>();
   /** Track active typing reaction IDs per chat for cleanup. */
   private typingReactions = new Map<string, string>();
+
+  constructor(instanceId = 'default') {
+    super('feishu', instanceId);
+  }
 
   // ── Lifecycle ───────────────────────────────────────────────
 
@@ -952,4 +954,4 @@ export class FeishuAdapter extends BaseChannelAdapter {
 }
 
 // Self-register so bridge-manager can create FeishuAdapter via the registry.
-registerAdapterFactory('feishu', () => new FeishuAdapter());
+registerAdapterFactory('feishu', (instanceId: string) => new FeishuAdapter(instanceId));

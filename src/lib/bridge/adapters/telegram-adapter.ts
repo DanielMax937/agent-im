@@ -71,8 +71,6 @@ interface MediaGroupBufferEntry {
 const MEDIA_GROUP_DEBOUNCE_MS = 500;
 
 export class TelegramAdapter extends BaseChannelAdapter {
-  readonly channelType: ChannelType = 'telegram';
-
   private running = false;
   private abortController: AbortController | null = null;
   private queue: InboundMessage[] = [];
@@ -88,6 +86,10 @@ export class TelegramAdapter extends BaseChannelAdapter {
   private recentUpdateIds = new Set<number>();
   /** Stable bot user ID from Telegram's getMe, used for offset key identity. */
   private botUserId: string | null = null;
+
+  constructor(instanceId = 'default') {
+    super('telegram', instanceId);
+  }
 
   get botToken(): string {
     return getBridgeContext().store.getSetting('telegram_bot_token') || '';
@@ -862,4 +864,4 @@ export class TelegramAdapter extends BaseChannelAdapter {
 }
 
 // Self-register so bridge-manager can create TelegramAdapter via the registry.
-registerAdapterFactory('telegram', () => new TelegramAdapter());
+registerAdapterFactory('telegram', (instanceId: string) => new TelegramAdapter(instanceId));

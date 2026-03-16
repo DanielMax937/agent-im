@@ -53,8 +53,6 @@ async function loadDiscordJs() {
 }
 
 export class DiscordAdapter extends BaseChannelAdapter {
-  readonly channelType: ChannelType = 'discord';
-
   private running = false;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   private client: any = null;
@@ -62,6 +60,10 @@ export class DiscordAdapter extends BaseChannelAdapter {
   private waiters: Array<(msg: InboundMessage | null) => void> = [];
   private seenMessageIds = new Set<string>();
   private botUserId: string | null = null;
+
+  constructor(instanceId = 'default') {
+    super('discord', instanceId);
+  }
   private typingIntervals = new Map<string, ReturnType<typeof setInterval>>();
   /** Temporary storage for Interaction objects (for answerCallback). */
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -659,4 +661,4 @@ export class DiscordAdapter extends BaseChannelAdapter {
 }
 
 // Self-register so bridge-manager can create DiscordAdapter via the registry.
-registerAdapterFactory('discord', () => new DiscordAdapter());
+registerAdapterFactory('discord', (instanceId: string) => new DiscordAdapter(instanceId));
