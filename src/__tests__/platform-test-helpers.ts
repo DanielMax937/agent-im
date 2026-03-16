@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import type { Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import path from 'node:path';
 
@@ -187,12 +188,16 @@ export function createApproval(
   });
 }
 
-export async function startHttpApp(app: { listen: (...args: unknown[]) => unknown }): Promise<{
+export interface ListenableApp {
+  listen(port: number, callback?: () => void): Server;
+}
+
+export async function startHttpApp(app: ListenableApp): Promise<{
   baseUrl: string;
   close: () => Promise<void>;
 }> {
-  const server = await new Promise<import('node:http').Server>((resolve) => {
-    const httpServer = app.listen(0, () => resolve(httpServer as import('node:http').Server));
+  const server = await new Promise<Server>((resolve) => {
+    const httpServer = app.listen(0, () => resolve(httpServer));
   });
   const address = server.address() as AddressInfo;
   return {
