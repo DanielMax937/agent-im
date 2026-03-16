@@ -150,7 +150,7 @@ export function parseCliMajorVersion(versionOutput: string): number | undefined 
  * Run `claude --version` at a given path and return the version string.
  * Returns undefined on failure.
  */
-function getCliVersion(cliPath: string, env?: Record<string, string>): string | undefined {
+function getCliVersion(cliPath: string, env?: NodeJS.ProcessEnv): string | undefined {
   try {
     return execSync(`"${cliPath}" --version`, {
       encoding: 'utf-8',
@@ -173,7 +173,7 @@ const REQUIRED_CLI_FLAGS = ['output-format', 'input-format', 'permission-mode', 
  * Check `claude --help` for required flags.
  * Returns the list of missing flags (empty = all present).
  */
-function checkRequiredFlags(cliPath: string, env?: Record<string, string>): string[] {
+function checkRequiredFlags(cliPath: string, env?: NodeJS.ProcessEnv): string[] {
   let helpText: string;
   try {
     helpText = execSync(`"${cliPath}" --help`, {
@@ -194,7 +194,7 @@ function checkRequiredFlags(cliPath: string, env?: Record<string, string>): stri
  * with the required flags for SDK integration.
  * Returns { compatible, version, ... } or undefined if the CLI cannot run at all.
  */
-export function checkCliCompatibility(cliPath: string, env?: Record<string, string>): {
+export function checkCliCompatibility(cliPath: string, env?: NodeJS.ProcessEnv): {
   compatible: boolean;
   version: string;
   major: number | undefined;
