@@ -74,7 +74,12 @@ function createLogger(): Logger {
       },
       hooks: {
         logMethod(args, method) {
-          method.apply(this, args.map((arg) => maskValue(arg)));
+          const maskedArgs = args.map((arg) => maskValue(arg));
+          if (maskedArgs.length === 0) {
+            method.apply(this, [{}] as Parameters<typeof method>);
+            return;
+          }
+          method.apply(this, maskedArgs as Parameters<typeof method>);
         },
       },
     },
