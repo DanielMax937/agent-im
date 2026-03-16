@@ -93,9 +93,9 @@ export function isNonClaudeModel(model?: string): boolean {
  *               already runs in a clean launchd/setsid environment)
  *   "strict"  — only whitelist + CTI_* + ANTHROPIC_* from config.env
  */
-export function buildSubprocessEnv(): Record<string, string> {
+export function buildSubprocessEnv(): NodeJS.ProcessEnv {
   const mode = process.env.CTI_ENV_ISOLATION || 'inherit';
-  const out: Record<string, string> = {};
+  const out: NodeJS.ProcessEnv = {};
 
   if (mode === 'inherit') {
     // Pass everything except always-stripped vars
