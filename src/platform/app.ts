@@ -1,14 +1,55 @@
 import express from 'express';
 
 import * as bridgeManager from '../lib/bridge/bridge-manager.js';
-import { JsonPlatformStore } from './json-platform-store.js';
-import { InstanceManager } from './instance-manager.js';
-import { WorkflowService } from './workflow-service.js';
+import type {
+  PendingApprovalRecord,
+  Project,
+  Sprint,
+  TaskSession,
+  AgentInstanceRecord,
+} from './types.js';
+
+export interface PlatformStoreApi {
+  listProjects(): Project[];
+  getProject(projectId: string): Project | null;
+  upsertProject(project: Project): Project;
+  listSprints(projectId?: string): Sprint[];
+  getSprint(sprintId: string): Sprint | null;
+  listTaskSessions(projectId?: string): TaskSession[];
+  getTaskSession(taskSessionId: string): TaskSession | null;
+  listAgentInstances(taskSessionId?: string): AgentInstanceRecord[];
+  getAgentInstance(instanceId: string): AgentInstanceRecord | null;
+  listPendingApprovals(taskSessionId?: string): PendingApprovalRecord[];
+  getPendingApproval(approvalId: string): PendingApprovalRecord | null;
+}
+
+export interface WorkflowServiceApi {
+  startSprint(input: unknown): Promise<Sprint>;
+  assignTask(input: unknown): Promise<TaskSession>;
+  submitTaskForReview(input: {
+    taskSessionId: string;
+    commitMessage: string;
+    prTitle: string;
+    prBody: string;
+  }): Promise<unknown>;
+  startTesting(taskSessionId: string): Promise<TaskSession>;
+  handleTestFailure(input: { taskSessionId: string; summary: string; log: string }): Promise<TaskSession>;
+  closeTask(taskSessionId: string): Promise<TaskSession>;
+  resolveApproval(approvalId: string, input: unknown): boolean;
+  handleJiraWebhook(payload: unknown): Promise<unknown>;
+}
+
+export interface InstanceManagerApi {
+  listRunningInstanceIds(): string[];
+  reconcile(): Promise<void>;
+  startInstance(instanceId: string): Promise<void>;
+  stopInstance(instanceId: string): Promise<void>;
+}
 
 export interface CreatePlatformAppOptions {
-  store: JsonPlatformStore;
-  workflowService: WorkflowService;
-  instanceManager: InstanceManager;
+  store: PlatformStoreApi;
+  workflowService: WorkflowServiceApi;
+  instanceManager: InstanceManagerApi;
 }
 
 const DIRECTORY_STRUCTURE_PLAN = {
@@ -31,6 +72,14 @@ export function createPlatformApp(options: CreatePlatformAppOptions) {
   const app = express();
   app.use(express.json({ limit: '1mb' }));
 
+  function sendNotFound(
+    response: express.Response,
+    resource: string,
+    id: string,
+  ): void {
+    response.status(404).json({ error: `${resource} not found: ${id}` });
+  }
+
   app.get('/health', (_request, response) => {
     response.json({
       ok: true,
@@ -47,12 +96,67 @@ export function createPlatformApp(options: CreatePlatformAppOptions) {
     response.json(options.store.listProjects());
   });
 
+  app.get('/api/projects/:projectId', (request, response) => {
+    const project = options.store.getProject(request.params.projectId);
+    if (!project) {
+      sendNotFound(response, 'Project', request.params.projectId);
+      return;
+    }
+    response.json(project);
+  });
+
+  app.get('/api/sprints', (request, response) => {
+    const projectId = typeof request.query.projectId === 'string' ? request.query.projectId : undefined;
+    response.json(options.store.listSprints(projectId));
+  });
+
+  app.get('/api/sprints/:sprintId', (request, response) => {
+    const sprint = options.store.getSprint(request.params.sprintId);
+    if (!sprint) {
+      sendNotFound(response, 'Sprint', request.params.sprintId);
+      return;
+    }
+    response.json(sprint);
+  });
+
   app.get('/api/tasks', (_request, response) => {
     response.json(options.store.listTaskSessions());
   });
 
+  app.get('/api/tasks/:taskSessionId', (request, response) => {
+    const taskSession = options.store.getTaskSession(request.params.taskSessionId);
+    if (!taskSession) {
+      sendNotFound(response, 'Task session', request.params.taskSessionId);
+      return;
+    }
+    response.json(taskSession);
+  });
+
   app.get('/api/instances', (_request, response) => {
     response.json(options.store.listAgentInstances());
+  });
+
+  app.get('/api/instances/:instanceId', (request, response) => {
+    const instance = options.store.getAgentInstance(request.params.instanceId);
+    if (!instance) {
+      sendNotFound(response, 'Agent instance', request.params.instanceId);
+      return;
+    }
+    response.json(instance);
+  });
+
+  app.get('/api/approvals', (request, response) => {
+    const taskSessionId = typeof request.query.taskSessionId === 'string' ? request.query.taskSessionId : undefined;
+    response.json(options.store.listPendingApprovals(taskSessionId));
+  });
+
+  app.get('/api/approvals/:approvalId', (request, response) => {
+    const approval = options.store.getPendingApproval(request.params.approvalId);
+    if (!approval) {
+      sendNotFound(response, 'Approval', request.params.approvalId);
+      return;
+    }
+    response.json(approval);
   });
 
   app.post('/api/projects', (request, response) => {
@@ -104,9 +208,39 @@ export function createPlatformApp(options: CreatePlatformAppOptions) {
     response.json({ ok: resolved });
   });
 
+  app.post('/api/instances/reconcile', async (_request, response) => {
+    await options.instanceManager.reconcile();
+    response.json({
+      ok: true,
+      runningInstances: options.instanceManager.listRunningInstanceIds(),
+    });
+  });
+
+  app.post('/api/instances/:instanceId/start', async (request, response) => {
+    await options.instanceManager.startInstance(request.params.instanceId);
+    response.json({
+      ok: true,
+      instanceId: request.params.instanceId,
+      runningInstances: options.instanceManager.listRunningInstanceIds(),
+    });
+  });
+
+  app.post('/api/instances/:instanceId/stop', async (request, response) => {
+    await options.instanceManager.stopInstance(request.params.instanceId);
+    response.json({
+      ok: true,
+      instanceId: request.params.instanceId,
+      runningInstances: options.instanceManager.listRunningInstanceIds(),
+    });
+  });
+
   app.post('/api/webhooks/jira', async (request, response) => {
     const result = await options.workflowService.handleJiraWebhook(request.body);
     response.json({ ok: true, result });
+  });
+
+  app.get('/api/bridge/status', (_request, response) => {
+    response.json(bridgeManager.getStatus());
   });
 
   app.post('/api/bridge/:action', async (request, response) => {
