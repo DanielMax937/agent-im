@@ -95,7 +95,7 @@ export function isNonClaudeModel(model?: string): boolean {
  */
 export function buildSubprocessEnv(): NodeJS.ProcessEnv {
   const mode = process.env.CTI_ENV_ISOLATION || 'inherit';
-  const out: NodeJS.ProcessEnv = {};
+  const out = {} as NodeJS.ProcessEnv;
 
   if (mode === 'inherit') {
     // Pass everything except always-stripped vars
