@@ -96,7 +96,7 @@ class TaskAgentRunner implements ManagedRunner {
     this.running = false;
     await this.adapter?.stop();
     await this.loopPromise;
-    this.updateInstance({
+    this.updateInstanceIfPresent({
       status: 'stopped',
       stoppedAt: new Date().toISOString(),
     });
@@ -270,6 +270,15 @@ class TaskAgentRunner implements ManagedRunner {
 
   private updateInstance(partial: Partial<AgentInstanceRecord>): void {
     const existing = this.requireInstance();
+    this.store.upsertAgentInstance({
+      ...existing,
+      ...partial,
+    });
+  }
+
+  private updateInstanceIfPresent(partial: Partial<AgentInstanceRecord>): void {
+    const existing = this.store.getAgentInstance(this.instanceId);
+    if (!existing) return;
     this.store.upsertAgentInstance({
       ...existing,
       ...partial,
