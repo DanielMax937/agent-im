@@ -12,7 +12,7 @@ import { ProxyAgent, setGlobalDispatcher } from 'undici';
 import { initBridgeContext } from './lib/bridge/context';
 import * as bridgeManager from './lib/bridge/bridge-manager';
 // Side-effect import to trigger adapter self-registration
-import './lib/bridge/adapters/index.js';
+import './lib/bridge/adapters/index';
 
 import { loadConfig, configToSettings, CTI_HOME } from './config';
 import { JsonFileStore } from './store';

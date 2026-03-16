@@ -11,7 +11,7 @@ import type { BridgeStatus, InboundMessage, OutboundMessage, StreamingPreviewSta
 import { createAdapter, getRegisteredTypes } from './channel-adapter';
 import type { BaseChannelAdapter } from './channel-adapter';
 // Side-effect import: triggers self-registration of all adapter factories
-import './adapters/index.js';
+import './adapters/index';
 import * as router from './channel-router';
 import * as engine from './conversation-engine';
 import * as broker from './permission-broker';

@@ -2,7 +2,7 @@ import { ProxyAgent, setGlobalDispatcher } from 'undici';
 
 import { loadConfig, configToSettings } from '../config';
 import { initBridgeContext } from '../lib/bridge/context';
-import '../lib/bridge/adapters/index.js';
+import '../lib/bridge/adapters/index';
 import { getLogger, setupLogger } from '../logger';
 import { PendingPermissions } from '../permission-gateway';
 import { resolveProvider } from '../runtime-provider';
