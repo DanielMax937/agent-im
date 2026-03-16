@@ -3,12 +3,12 @@ import type { Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import path from 'node:path';
 
-import { CTI_HOME } from '../config.js';
-import { JsonPlatformStore } from '../platform/json-platform-store.js';
-import type { GitService } from '../platform/git-service.js';
-import type { InstanceManager } from '../platform/instance-manager.js';
-import type { PullRequestRef, ScmClient } from '../platform/scm-client.js';
-import type { AgentInstanceRecord, PendingApprovalRecord, Project, Sprint, TaskSession } from '../platform/types.js';
+import { CTI_HOME } from '../config';
+import { JsonPlatformStore } from '../platform/json-platform-store';
+import type { GitService } from '../platform/git-service';
+import type { InstanceManager } from '../platform/instance-manager';
+import type { PullRequestRef, ScmClient } from '../platform/scm-client';
+import type { AgentInstanceRecord, PendingApprovalRecord, Project, Sprint, TaskSession } from '../platform/types';
 
 export const PLATFORM_DIR = path.join(CTI_HOME, 'data', 'platform');
 

@@ -1,14 +1,14 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 
-import * as bridgeManager from '../lib/bridge/bridge-manager.js';
-import { getLogger } from '../logger.js';
+import * as bridgeManager from '../lib/bridge/bridge-manager';
+import { getLogger } from '../logger';
 import type {
   PendingApprovalRecord,
   Project,
   Sprint,
   TaskSession,
   AgentInstanceRecord,
-} from './types.js';
+} from './types';
 
 export interface PlatformStoreApi {
   listProjects(): Project[];

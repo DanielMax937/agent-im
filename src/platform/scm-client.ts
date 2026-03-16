@@ -1,4 +1,4 @@
-import type { Project } from './types.js';
+import type { Project } from './types';
 
 export interface PullRequestRef {
   url: string;

@@ -6,7 +6,7 @@
  * and message sending via the QQ Bot open-platform API.
  */
 
-import type { SendResult } from '../types.js';
+import type { SendResult } from '../types';
 
 // ── QQ Open-Platform endpoints ───────────────────────────────────
 

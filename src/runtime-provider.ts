@@ -1,7 +1,7 @@
-import type { Config } from './config.js';
-import type { LLMProvider } from './lib/bridge/host.js';
-import { SDKLLMProvider, preflightCheck, resolveClaudeCliPath } from './llm-provider.js';
-import { PendingPermissions } from './permission-gateway.js';
+import type { Config } from './config';
+import type { LLMProvider } from './lib/bridge/host';
+import { SDKLLMProvider, preflightCheck, resolveClaudeCliPath } from './llm-provider';
+import { PendingPermissions } from './permission-gateway';
 
 export interface ResolveProviderOptions {
   config: Pick<Config, 'runtime' | 'autoApprove'>;
@@ -20,13 +20,13 @@ export async function resolveProvider({
   const autoApprove = autoApproveOverride ?? config.autoApprove;
 
   if (runtime === 'codex') {
-    const { CodexProvider, DEFAULT_CODEX_CONFIG } = await import('./codex-provider.js');
+    const { CodexProvider, DEFAULT_CODEX_CONFIG } = await import('./codex-provider');
     const wrapperPath = process.env.CTI_CODEX_EXECUTABLE || DEFAULT_CODEX_CONFIG.wrapperPath;
     return new CodexProvider(pendingPermissions, { ...DEFAULT_CODEX_CONFIG, wrapperPath });
   }
 
   if (runtime === 'cursor') {
-    const { CursorProvider } = await import('./cursor-provider.js');
+    const { CursorProvider } = await import('./cursor-provider');
     return new CursorProvider();
   }
 
@@ -46,7 +46,7 @@ export async function resolveProvider({
       console.log('[claude-to-im] Auto: Claude CLI not found, falling back to Codex');
     }
 
-    const { CodexProvider, DEFAULT_CODEX_CONFIG } = await import('./codex-provider.js');
+    const { CodexProvider, DEFAULT_CODEX_CONFIG } = await import('./codex-provider');
     const wrapperPath = process.env.CTI_CODEX_EXECUTABLE || DEFAULT_CODEX_CONFIG.wrapperPath;
     return new CodexProvider(pendingPermissions, { ...DEFAULT_CODEX_CONFIG, wrapperPath });
   }

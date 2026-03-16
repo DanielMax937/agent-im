@@ -9,10 +9,10 @@ import fs from 'node:fs';
 import { execSync } from 'node:child_process';
 import { query } from '@anthropic-ai/claude-agent-sdk';
 import type { SDKMessage, PermissionResult } from '@anthropic-ai/claude-agent-sdk';
-import type { LLMProvider, StreamChatParams, FileAttachment } from './lib/bridge/host.js';
-import type { PendingPermissions } from './permission-gateway.js';
+import type { LLMProvider, StreamChatParams, FileAttachment } from './lib/bridge/host';
+import type { PendingPermissions } from './permission-gateway';
 
-import { sseEvent } from './sse-utils.js';
+import { sseEvent } from './sse-utils';
 
 // ── Environment isolation ──
 

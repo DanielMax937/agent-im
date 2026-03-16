@@ -2,17 +2,17 @@ import { beforeEach, describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 
-import { JsonPlatformStore } from '../platform/json-platform-store.js';
-import { InstanceManager } from '../platform/instance-manager.js';
-import type { JiraApiClient, JiraComment } from '../platform/jira-adapter.js';
-import { sseEvent } from '../sse-utils.js';
+import { JsonPlatformStore } from '../platform/json-platform-store';
+import { InstanceManager } from '../platform/instance-manager';
+import type { JiraApiClient, JiraComment } from '../platform/jira-adapter';
+import { sseEvent } from '../sse-utils';
 import {
   createProject,
   createSprint,
   createTaskSession,
   PLATFORM_DIR,
   waitFor,
-} from './platform-test-helpers.js';
+} from './platform-test-helpers';
 
 class FakeJiraClient implements JiraApiClient {
   public comments: JiraComment[] = [];

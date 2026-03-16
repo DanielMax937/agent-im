@@ -1,11 +1,11 @@
-import type { LLMProvider, PermissionResolution } from '../lib/bridge/host.js';
-import { PendingPermissions } from '../permission-gateway.js';
-import { resolveProvider } from '../runtime-provider.js';
-import { JsonPlatformStore } from './json-platform-store.js';
-import { JiraAdapter, type JiraApiClient } from './jira-adapter.js';
-import { buildRolePrompt } from './prompts.js';
-import { consumeAgentStream } from './stream-consumer.js';
-import type { AgentInstanceRecord, AgentRuntime, TaskConversationEntry } from './types.js';
+import type { LLMProvider, PermissionResolution } from '../lib/bridge/host';
+import { PendingPermissions } from '../permission-gateway';
+import { resolveProvider } from '../runtime-provider';
+import { JsonPlatformStore } from './json-platform-store';
+import { JiraAdapter, type JiraApiClient } from './jira-adapter';
+import { buildRolePrompt } from './prompts';
+import { consumeAgentStream } from './stream-consumer';
+import type { AgentInstanceRecord, AgentRuntime, TaskConversationEntry } from './types';
 
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));

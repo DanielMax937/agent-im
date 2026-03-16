@@ -1,4 +1,4 @@
-import type { SSEEvent } from '../lib/bridge/host.js';
+import type { SSEEvent } from '../lib/bridge/host';
 
 export interface PermissionRequestInfo {
   permissionRequestId: string;

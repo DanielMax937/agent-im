@@ -1,19 +1,19 @@
 import { ProxyAgent, setGlobalDispatcher } from 'undici';
 
-import { loadConfig, configToSettings } from '../config.js';
-import { initBridgeContext } from '../lib/bridge/context.js';
+import { loadConfig, configToSettings } from '../config';
+import { initBridgeContext } from '../lib/bridge/context';
 import '../lib/bridge/adapters/index.js';
-import { getLogger, setupLogger } from '../logger.js';
-import { PendingPermissions } from '../permission-gateway.js';
-import { resolveProvider } from '../runtime-provider.js';
-import { JsonFileStore } from '../store.js';
-import { createPlatformApp, type PlatformApp } from './app.js';
-import { CompensationService } from './compensation-service.js';
-import { JsonPlatformStore } from './json-platform-store.js';
-import { GitService } from './git-service.js';
-import { HttpScmClient } from './scm-client.js';
-import { InstanceManager } from './instance-manager.js';
-import { WorkflowService } from './workflow-service.js';
+import { getLogger, setupLogger } from '../logger';
+import { PendingPermissions } from '../permission-gateway';
+import { resolveProvider } from '../runtime-provider';
+import { JsonFileStore } from '../store';
+import { createPlatformApp, type PlatformApp } from './app';
+import { CompensationService } from './compensation-service';
+import { JsonPlatformStore } from './json-platform-store';
+import { GitService } from './git-service';
+import { HttpScmClient } from './scm-client';
+import { InstanceManager } from './instance-manager';
+import { WorkflowService } from './workflow-service';
 
 export interface PlatformContainer {
   app: PlatformApp;

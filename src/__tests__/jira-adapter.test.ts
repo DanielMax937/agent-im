@@ -1,7 +1,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { JiraAdapter, type JiraApiClient, type JiraComment } from '../platform/jira-adapter.js';
+import { JiraAdapter, type JiraApiClient, type JiraComment } from '../platform/jira-adapter';
 
 class FakeJiraClient implements JiraApiClient {
   public comments: JiraComment[] = [];

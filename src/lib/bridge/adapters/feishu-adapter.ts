@@ -22,17 +22,17 @@ import type {
   InboundMessage,
   OutboundMessage,
   SendResult,
-} from '../types.js';
-import type { FileAttachment } from '../types.js';
-import { BaseChannelAdapter, registerAdapterFactory } from '../channel-adapter.js';
-import { getBridgeContext } from '../context.js';
+} from '../types';
+import type { FileAttachment } from '../types';
+import { BaseChannelAdapter, registerAdapterFactory } from '../channel-adapter';
+import { getBridgeContext } from '../context';
 import {
   htmlToFeishuMarkdown,
   preprocessFeishuMarkdown,
   hasComplexMarkdown,
   buildCardContent,
   buildPostContent,
-} from '../markdown/feishu.js';
+} from '../markdown/feishu';
 
 /** Max number of message_ids to keep for dedup. */
 const DEDUP_MAX = 1000;
@@ -367,7 +367,7 @@ export class FeishuAdapter extends BaseChannelAdapter {
   private async sendPermissionCard(
     chatId: string,
     text: string,
-    inlineButtons: import('../types.js').InlineButton[][],
+    inlineButtons: import('../types').InlineButton[][],
   ): Promise<SendResult> {
     if (!this.restClient) {
       return { ok: false, error: 'Feishu client not initialized' };

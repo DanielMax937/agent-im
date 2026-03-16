@@ -2,9 +2,9 @@ import { beforeEach, describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 
-import { CompensationService } from '../platform/compensation-service.js';
-import { JsonPlatformStore } from '../platform/json-platform-store.js';
-import { WorkflowService } from '../platform/workflow-service.js';
+import { CompensationService } from '../platform/compensation-service';
+import { JsonPlatformStore } from '../platform/json-platform-store';
+import { WorkflowService } from '../platform/workflow-service';
 import {
   asGitService,
   asInstanceManager,
@@ -16,7 +16,7 @@ import {
   FakeInstanceManager,
   FakeScmClient,
   PLATFORM_DIR,
-} from './platform-test-helpers.js';
+} from './platform-test-helpers';
 
 describe('WorkflowService', () => {
   beforeEach(() => {

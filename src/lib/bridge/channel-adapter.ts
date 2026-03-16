@@ -14,7 +14,7 @@ import type {
   OutboundMessage,
   PreviewCapabilities,
   SendResult,
-} from './types.js';
+} from './types';
 
 export abstract class BaseChannelAdapter {
   /** Which channel type this adapter handles (includes instanceId for routing) */

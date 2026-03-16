@@ -1,10 +1,10 @@
 import crypto from 'node:crypto';
 
-import { CompensationService } from './compensation-service.js';
-import { createApprovalQueueKey, createTaskQueueKey, JsonPlatformStore } from './json-platform-store.js';
-import { GitService } from './git-service.js';
-import { InstanceManager } from './instance-manager.js';
-import type { PullRequestRef, ScmClient } from './scm-client.js';
+import { CompensationService } from './compensation-service';
+import { createApprovalQueueKey, createTaskQueueKey, JsonPlatformStore } from './json-platform-store';
+import { GitService } from './git-service';
+import { InstanceManager } from './instance-manager';
+import type { PullRequestRef, ScmClient } from './scm-client';
 import type {
   AgentInstanceRecord,
   AgentRole,
@@ -17,7 +17,7 @@ import type {
   TaskFailurePayload,
   TaskSession,
   TaskWorkflowState,
-} from './types.js';
+} from './types';
 
 const ALLOWED_TRANSITIONS: Record<TaskWorkflowState, TaskWorkflowState[]> = {
   todo: ['in_progress'],

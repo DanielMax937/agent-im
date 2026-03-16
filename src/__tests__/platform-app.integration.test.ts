@@ -2,10 +2,10 @@ import { beforeEach, describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 
-import { CompensationService } from '../platform/compensation-service.js';
-import { createPlatformApp } from '../platform/app.js';
-import { JsonPlatformStore } from '../platform/json-platform-store.js';
-import { WorkflowService } from '../platform/workflow-service.js';
+import { CompensationService } from '../platform/compensation-service';
+import { createPlatformApp } from '../platform/app';
+import { JsonPlatformStore } from '../platform/json-platform-store';
+import { WorkflowService } from '../platform/workflow-service';
 import {
   asGitService,
   asInstanceManager,
@@ -20,7 +20,7 @@ import {
   fetchJson,
   PLATFORM_DIR,
   startHttpApp,
-} from './platform-test-helpers.js';
+} from './platform-test-helpers';
 
 describe('Platform app integration', () => {
   beforeEach(() => {

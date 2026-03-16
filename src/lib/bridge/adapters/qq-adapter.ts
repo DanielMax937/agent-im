@@ -15,10 +15,10 @@ import type {
   InboundMessage,
   OutboundMessage,
   SendResult,
-} from '../types.js';
-import type { FileAttachment } from '../types.js';
-import { BaseChannelAdapter, registerAdapterFactory } from '../channel-adapter.js';
-import { getBridgeContext } from '../context.js';
+} from '../types';
+import type { FileAttachment } from '../types';
+import { BaseChannelAdapter, registerAdapterFactory } from '../channel-adapter';
+import { getBridgeContext } from '../context';
 import {
   getAccessToken,
   getGatewayUrl,
@@ -31,7 +31,7 @@ import {
   OP,
   INTENTS,
   type GatewayPayload,
-} from './qq-api.js';
+} from './qq-api';
 
 export class QQAdapter extends BaseChannelAdapter {
   readonly channelType: ChannelType = 'qq';

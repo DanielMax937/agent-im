@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import pino, { multistream, type Logger } from 'pino';
 
-import { CTI_HOME } from './config.js';
+import { CTI_HOME } from './config';
 
 const MASK_PATTERNS: RegExp[] = [
   /(?:token|secret|password|api_key)["']?\s*[:=]\s*["']?([^\s"',]+)/gi,

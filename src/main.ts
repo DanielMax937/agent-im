@@ -9,16 +9,16 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import { ProxyAgent, setGlobalDispatcher } from 'undici';
 
-import { initBridgeContext } from './lib/bridge/context.js';
-import * as bridgeManager from './lib/bridge/bridge-manager.js';
+import { initBridgeContext } from './lib/bridge/context';
+import * as bridgeManager from './lib/bridge/bridge-manager';
 // Side-effect import to trigger adapter self-registration
 import './lib/bridge/adapters/index.js';
 
-import { loadConfig, configToSettings, CTI_HOME } from './config.js';
-import { JsonFileStore } from './store.js';
-import { PendingPermissions } from './permission-gateway.js';
-import { setupLogger } from './logger.js';
-import { resolveProvider } from './runtime-provider.js';
+import { loadConfig, configToSettings, CTI_HOME } from './config';
+import { JsonFileStore } from './store';
+import { PendingPermissions } from './permission-gateway';
+import { setupLogger } from './logger';
+import { resolveProvider } from './runtime-provider';
 
 const RUNTIME_DIR = path.join(CTI_HOME, 'runtime');
 const STATUS_FILE = path.join(RUNTIME_DIR, 'status.json');

@@ -2,7 +2,7 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 
-import { CTI_HOME } from '../config.js';
+import { CTI_HOME } from '../config';
 import type {
   AgentInstanceRecord,
   PendingApprovalRecord,
@@ -11,7 +11,7 @@ import type {
   TaskConversationEntry,
   TaskQueueMessage,
   TaskSession,
-} from './types.js';
+} from './types';
 
 const PLATFORM_DIR = path.join(CTI_HOME, 'data', 'platform');
 

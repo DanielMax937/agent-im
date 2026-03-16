@@ -1,6 +1,6 @@
-import { JsonPlatformStore } from './json-platform-store.js';
-import type { TaskFailurePayload } from './types.js';
-import { InstanceManager } from './instance-manager.js';
+import { JsonPlatformStore } from './json-platform-store';
+import type { TaskFailurePayload } from './types';
+import { InstanceManager } from './instance-manager';
 
 export class CompensationService {
   constructor(

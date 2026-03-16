@@ -1,4 +1,4 @@
-import type { AgentRole, Project, Sprint, TaskSession } from './types.js';
+import type { AgentRole, Project, Sprint, TaskSession } from './types';
 
 export const ROLE_PROMPTS: Record<AgentRole, string> = {
   developer: [

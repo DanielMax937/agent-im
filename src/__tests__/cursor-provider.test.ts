@@ -57,14 +57,14 @@ function createMockSpawn(lines: Record<string, unknown>[], exitCode = 0, stderrT
 
 describe('CursorProvider', () => {
   it('is an LLMProvider (has streamChat method)', async () => {
-    const { CursorProvider } = await import('../cursor-provider.js');
+    const { CursorProvider } = await import('../cursor-provider');
     const provider = new CursorProvider();
     assert.equal(typeof provider.streamChat, 'function');
   });
 
   it('is NOT a CodexProvider subclass', async () => {
-    const { CursorProvider } = await import('../cursor-provider.js');
-    const { CodexProvider } = await import('../codex-provider.js');
+    const { CursorProvider } = await import('../cursor-provider');
+    const { CodexProvider } = await import('../codex-provider');
     const provider = new CursorProvider();
     assert.ok(!(provider instanceof CodexProvider));
   });
@@ -72,7 +72,7 @@ describe('CursorProvider', () => {
 
 describe('CursorProvider stream-json event mapping', () => {
   it('maps system.init to status SSE event with session_id', async () => {
-    const { CursorProvider } = await import('../cursor-provider.js');
+    const { CursorProvider } = await import('../cursor-provider');
     const mockSpawn = createMockSpawn([
       { type: 'system', subtype: 'init', session_id: 'cursor-abc', model: 'gpt-5' },
       { type: 'result', subtype: 'success', session_id: 'cursor-abc', usage: { inputTokens: 10, outputTokens: 5 } },
@@ -91,7 +91,7 @@ describe('CursorProvider stream-json event mapping', () => {
   });
 
   it('maps assistant message to text SSE event', async () => {
-    const { CursorProvider } = await import('../cursor-provider.js');
+    const { CursorProvider } = await import('../cursor-provider');
     const mockSpawn = createMockSpawn([
       { type: 'system', subtype: 'init', session_id: 'abc' },
       {
@@ -113,7 +113,7 @@ describe('CursorProvider stream-json event mapping', () => {
   });
 
   it('streams partial text deltas without duplication', async () => {
-    const { CursorProvider } = await import('../cursor-provider.js');
+    const { CursorProvider } = await import('../cursor-provider');
     const mockSpawn = createMockSpawn([
       { type: 'system', subtype: 'init', session_id: 'abc' },
       {
@@ -147,7 +147,7 @@ describe('CursorProvider stream-json event mapping', () => {
   });
 
   it('maps tool_call started/completed to tool_use/tool_result', async () => {
-    const { CursorProvider } = await import('../cursor-provider.js');
+    const { CursorProvider } = await import('../cursor-provider');
     const mockSpawn = createMockSpawn([
       { type: 'system', subtype: 'init', session_id: 'abc' },
       {
@@ -188,7 +188,7 @@ describe('CursorProvider stream-json event mapping', () => {
   });
 
   it('maps result event with usage to result SSE', async () => {
-    const { CursorProvider } = await import('../cursor-provider.js');
+    const { CursorProvider } = await import('../cursor-provider');
     const mockSpawn = createMockSpawn([
       { type: 'system', subtype: 'init', session_id: 'abc' },
       {
@@ -212,7 +212,7 @@ describe('CursorProvider stream-json event mapping', () => {
   });
 
   it('emits error on non-zero exit code with no session', async () => {
-    const { CursorProvider } = await import('../cursor-provider.js');
+    const { CursorProvider } = await import('../cursor-provider');
     const mockSpawn = createMockSpawn([], 1, 'agent: unknown flag --bad\n');
 
     const provider = new CursorProvider(mockSpawn);
@@ -226,7 +226,7 @@ describe('CursorProvider stream-json event mapping', () => {
   });
 
   it('does not error on non-zero exit code when session was established', async () => {
-    const { CursorProvider } = await import('../cursor-provider.js');
+    const { CursorProvider } = await import('../cursor-provider');
     const mockSpawn = createMockSpawn([
       { type: 'system', subtype: 'init', session_id: 'abc' },
       { type: 'assistant', message: { role: 'assistant', content: [{ type: 'text', text: 'Done' }] }, session_id: 'abc' },

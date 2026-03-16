@@ -1,7 +1,7 @@
 import crypto from 'node:crypto';
 
-import { BaseChannelAdapter } from '../lib/bridge/channel-adapter.js';
-import type { InboundMessage, OutboundMessage, SendResult } from '../lib/bridge/types.js';
+import { BaseChannelAdapter } from '../lib/bridge/channel-adapter';
+import type { InboundMessage, OutboundMessage, SendResult } from '../lib/bridge/types';
 
 export interface JiraComment {
   id: string;
