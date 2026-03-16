@@ -1,4 +1,4 @@
-import { getPlatformContainer, getPlatformLogger } from '../../../platform/container.js';
+import { getPlatformContainer, getPlatformLogger } from '../../../platform/container';
 
 async function handle(request: Request): Promise<Response> {
   const logger = getPlatformLogger().child({

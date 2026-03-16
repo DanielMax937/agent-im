@@ -1,4 +1,4 @@
-import { getPlatformContainer } from '../../platform/container.js';
+import { getPlatformContainer } from '../../platform/container';
 
 export async function GET(request: Request): Promise<Response> {
   const { app } = await getPlatformContainer();
