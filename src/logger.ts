@@ -1,6 +1,8 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import { CTI_HOME } from './config.js';
+import pino, { multistream, type Logger } from 'pino';
+
+import { CTI_HOME } from './config';
 
 const MASK_PATTERNS: RegExp[] = [
   /(?:token|secret|password|api_key)["']?\s*[:=]\s*["']?([^\s"',]+)/gi,
@@ -22,58 +24,117 @@ export function maskSecrets(text: string): string {
 
 const LOG_DIR = path.join(CTI_HOME, 'logs');
 const LOG_PATH = path.join(LOG_DIR, 'bridge.log');
-const MAX_LOG_SIZE = 10 * 1024 * 1024; // 10MB
-const MAX_ROTATED = 3;
 
-let logStream: fs.WriteStream | null = null;
+let loggerInstance: Logger | null = null;
+let consolePatched = false;
 
-function openLogStream(): fs.WriteStream {
-  return fs.createWriteStream(LOG_PATH, { flags: 'a' });
+function maskValue(value: unknown): unknown {
+  if (typeof value === 'string') {
+    return maskSecrets(value);
+  }
+
+  if (value instanceof Error) {
+    return {
+      name: value.name,
+      message: maskSecrets(value.message),
+      stack: value.stack ? maskSecrets(value.stack) : undefined,
+    };
+  }
+
+  if (Array.isArray(value)) {
+    return value.map((entry) => maskValue(entry));
+  }
+
+  if (!value || typeof value !== 'object') {
+    return value;
+  }
+
+  return Object.fromEntries(
+    Object.entries(value).map(([key, entry]) => [key, maskValue(entry)]),
+  );
 }
 
-function rotateIfNeeded(): void {
-  try {
-    const stat = fs.statSync(LOG_PATH);
-    if (stat.size < MAX_LOG_SIZE) return;
-  } catch {
-    return; // file doesn't exist yet
-  }
-
-  // Close current stream
-  if (logStream) {
-    logStream.end();
-    logStream = null;
-  }
-
-  // Rotate: delete .3, shift .2→.3, .1→.2, current→.1
-  const path3 = `${LOG_PATH}.${MAX_ROTATED}`;
-  if (fs.existsSync(path3)) fs.unlinkSync(path3);
-
-  for (let i = MAX_ROTATED - 1; i >= 1; i--) {
-    const src = `${LOG_PATH}.${i}`;
-    const dst = `${LOG_PATH}.${i + 1}`;
-    if (fs.existsSync(src)) fs.renameSync(src, dst);
-  }
-
-  fs.renameSync(LOG_PATH, `${LOG_PATH}.1`);
-  logStream = openLogStream();
-}
-
-export function setupLogger(): void {
+function createLogger(): Logger {
   fs.mkdirSync(LOG_DIR, { recursive: true });
-  logStream = openLogStream();
+  const fileDestination = pino.destination({
+    dest: LOG_PATH,
+    mkdir: true,
+    sync: false,
+  });
 
-  const write = (level: string, args: unknown[]) => {
-    const timestamp = new Date().toISOString();
-    const message = args.map((a) => (typeof a === 'string' ? a : JSON.stringify(a))).join(' ');
-    const formatted = `[${timestamp}] [${level}] ${message}`;
-    const masked = maskSecrets(formatted);
+  return pino(
+    {
+      level: process.env.CTI_LOG_LEVEL || 'info',
+      base: undefined,
+      timestamp: pino.stdTimeFunctions.isoTime,
+      formatters: {
+        log(object) {
+          return maskValue(object) as Record<string, unknown>;
+        },
+      },
+      hooks: {
+        logMethod(args, method) {
+          const maskedArgs = args.map((arg) => maskValue(arg));
+          if (maskedArgs.length === 0) {
+            method.apply(this, [{}] as Parameters<typeof method>);
+            return;
+          }
+          method.apply(this, maskedArgs as Parameters<typeof method>);
+        },
+      },
+    },
+    multistream([
+      { stream: process.stdout },
+      { stream: fileDestination },
+    ]),
+  );
+}
 
-    rotateIfNeeded();
-    logStream?.write(masked + '\n');
+export function getLogger(): Logger {
+  if (!loggerInstance) {
+    loggerInstance = createLogger();
+  }
+  return loggerInstance;
+}
+
+export function setupLogger(): Logger {
+  const logger = getLogger();
+  if (consolePatched) return logger;
+
+  const logWithLevel = (level: 'info' | 'warn' | 'error', args: unknown[]) => {
+    if (args.length === 0) {
+      logger[level]({});
+      return;
+    }
+
+    const [first, ...rest] = args;
+    if (typeof first === 'string') {
+      if (rest.length === 0) {
+        logger[level](first);
+        return;
+      }
+      logger[level]({ args: rest }, first);
+      return;
+    }
+
+    if (rest.length > 0 && typeof rest[0] === 'string') {
+      const [message, ...messageArgs] = rest;
+      logger[level](first, message, ...messageArgs);
+      return;
+    }
+
+    logger[level]({ payload: first, args: rest });
   };
 
-  console.log = (...args: unknown[]) => write('INFO', args);
-  console.error = (...args: unknown[]) => write('ERROR', args);
-  console.warn = (...args: unknown[]) => write('WARN', args);
+  console.log = (...args: unknown[]) => {
+    logWithLevel('info', args);
+  };
+  console.warn = (...args: unknown[]) => {
+    logWithLevel('warn', args);
+  };
+  console.error = (...args: unknown[]) => {
+    logWithLevel('error', args);
+  };
+  consolePatched = true;
+  return logger;
 }

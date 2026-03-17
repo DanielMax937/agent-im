@@ -6,7 +6,7 @@
  * interfaces to use the bridge.
  */
 
-import type { ChannelBinding, ChannelType } from './types.js';
+import type { ChannelBinding, ChannelType } from './types';
 
 // ── Bridge-local types (replacing @/types imports) ────────────
 

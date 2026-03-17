@@ -1,299 +1,323 @@
-# Claude-to-IM Skill
+# agent-im
 
-Bridge Claude Code / Codex to IM platforms — chat with AI coding agents from Telegram, Discord, Feishu/Lark, or QQ.
+Agentic Auto Kanban / DevOps platform built on top of the original IM bridge.
 
 [中文文档](README_CN.md)
 
-> **Want a desktop GUI instead?** Check out [CodePilot](https://github.com/op7418/CodePilot) — a full-featured desktop app with visual chat interface, session management, file tree preview, permission controls, and more. This skill was extracted from CodePilot's IM bridge module for users who prefer a lightweight, CLI-only setup.
-
 ---
 
-## How It Works
+## What it is now
 
-This skill runs a background daemon that connects your IM bots to Claude Code or Codex sessions. Messages from IM are forwarded to the AI coding agent, and responses (including tool use, permission requests, streaming previews) are sent back to your chat.
+`agent-im` is no longer only a chat bridge for Claude Code / Codex. It now acts as a lightweight **agentic auto kanban system**:
 
+- **Next.js web server** for APIs and UI entry pages
+- **Pino logging** with secret masking
+- **Sprint / Task / Session / Agent Instance** persistence
+- **Agentic workflow orchestration** for `Todo -> In Progress -> Review -> Testing -> Closed`
+- **Jira comment adapter** so issue comments can drive agent execution
+- **Runtime abstraction** for Claude, Codex, and Cursor
+- **Legacy IM bridge compatibility** for Telegram / Discord / Feishu / QQ
+
+The result is a hybrid platform:
+
+```text
+Jira / Web UI / IM channels
+        |
+        v
+Next.js platform server
+  - workflow APIs
+  - approval APIs
+  - sprint/task queries
+        |
+        v
+Platform services
+  - WorkflowService
+  - InstanceManager
+  - JiraAdapter
+  - GitService / SCM client
+        |
+        v
+Claude / Codex / Cursor runtimes
 ```
-You (Telegram/Discord/Feishu/QQ)
-  ↕ Bot API
-Background Daemon (Node.js)
-  ↕ Claude Agent SDK or Codex SDK (configurable via CTI_RUNTIME)
-Claude Code / Codex → reads/writes your codebase
+
+## Core concepts
+
+### Project
+
+Defines the Git repository, branch rules, and available agent profiles.
+
+Example fields:
+
+- `remoteUrl`
+- `localPath`
+- `baseBranch`
+- `sprintBranchPrefix`
+- `taskBranchPrefix`
+- `scmProvider`
+
+### Sprint
+
+Represents an iteration branch, usually:
+
+- `master -> feature/<sprint-name>`
+
+### Task Session
+
+Maps one Jira issue to one persistent task context:
+
+- workflow state
+- runtime
+- branch name
+- conversation history
+- approval queue
+- task queue
+
+### Agent Instance
+
+Represents one runtime + role bound to one task:
+
+- `runtime`: `claude` / `codex` / `cursor`
+- `role`: `developer` / `reviewer` / `tester`
+- `taskId`
+
+## Agentic auto kanban flow
+
+The platform implements an automated kanban pipeline:
+
+1. **Sprint start**
+   - API creates `feature/<sprint-name>` from `master`
+
+2. **Task assignment**
+   - API creates `dev/<task-id>` from the sprint branch
+   - a developer agent instance starts for the Jira issue
+
+3. **Review**
+   - after task submission, the platform commits, pushes, and creates a PR / MR
+   - a reviewer agent starts automatically
+
+4. **Testing**
+   - a tester agent runs after review
+
+5. **Compensation**
+   - if tests fail, logs are pushed back into the original developer queue
+   - workflow returns to `in_progress`
+
+6. **Close**
+   - all related instances are stopped after the task closes
+
+## Latest server architecture
+
+### Next.js app router
+
+The web surface now runs on **Next.js**:
+
+- homepage: `/`
+- health: `/health`
+- API catch-all: `/api/[[...slug]]`
+
+Important files:
+
+| File | Role |
+|---|---|
+| `src/app/page.tsx` | Landing page for the platform |
+| `src/app/health/route.ts` | Health endpoint |
+| `src/app/api/[[...slug]]/route.ts` | Next.js API entrypoint |
+| `src/platform/container.ts` | Lazy singleton bootstrap for stores, runtime, and workflow services |
+| `src/platform/app.ts` | Native `Request -> Response` platform router shared by Next.js and tests |
+
+### Pino logging
+
+The logger now uses **Pino** and writes structured logs to:
+
+```text
+~/.claude-to-im/logs/bridge.log
 ```
 
-## Features
+Properties:
 
-- **Five IM platforms** — Telegram, Discord, Feishu/Lark, QQ, Agent (self-conversational loop) — enable any combination
-- **Interactive setup** — guided wizard collects tokens with step-by-step instructions
-- **Permission control** — tool calls require explicit approval via inline buttons (Telegram/Discord) or text `/perm` commands (Feishu/QQ)
-- **Streaming preview** — see Claude's response as it types (Telegram & Discord)
-- **Session persistence** — conversations survive daemon restarts
-- **Secret protection** — tokens stored with `chmod 600`, auto-redacted in all logs
-- **Zero code required** — install the skill and run `/claude-to-im setup`, that's it
+- secret masking for tokens / bearer headers
+- `console.log / warn / error` forwarding into Pino
+- shared logger for daemon and Next.js server
 
-## Prerequisites
+## Platform APIs
 
-- **Node.js >= 20**
-- **Claude Code CLI** (for `CTI_RUNTIME=claude` or `auto`) — installed and authenticated (`claude` command available)
-- **Codex CLI** (for `CTI_RUNTIME=codex` or `auto`) — `npm install -g @openai/codex`. Auth: run `codex auth login`, or set `OPENAI_API_KEY` (optional, for API mode)
+### Query APIs
 
-## Installation
+- `GET /health`
+- `GET /api/structure`
+- `GET /api/projects`
+- `GET /api/projects/:projectId`
+- `GET /api/sprints`
+- `GET /api/sprints/:sprintId`
+- `GET /api/tasks`
+- `GET /api/tasks/:taskSessionId`
+- `GET /api/instances`
+- `GET /api/instances/:instanceId`
+- `GET /api/approvals`
+- `GET /api/approvals/:approvalId`
+- `GET /api/bridge/status`
 
-### npx skills (recommended)
+### Mutation APIs
+
+- `POST /api/projects`
+- `POST /api/workflows/sprints/start`
+- `POST /api/workflows/tasks/assign`
+- `POST /api/workflows/tasks/:taskSessionId/submit-review`
+- `POST /api/workflows/tasks/:taskSessionId/start-testing`
+- `POST /api/workflows/tasks/:taskSessionId/testing/fail`
+- `POST /api/workflows/tasks/:taskSessionId/close`
+- `POST /api/approvals/:approvalId`
+- `POST /api/instances/reconcile`
+- `POST /api/instances/:instanceId/start`
+- `POST /api/instances/:instanceId/stop`
+- `POST /api/webhooks/jira`
+- `POST /api/bridge/:action`
+
+## Sprint walkthrough example
+
+Create a project:
 
 ```bash
-npx skills add op7418/Claude-to-IM-skill
+curl -s -X POST http://127.0.0.1:3001/api/projects \
+  -H 'Content-Type: application/json' \
+  --data '{
+    "id":"demo-project",
+    "name":"Demo Project",
+    "repository":{
+      "remoteUrl":"file:///tmp/demo/origin.git",
+      "localPath":"/tmp/demo/repo",
+      "baseBranch":"master",
+      "sprintBranchPrefix":"feature/",
+      "taskBranchPrefix":"dev/",
+      "scmProvider":"github",
+      "scmProject":"demo/agent-im",
+      "scmTokenEnvVar":"GITHUB_TOKEN"
+    },
+    "agents":[],
+    "createdAt":"2026-03-16T00:00:00.000Z",
+    "updatedAt":"2026-03-16T00:00:00.000Z"
+  }'
 ```
 
-### Git clone
+Start a sprint:
 
 ```bash
-git clone https://github.com/op7418/Claude-to-IM-skill.git ~/.claude/skills/claude-to-im
+curl -s -X POST http://127.0.0.1:3001/api/workflows/sprints/start \
+  -H 'Content-Type: application/json' \
+  --data '{"projectId":"demo-project","sprintName":"Sprint Alpha"}'
 ```
 
-Clones the repo directly into your personal skills directory. Claude Code discovers it automatically.
+Expected result:
 
-### Symlink
+- sprint record is persisted
+- Git creates / checks out `feature/sprint-alpha`
 
-If you prefer to keep the repo elsewhere (e.g., for development):
+## Jira-driven execution
 
-```bash
-git clone https://github.com/op7418/Claude-to-IM-skill.git ~/code/Claude-to-IM-skill
-mkdir -p ~/.claude/skills
-ln -s ~/code/Claude-to-IM-skill ~/.claude/skills/claude-to-im
-```
+The platform supports **Jira comment as transport**:
 
-### Codex
+- Jira comments are polled as inbound task instructions
+- agent replies are written back as Jira comments
+- bot-authored comments are ignored to prevent loops
 
-If you use [Codex](https://github.com/openai/codex), clone directly into the Codex skills directory:
+This allows a Jira issue to act as the task inbox for developer / reviewer / tester agents.
 
-```bash
-git clone https://github.com/op7418/Claude-to-IM-skill.git ~/.codex/skills/claude-to-im
-```
+## IM bridge compatibility
 
-Or use the provided install script for automatic dependency installation and build:
+The legacy bridge is still available and useful when you want direct chat-based access to the runtime:
 
-```bash
-# Clone and install (copy mode)
-git clone https://github.com/op7418/Claude-to-IM-skill.git ~/code/Claude-to-IM-skill
-bash ~/code/Claude-to-IM-skill/scripts/install-codex.sh
+- Telegram
+- Discord
+- Feishu / Lark
+- QQ
+- Agent loop / Redis-based autonomous channel
 
-# Or use symlink mode for development
-bash ~/code/Claude-to-IM-skill/scripts/install-codex.sh --link
-```
+The bridge manager, channel adapters, permission flow, and session persistence remain part of the codebase.
 
-### Verify installation
+## Data layout
 
-**Claude Code:** Start a new session and type `/` — you should see `claude-to-im` in the skill list. Or ask Claude: "What skills are available?"
-
-**Codex:** Start a new session and say "claude-to-im setup" or "start bridge" — Codex will recognize the skill and run the setup wizard.
-
-## Quick Start
-
-### 1. Setup
-
-```
-/claude-to-im setup
-```
-
-The wizard will guide you through:
-
-1. **Choose channels** — pick Telegram, Discord, Feishu, QQ, or any combination
-2. **Enter credentials** — the wizard explains exactly where to get each token, which settings to enable, and what permissions to grant
-3. **Set defaults** — working directory, model, and mode
-4. **Validate** — tokens are verified against platform APIs immediately
-
-### 2. Start
-
-```
-/claude-to-im start
-```
-
-The daemon starts in the background. You can close the terminal — it keeps running.
-
-### 3. Chat
-
-Open your IM app and send a message to your bot. Claude Code will respond.
-
-When Claude needs to use a tool (edit a file, run a command), you'll see a permission prompt with **Allow** / **Deny** buttons right in the chat (Telegram/Discord), or a text `/perm` command prompt (Feishu/QQ).
-
-## Commands
-
-All commands are run inside Claude Code or Codex:
-
-| Claude Code | Codex (natural language) | Description |
-|---|---|---|
-| `/claude-to-im setup` | "claude-to-im setup" / "配置" | Interactive setup wizard |
-| `/claude-to-im start` | "start bridge" / "启动桥接" | Start the bridge daemon |
-| `/claude-to-im stop` | "stop bridge" / "停止桥接" | Stop the bridge daemon |
-| `/claude-to-im status` | "bridge status" / "状态" | Show daemon status |
-| `/claude-to-im logs` | "查看日志" | Show last 50 log lines |
-| `/claude-to-im logs 200` | "logs 200" | Show last 200 log lines |
-| `/claude-to-im reconfigure` | "reconfigure" / "修改配置" | Update config interactively |
-| `/claude-to-im doctor` | "doctor" / "诊断" | Diagnose issues |
-
-**API & Interface Reference**: See [references/api.md](references/api.md) for command details, config schema, and bridge host interfaces.
-
-## Platform Setup Guides
-
-The `setup` wizard provides inline guidance for every step. Here's a summary:
-
-### Telegram
-
-1. Message `@BotFather` on Telegram → `/newbot` → follow prompts
-2. Copy the bot token (format: `123456789:AABbCc...`)
-3. Recommended: `/setprivacy` → Disable (for group use)
-4. Find your User ID: message `@userinfobot`
-
-### Discord
-
-1. Go to [Discord Developer Portal](https://discord.com/developers/applications) → New Application
-2. Bot tab → Reset Token → copy it
-3. Enable **Message Content Intent** under Privileged Gateway Intents
-4. OAuth2 → URL Generator → scope `bot` → permissions: Send Messages, Read Message History, View Channels → copy invite URL
-
-### Feishu / Lark
-
-1. Go to [Feishu Open Platform](https://open.feishu.cn/app) (or [Lark](https://open.larksuite.com/app))
-2. Create Custom App → get App ID and App Secret
-3. **Batch-add permissions**: go to "Permissions & Scopes" → use batch configuration to add all required scopes (the `setup` wizard provides the exact JSON)
-4. Enable Bot feature under "Add Features"
-5. **Events & Callbacks**: select **"Long Connection"** as event dispatch method → add `im.message.receive_v1` event
-6. **Publish**: go to "Version Management & Release" → create version → submit for review → approve in Admin Console
-7. **Important**: The bot will NOT work until the version is approved and published
-
-### QQ
-
-> QQ currently supports **C2C private chat only**. No group/channel support, no inline permission buttons, no streaming preview. Permissions use text `/perm ...` commands. Image inbound only (no image replies).
-
-1. Go to [QQ Bot OpenClaw](https://q.qq.com/qqbot/openclaw)
-2. Create a QQ Bot or select an existing one → get **App ID** and **App Secret** (only two required fields)
-3. Configure sandbox access and scan QR code with QQ to add the bot
-4. `CTI_QQ_ALLOWED_USERS` takes `user_openid` values (not QQ numbers) — can be left empty initially
-5. Set `CTI_QQ_IMAGE_ENABLED=false` if the underlying provider doesn't support image input
-
-### Agent (Self-Conversational Loop)
-
-> Agent creates a conversation loop between Claude and OpenAI via Redis. No user interaction — fully autonomous. **Supports multiple concurrent instances.**
-
-1. Install Redis: `brew install redis` (macOS) or `apt install redis` (Linux)
-2. Start Redis: `redis-server`
-3. Configure in `~/.claude-to-im/config.env`:
-   
-   **Single instance:**
-   - `CTI_AGENT_REDIS_URL=redis://127.0.0.1:6379` (default)
-   - `CTI_AGENT_FIRST_PROMPT="Hello, how are you?"` (conversation starter)
-   - `CTI_AGENT_OPENAI_BASE_URL=https://api.openai.com/v1` (or custom endpoint)
-   - `CTI_AGENT_OPENAI_MODEL=gpt-4o-mini` (or any OpenAI-compatible model)
-   - `CTI_AGENT_OPENAI_API_KEY=your-openai-api-key`
-   - `CTI_AGENT_MAX_TURNS=10` (max conversation rounds, default 10)
-
-   **Multiple instances** (numbered: 1, 2, 3... or named: main, debate, test...):
-   ```bash
-   # Instance 1
-   CTI_AGENT_1_REDIS_URL=redis://127.0.0.1:6379
-   CTI_AGENT_1_FIRST_PROMPT="Debate: Is AGI achievable?"
-   CTI_AGENT_1_OPENAI_MODEL=gpt-4o
-   CTI_AGENT_1_OPENAI_API_KEY=sk-your-key
-   CTI_AGENT_1_MAX_TURNS=10
-   
-   # Instance 2
-   CTI_AGENT_2_REDIS_URL=redis://127.0.0.1:6379
-   CTI_AGENT_2_FIRST_PROMPT="Review this code: ..."
-   CTI_AGENT_2_OPENAI_MODEL=gpt-3.5-turbo
-   CTI_AGENT_2_OPENAI_API_KEY=sk-your-key
-   CTI_AGENT_2_MAX_TURNS=5
-   ```
-   
-   See [Multi-Instance Guide](docs/agent-multi-instance.md) for detailed configuration.
-
-**How it works:**
-1. First prompt is stored in Redis input queue
-2. Claude polls Redis and responds (no streaming)
-3. Claude's response is sent to OpenAI API
-4. OpenAI's response goes back to Redis input queue
-5. Loop continues until max turns reached
-6. Multiple instances run concurrently with separate queues
-
-## Architecture
-
-```
+```text
 ~/.claude-to-im/
-├── config.env             ← Credentials & settings (chmod 600)
-├── data/                  ← Persistent JSON storage
+├── config.env
+├── data/
 │   ├── sessions.json
 │   ├── bindings.json
 │   ├── permissions.json
-│   └── messages/          ← Per-session message history
+│   ├── platform/
+│   │   ├── projects.json
+│   │   ├── sprints.json
+│   │   ├── task_sessions.json
+│   │   ├── agent_instances.json
+│   │   ├── queues.json
+│   │   └── approvals.json
+│   └── messages/
 ├── logs/
-│   └── bridge.log         ← Auto-rotated, secrets redacted
+│   └── bridge.log
 └── runtime/
-    ├── bridge.pid          ← Daemon PID file
-    └── status.json         ← Current status
+    ├── bridge.pid
+    └── status.json
 ```
-
-### Key components
-
-| Component | Role |
-|---|---|
-| `src/main.ts` | Daemon entry — assembles DI, starts bridge |
-| `src/config.ts` | Load/save `config.env`, map to bridge settings |
-| `src/store.ts` | JSON file BridgeStore (30 methods, write-through cache) |
-| `src/llm-provider.ts` | Claude Agent SDK `query()` → SSE stream |
-| `src/codex-provider.ts` | Codex SDK `runStreamed()` → SSE stream |
-| `src/sse-utils.ts` | Shared SSE formatting helper |
-| `src/permission-gateway.ts` | Async bridge: SDK `canUseTool` ↔ IM buttons |
-| `src/logger.ts` | Secret-redacted file logging with rotation |
-| `scripts/daemon.sh` | Process management (start/stop/status/logs) |
-| `scripts/doctor.sh` | Health checks |
-| `SKILL.md` | Claude Code skill definition |
-
-### Permission flow
-
-```
-1. Claude wants to use a tool (e.g., Edit file)
-2. SDK calls canUseTool() → LLMProvider emits permission_request SSE
-3. Bridge sends inline buttons to IM chat: [Allow] [Deny]
-4. canUseTool() blocks, waiting for user response (5 min timeout)
-5. User taps Allow → bridge resolves the pending permission
-6. SDK continues tool execution → result streamed back to IM
-```
-
-## Troubleshooting
-
-Run diagnostics:
-
-```
-/claude-to-im doctor
-```
-
-This checks: Node.js version, config file existence and permissions, token validity (live API calls), log directory, PID file consistency, and recent errors.
-
-| Issue | Solution |
-|---|---|
-| `Bridge won't start` | Run `doctor`. Check if Node >= 20. Check logs. |
-| `Messages not received` | Verify token with `doctor`. Check allowed users config. |
-| `Permission timeout` | User didn't respond within 5 min. Tool call auto-denied. |
-| `Stale PID file` | Run `stop` then `start`. daemon.sh auto-cleans stale PIDs. |
-
-See [references/troubleshooting.md](references/troubleshooting.md) for more details.
-
-## Security
-
-- All credentials stored in `~/.claude-to-im/config.env` with `chmod 600`
-- Tokens are automatically redacted in all log output (pattern-based masking)
-- Allowed user/channel/guild lists restrict who can interact with the bot
-- The daemon is a local process with no inbound network listeners
-- See [SECURITY.md](SECURITY.md) for threat model and incident response
 
 ## Development
 
+### Install
+
 ```bash
-npm install        # Install dependencies
-npm run dev        # Run in dev mode
-npm run typecheck  # Type check
-npm test           # Run tests
-npm run build      # Build bundle
+npm install
 ```
+
+### Run Next.js web server
+
+```bash
+npm run dev
+```
+
+### Run legacy daemon entrypoint
+
+```bash
+npm run dev:bridge
+```
+
+### Build
+
+```bash
+npm run build
+```
+
+### Test
+
+```bash
+npm test
+npm run typecheck
+```
+
+## Key files
+
+| File | Role |
+|---|---|
+| `src/main.ts` | Legacy bridge daemon entrypoint |
+| `src/platform/container.ts` | Shared platform bootstrap |
+| `src/platform/workflow-service.ts` | Sprint/task state machine |
+| `src/platform/instance-manager.ts` | Runtime instance lifecycle |
+| `src/platform/jira-adapter.ts` | Jira comment adapter |
+| `src/platform/json-platform-store.ts` | Platform persistence |
+| `src/logger.ts` | Pino logger with secret masking |
+| `src/app/page.tsx` | Next.js platform landing page |
+
+## Security
+
+- credentials stay under `~/.claude-to-im/config.env`
+- logs are masked before writing
+- approvals remain explicit
+- task queues are isolated per task
+- runtime abstraction keeps Claude / Codex / Cursor pluggable
+
+## Related docs
+
+- [API / host reference](references/api.md)
+- [Bridge architecture notes](src/lib/bridge/ARCHITECTURE.md)
+- [Multi-instance guide](docs/agent-multi-instance.md)
+- [Security](SECURITY.md)
 
 ## License
 

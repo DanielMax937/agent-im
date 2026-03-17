@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 
 // ── SSE utils tests ─────────────────────────────────────────
 
-import { sseEvent } from '../sse-utils.js';
+import { sseEvent } from '../sse-utils';
 
 describe('sseEvent', () => {
   it('formats a string data payload', () => {
@@ -48,8 +48,8 @@ function parseSSEChunks(chunks: string[]): Array<{ type: string; data: string }>
 
 describe('CodexProvider', () => {
   it('emits error when SDK init fails', async () => {
-    const { CodexProvider } = await import('../codex-provider.js');
-    const { PendingPermissions } = await import('../permission-gateway.js');
+    const { CodexProvider } = await import('../codex-provider');
+    const { PendingPermissions } = await import('../permission-gateway');
     const provider = new CodexProvider(new PendingPermissions());
 
     // Force ensureSDK to fail by setting sdk to a broken module
@@ -74,8 +74,8 @@ describe('CodexProvider', () => {
   });
 
   it('maps agent_message item to text SSE event', async () => {
-    const { CodexProvider } = await import('../codex-provider.js');
-    const { PendingPermissions } = await import('../permission-gateway.js');
+    const { CodexProvider } = await import('../codex-provider');
+    const { PendingPermissions } = await import('../permission-gateway');
     const provider = new CodexProvider(new PendingPermissions());
 
     const chunks: string[] = [];
@@ -96,8 +96,8 @@ describe('CodexProvider', () => {
   });
 
   it('maps command_execution item to tool_use + tool_result', async () => {
-    const { CodexProvider } = await import('../codex-provider.js');
-    const { PendingPermissions } = await import('../permission-gateway.js');
+    const { CodexProvider } = await import('../codex-provider');
+    const { PendingPermissions } = await import('../permission-gateway');
     const provider = new CodexProvider(new PendingPermissions());
 
     const chunks: string[] = [];
@@ -127,8 +127,8 @@ describe('CodexProvider', () => {
   });
 
   it('marks non-zero exit code as error', async () => {
-    const { CodexProvider } = await import('../codex-provider.js');
-    const { PendingPermissions } = await import('../permission-gateway.js');
+    const { CodexProvider } = await import('../codex-provider');
+    const { PendingPermissions } = await import('../permission-gateway');
     const provider = new CodexProvider(new PendingPermissions());
 
     const chunks: string[] = [];
@@ -150,8 +150,8 @@ describe('CodexProvider', () => {
   });
 
   it('maps file_change item correctly', async () => {
-    const { CodexProvider } = await import('../codex-provider.js');
-    const { PendingPermissions } = await import('../permission-gateway.js');
+    const { CodexProvider } = await import('../codex-provider');
+    const { PendingPermissions } = await import('../permission-gateway');
     const provider = new CodexProvider(new PendingPermissions());
 
     const chunks: string[] = [];
@@ -177,8 +177,8 @@ describe('CodexProvider', () => {
   });
 
   it('maps mcp_tool_call item correctly', async () => {
-    const { CodexProvider } = await import('../codex-provider.js');
-    const { PendingPermissions } = await import('../permission-gateway.js');
+    const { CodexProvider } = await import('../codex-provider');
+    const { PendingPermissions } = await import('../permission-gateway');
     const provider = new CodexProvider(new PendingPermissions());
 
     const chunks: string[] = [];
@@ -203,8 +203,8 @@ describe('CodexProvider', () => {
   });
 
   it('maps mcp_tool_call with structured_content', async () => {
-    const { CodexProvider } = await import('../codex-provider.js');
-    const { PendingPermissions } = await import('../permission-gateway.js');
+    const { CodexProvider } = await import('../codex-provider');
+    const { PendingPermissions } = await import('../permission-gateway');
     const provider = new CodexProvider(new PendingPermissions());
 
     const chunks: string[] = [];
@@ -227,8 +227,8 @@ describe('CodexProvider', () => {
   });
 
   it('skips empty agent_message', async () => {
-    const { CodexProvider } = await import('../codex-provider.js');
-    const { PendingPermissions } = await import('../permission-gateway.js');
+    const { CodexProvider } = await import('../codex-provider');
+    const { PendingPermissions } = await import('../permission-gateway');
     const provider = new CodexProvider(new PendingPermissions());
 
     const chunks: string[] = [];
@@ -246,8 +246,8 @@ describe('CodexProvider', () => {
   });
 
   it('does not pass model by default and skips stale Claude resume id', async () => {
-    const { CodexProvider } = await import('../codex-provider.js');
-    const { PendingPermissions } = await import('../permission-gateway.js');
+    const { CodexProvider } = await import('../codex-provider');
+    const { PendingPermissions } = await import('../permission-gateway');
     const provider = new CodexProvider(new PendingPermissions());
 
     let resumeCalls = 0;
@@ -294,8 +294,8 @@ describe('CodexProvider', () => {
     const old = process.env.CTI_CODEX_PASS_MODEL;
     process.env.CTI_CODEX_PASS_MODEL = 'true';
     try {
-      const { CodexProvider } = await import('../codex-provider.js');
-      const { PendingPermissions } = await import('../permission-gateway.js');
+      const { CodexProvider } = await import('../codex-provider');
+      const { PendingPermissions } = await import('../permission-gateway');
       const provider = new CodexProvider(new PendingPermissions());
 
       let capturedStartOptions: Record<string, unknown> | undefined;
@@ -332,8 +332,8 @@ describe('CodexProvider', () => {
   });
 
   it('retries with fresh thread when resume fails before any events', async () => {
-    const { CodexProvider } = await import('../codex-provider.js');
-    const { PendingPermissions } = await import('../permission-gateway.js');
+    const { CodexProvider } = await import('../codex-provider');
+    const { PendingPermissions } = await import('../permission-gateway');
     const provider = new CodexProvider(new PendingPermissions());
 
     let resumeCalls = 0;
@@ -393,8 +393,8 @@ function makeFile(type: string, data: string, name = 'test-file') {
 
 describe('CodexProvider image input', () => {
   it('builds local_image input array for text+image', async () => {
-    const { CodexProvider } = await import('../codex-provider.js');
-    const { PendingPermissions } = await import('../permission-gateway.js');
+    const { CodexProvider } = await import('../codex-provider');
+    const { PendingPermissions } = await import('../permission-gateway');
     const provider = new CodexProvider(new PendingPermissions());
 
     // Mock the SDK so we can capture the input passed to runStreamed
@@ -437,8 +437,8 @@ describe('CodexProvider image input', () => {
   });
 
   it('passes plain string when no images attached', async () => {
-    const { CodexProvider } = await import('../codex-provider.js');
-    const { PendingPermissions } = await import('../permission-gateway.js');
+    const { CodexProvider } = await import('../codex-provider');
+    const { PendingPermissions } = await import('../permission-gateway');
     const provider = new CodexProvider(new PendingPermissions());
 
     let capturedInput: unknown;
@@ -471,8 +471,8 @@ describe('CodexProvider image input', () => {
   });
 
   it('builds local_image input with multiple images, ignoring non-image files', async () => {
-    const { CodexProvider } = await import('../codex-provider.js');
-    const { PendingPermissions } = await import('../permission-gateway.js');
+    const { CodexProvider } = await import('../codex-provider');
+    const { PendingPermissions } = await import('../permission-gateway');
     const provider = new CodexProvider(new PendingPermissions());
 
     let capturedInput: unknown;
@@ -519,8 +519,8 @@ describe('CodexProvider image input', () => {
 
 describe('CodexProvider error events', () => {
   it('reads message field from turn.failed event', async () => {
-    const { CodexProvider } = await import('../codex-provider.js');
-    const { PendingPermissions } = await import('../permission-gateway.js');
+    const { CodexProvider } = await import('../codex-provider');
+    const { PendingPermissions } = await import('../permission-gateway');
     const provider = new CodexProvider(new PendingPermissions());
 
     const mockThread = {
@@ -550,8 +550,8 @@ describe('CodexProvider error events', () => {
   });
 
   it('reads message field from error event', async () => {
-    const { CodexProvider } = await import('../codex-provider.js');
-    const { PendingPermissions } = await import('../permission-gateway.js');
+    const { CodexProvider } = await import('../codex-provider');
+    const { PendingPermissions } = await import('../permission-gateway');
     const provider = new CodexProvider(new PendingPermissions());
 
     const mockThread = {
@@ -581,8 +581,8 @@ describe('CodexProvider error events', () => {
   });
 
   it('falls back to default message when message field is absent', async () => {
-    const { CodexProvider } = await import('../codex-provider.js');
-    const { PendingPermissions } = await import('../permission-gateway.js');
+    const { CodexProvider } = await import('../codex-provider');
+    const { PendingPermissions } = await import('../permission-gateway');
     const provider = new CodexProvider(new PendingPermissions());
 
     const mockThread = {
