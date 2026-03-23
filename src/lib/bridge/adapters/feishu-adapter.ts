@@ -22,17 +22,17 @@ import type {
   InboundMessage,
   OutboundMessage,
   SendResult,
-} from '../types.js';
-import type { FileAttachment } from '../types.js';
-import { BaseChannelAdapter, registerAdapterFactory } from '../channel-adapter.js';
-import { getBridgeContext } from '../context.js';
+} from '../types';
+import type { FileAttachment } from '../types';
+import { BaseChannelAdapter, registerAdapterFactory } from '../channel-adapter';
+import { getBridgeContext } from '../context';
 import {
   htmlToFeishuMarkdown,
   preprocessFeishuMarkdown,
   hasComplexMarkdown,
   buildCardContent,
   buildPostContent,
-} from '../markdown/feishu.js';
+} from '../markdown/feishu';
 
 /** Max number of message_ids to keep for dedup. */
 const DEDUP_MAX = 1000;
@@ -80,8 +80,6 @@ const MIME_BY_TYPE: Record<string, string> = {
 };
 
 export class FeishuAdapter extends BaseChannelAdapter {
-  readonly channelType: ChannelType = 'feishu';
-
   private running = false;
   private queue: InboundMessage[] = [];
   private waiters: Array<(msg: InboundMessage | null) => void> = [];
@@ -95,6 +93,10 @@ export class FeishuAdapter extends BaseChannelAdapter {
   private lastIncomingMessageId = new Map<string, string>();
   /** Track active typing reaction IDs per chat for cleanup. */
   private typingReactions = new Map<string, string>();
+
+  constructor(instanceId = 'default') {
+    super('feishu', instanceId);
+  }
 
   // ── Lifecycle ───────────────────────────────────────────────
 
@@ -367,7 +369,7 @@ export class FeishuAdapter extends BaseChannelAdapter {
   private async sendPermissionCard(
     chatId: string,
     text: string,
-    inlineButtons: import('../types.js').InlineButton[][],
+    inlineButtons: import('../types').InlineButton[][],
   ): Promise<SendResult> {
     if (!this.restClient) {
       return { ok: false, error: 'Feishu client not initialized' };
@@ -952,4 +954,4 @@ export class FeishuAdapter extends BaseChannelAdapter {
 }
 
 // Self-register so bridge-manager can create FeishuAdapter via the registry.
-registerAdapterFactory('feishu', () => new FeishuAdapter());
+registerAdapterFactory('feishu', (instanceId: string) => new FeishuAdapter(instanceId));

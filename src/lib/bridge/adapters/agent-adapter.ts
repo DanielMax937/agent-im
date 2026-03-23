@@ -18,9 +18,9 @@ import type {
   InboundMessage,
   OutboundMessage,
   SendResult,
-} from '../types.js';
-import { BaseChannelAdapter, registerAdapterFactory } from '../channel-adapter.js';
-import { getBridgeContext } from '../context.js';
+} from '../types';
+import { BaseChannelAdapter, registerAdapterFactory } from '../channel-adapter';
+import { getBridgeContext } from '../context';
 
 interface RedisClient {
   connect(): Promise<void>;

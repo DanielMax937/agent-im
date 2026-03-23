@@ -18,9 +18,9 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import type { LLMProvider, StreamChatParams } from './lib/bridge/host.js';
-import type { PendingPermissions } from './permission-gateway.js';
-import { sseEvent } from './sse-utils.js';
+import type { LLMProvider, StreamChatParams } from './lib/bridge/host';
+import type { PendingPermissions } from './permission-gateway';
+import { sseEvent } from './sse-utils';
 
 /** MIME → file extension for temp image files. */
 const MIME_EXT: Record<string, string> = {

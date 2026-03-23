@@ -8,14 +8,14 @@
 
 import fs from 'fs';
 import path from 'path';
-import type { ChannelBinding } from './types.js';
+import type { ChannelBinding } from './types';
 import type {
   FileAttachment,
   SSEEvent,
   TokenUsage,
   MessageContentBlock,
-} from './host.js';
-import { getBridgeContext } from './context.js';
+} from './host';
+import { getBridgeContext } from './context';
 import crypto from 'crypto';
 
 export interface PermissionRequestInfo {
@@ -120,7 +120,7 @@ export async function processMessage(
     store.addMessage(sessionId, 'user', savedContent);
 
     // Resolve provider
-    let resolvedProvider: import('./host.js').BridgeApiProvider | undefined;
+    let resolvedProvider: import('./host').BridgeApiProvider | undefined;
     const providerId = session?.provider_id || '';
     if (providerId && providerId !== 'env') {
       resolvedProvider = store.getProvider(providerId);

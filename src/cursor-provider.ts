@@ -12,9 +12,9 @@
 import { spawn, type ChildProcess, type SpawnOptions } from 'node:child_process';
 import { createInterface } from 'node:readline';
 
-import type { LLMProvider, StreamChatParams } from './lib/bridge/host.js';
-import { sseEvent } from './sse-utils.js';
-import { buildSubprocessEnv } from './llm-provider.js';
+import type { LLMProvider, StreamChatParams } from './lib/bridge/host';
+import { sseEvent } from './sse-utils';
+import { buildSubprocessEnv } from './llm-provider';
 
 export type SpawnFn = (cmd: string, args: string[], opts: SpawnOptions) => ChildProcess;
 

@@ -7,9 +7,9 @@ import {
   isNonClaudeModel,
   parseCliMajorVersion,
   handleMessage,
-} from '../llm-provider.js';
-import type { StreamState } from '../llm-provider.js';
-import { sseEvent } from '../sse-utils.js';
+} from '../llm-provider';
+import type { StreamState } from '../llm-provider';
+import { sseEvent } from '../sse-utils';
 
 // ── Helpers ──
 

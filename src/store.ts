@@ -18,9 +18,9 @@ import type {
   PermissionLinkRecord,
   OutboundRefInput,
   UpsertChannelBindingInput,
-} from './lib/bridge/host.js';
-import type { ChannelBinding, ChannelType } from './lib/bridge/types.js';
-import { CTI_HOME } from './config.js';
+} from './lib/bridge/host';
+import type { ChannelBinding, ChannelType } from './lib/bridge/types';
+import { CTI_HOME } from './config';
 
 const DATA_DIR = path.join(CTI_HOME, 'data');
 const MESSAGES_DIR = path.join(DATA_DIR, 'messages');
