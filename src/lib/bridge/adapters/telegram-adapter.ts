@@ -16,6 +16,7 @@ import type {
 import type { FileAttachment } from '../types';
 import { BaseChannelAdapter, registerAdapterFactory } from '../channel-adapter';
 import { getBridgeContext } from '../context';
+import { imScopedGet } from '../im-instance-settings';
 import { callTelegramApi, sendMessageDraft } from './telegram-utils';
 import {
   isImageEnabled,
@@ -91,8 +92,12 @@ export class TelegramAdapter extends BaseChannelAdapter {
     super('telegram', instanceId);
   }
 
+  private imGet(key: string): string | null {
+    return imScopedGet(getBridgeContext().store, 'telegram', this.instanceId, key);
+  }
+
   get botToken(): string {
-    return getBridgeContext().store.getSetting('telegram_bot_token') || '';
+    return this.imGet('telegram_bot_token') || '';
   }
 
   async start(): Promise<void> {
@@ -219,10 +224,10 @@ export class TelegramAdapter extends BaseChannelAdapter {
   }
 
   validateConfig(): string | null {
-    const token = getBridgeContext().store.getSetting('telegram_bot_token');
+    const token = this.imGet('telegram_bot_token');
     if (!token) return 'telegram_bot_token not configured';
 
-    const bridgeEnabled = getBridgeContext().store.getSetting('bridge_telegram_enabled');
+    const bridgeEnabled = this.imGet('bridge_telegram_enabled');
     if (bridgeEnabled !== 'true') return 'bridge_telegram_enabled is not true';
 
     return null;
@@ -230,7 +235,7 @@ export class TelegramAdapter extends BaseChannelAdapter {
 
   isAuthorized(userId: string, chatId: string): boolean {
     // Check bridge-specific allowed users first
-    const allowedUsers = getBridgeContext().store.getSetting('telegram_bridge_allowed_users') || '';
+    const allowedUsers = this.imGet('telegram_bridge_allowed_users') || '';
     if (allowedUsers) {
       const allowed = allowedUsers.split(',').map(s => s.trim()).filter(Boolean);
       if (allowed.length > 0) {
@@ -239,7 +244,7 @@ export class TelegramAdapter extends BaseChannelAdapter {
     }
 
     // Fallback: check notification bot's chat_id
-    const notifyChatId = getBridgeContext().store.getSetting('telegram_chat_id') || '';
+    const notifyChatId = this.imGet('telegram_chat_id') || '';
     if (notifyChatId) {
       return chatId === notifyChatId;
     }
@@ -291,10 +296,10 @@ export class TelegramAdapter extends BaseChannelAdapter {
 
   getPreviewCapabilities(chatId: string): PreviewCapabilities | null {
     // Global kill switch
-    if (getBridgeContext().store.getSetting('bridge_telegram_stream_enabled') === 'false') return null;
+    if (this.imGet('bridge_telegram_stream_enabled') === 'false') return null;
 
     // Private-only check: positive chatId = private, negative = group/channel
-    const privateOnly = getBridgeContext().store.getSetting('bridge_telegram_stream_private_only') !== 'false';
+    const privateOnly = this.imGet('bridge_telegram_stream_private_only') !== 'false';
     if (privateOnly && parseInt(chatId, 10) < 0) return null;
 
     // Already degraded for this chat
@@ -350,6 +355,7 @@ export class TelegramAdapter extends BaseChannelAdapter {
         { command: 'bind', description: 'Bind to existing session' },
         { command: 'cwd', description: 'Change working directory' },
         { command: 'mode', description: 'Switch mode: plan / code / ask' },
+        { command: 'runner', description: 'List or switch LLM runner for this chat' },
         { command: 'status', description: 'Show current session status' },
         { command: 'sessions', description: 'List recent sessions' },
         { command: 'stop', description: 'Stop current task' },
@@ -521,7 +527,7 @@ export class TelegramAdapter extends BaseChannelAdapter {
             const msg: InboundMessage = {
               messageId: cb.id,
               address: {
-                channelType: 'telegram',
+                channelType: this.channelType,
                 chatId,
                 userId,
                 displayName: cb.from.username || cb.from.first_name,
@@ -572,7 +578,7 @@ export class TelegramAdapter extends BaseChannelAdapter {
               const msg: InboundMessage = {
                 messageId: String(m.message_id),
                 address: {
-                  channelType: 'telegram',
+                  channelType: this.channelType,
                   chatId,
                   userId,
                   displayName,
@@ -586,7 +592,7 @@ export class TelegramAdapter extends BaseChannelAdapter {
               // Audit log
               try {
                 getBridgeContext().store.insertAuditLog({
-                  channelType: 'telegram',
+                  channelType: this.channelType,
                   chatId,
                   direction: 'inbound',
                   messageId: String(m.message_id),
@@ -644,7 +650,7 @@ export class TelegramAdapter extends BaseChannelAdapter {
   ): Promise<void> {
     const m = update.message!;
     const token = this.botToken;
-    const address = { channelType: 'telegram' as const, chatId, userId, displayName };
+    const address = { channelType: this.channelType, chatId, userId, displayName };
 
     if (!token) {
       this.markUpdateProcessed(update.update_id);
@@ -692,7 +698,7 @@ export class TelegramAdapter extends BaseChannelAdapter {
     // Audit log
     try {
       getBridgeContext().store.insertAuditLog({
-        channelType: 'telegram',
+        channelType: this.channelType,
         chatId,
         direction: 'inbound',
         messageId: String(m.message_id),
@@ -755,7 +761,7 @@ export class TelegramAdapter extends BaseChannelAdapter {
     this.mediaGroupBuffers.delete(mediaGroupId);
 
     const address = {
-      channelType: 'telegram' as const,
+      channelType: this.channelType,
       chatId: entry.chatId,
       userId: entry.userId,
       displayName: entry.displayName,
@@ -833,7 +839,7 @@ export class TelegramAdapter extends BaseChannelAdapter {
 
     try {
       getBridgeContext().store.insertAuditLog({
-        channelType: 'telegram',
+        channelType: this.channelType,
         chatId: entry.chatId,
         direction: 'inbound',
         messageId: firstMessageId,

@@ -14,10 +14,29 @@ import type {
   PermissionGateway,
   LifecycleHooks,
 } from './host';
+import type { ChannelBinding } from './types';
+
+/** Snapshot of `config.runtimeProfiles` for IM slash commands (e.g. /runner). */
+export interface BridgeImRuntimeProfile {
+  id: string;
+  runtime: string;
+  label?: string;
+}
 
 export interface BridgeContext {
   store: BridgeStore;
+  /** Default LLM (used when `resolveLlmForBinding` is absent or as legacy fallback). */
   llm: LLMProvider;
+  /**
+   * IM bridge: pick LLM per chat binding (multi-runner under one bot).
+   * Jira/platform code does not use this path.
+   */
+  resolveLlmForBinding?: (binding: ChannelBinding) => LLMProvider;
+  /**
+   * IM: selectable runtime profiles (same ids as `ChannelBinding.runnerProfileId`).
+   * Set from `normalizeRuntimeProfiles(config)` at startup.
+   */
+  imRuntimeProfiles?: ReadonlyArray<BridgeImRuntimeProfile>;
   permissions: PermissionGateway;
   lifecycle: LifecycleHooks;
 }

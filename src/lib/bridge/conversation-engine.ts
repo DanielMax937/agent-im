@@ -62,7 +62,8 @@ export async function processMessage(
   files?: FileAttachment[],
   onPartialText?: OnPartialText,
 ): Promise<ConversationResult> {
-  const { store, llm } = getBridgeContext();
+  const { store, llm, resolveLlmForBinding } = getBridgeContext();
+  const effectiveLlm = resolveLlmForBinding?.(binding) ?? llm;
   const sessionId = binding.codepilotSessionId;
 
   // Acquire session lock
@@ -157,7 +158,7 @@ export async function processMessage(
       }
     }
 
-    const stream = llm.streamChat({
+    const stream = effectiveLlm.streamChat({
       prompt: text,
       sessionId,
       sdkSessionId: binding.sdkSessionId || undefined,

@@ -53,12 +53,16 @@ export function createBinding(
     store.updateSessionProviderId(session.id, defaultProviderId);
   }
 
+  const defaultRunnerProfile =
+    store.getSetting('bridge_default_runner_profile_id')?.trim() || undefined;
+
   return store.upsertChannelBinding({
     channelType: address.channelType,
     chatId: address.chatId,
     codepilotSessionId: session.id,
     workingDirectory: defaultCwd,
     model: defaultModel,
+    runnerProfileId: defaultRunnerProfile,
   });
 }
 
@@ -73,12 +77,16 @@ export function bindToSession(
   const session = store.getSession(codepilotSessionId);
   if (!session) return null;
 
+  const defaultRunnerProfile =
+    store.getSetting('bridge_default_runner_profile_id')?.trim() || undefined;
+
   return store.upsertChannelBinding({
     channelType: address.channelType,
     chatId: address.chatId,
     codepilotSessionId,
     workingDirectory: session.working_directory,
     model: session.model,
+    runnerProfileId: defaultRunnerProfile,
   });
 }
 
@@ -87,7 +95,9 @@ export function bindToSession(
  */
 export function updateBinding(
   id: string,
-  updates: Partial<Pick<ChannelBinding, 'sdkSessionId' | 'workingDirectory' | 'model' | 'mode' | 'active'>>,
+  updates: Partial<
+    Pick<ChannelBinding, 'sdkSessionId' | 'workingDirectory' | 'model' | 'mode' | 'active' | 'runnerProfileId'>
+  >,
 ): void {
   getBridgeContext().store.updateChannelBinding(id, updates);
 }

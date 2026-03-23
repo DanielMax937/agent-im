@@ -22,6 +22,7 @@ import type {
 import type { FileAttachment } from '../types';
 import { BaseChannelAdapter, registerAdapterFactory } from '../channel-adapter';
 import { getBridgeContext } from '../context';
+import { imScopedGet } from '../im-instance-settings';
 
 /** Max number of message IDs to keep for dedup. */
 const DEDUP_MAX = 1000;
@@ -64,6 +65,11 @@ export class DiscordAdapter extends BaseChannelAdapter {
   constructor(instanceId = 'default') {
     super('discord', instanceId);
   }
+
+  private d(key: string): string | null {
+    return imScopedGet(getBridgeContext().store, 'discord', this.instanceId, key);
+  }
+
   private typingIntervals = new Map<string, ReturnType<typeof setInterval>>();
   /** Temporary storage for Interaction objects (for answerCallback). */
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -84,7 +90,7 @@ export class DiscordAdapter extends BaseChannelAdapter {
       return;
     }
 
-    const token = getBridgeContext().store.getSetting('bridge_discord_bot_token') || '';
+    const token = this.d('bridge_discord_bot_token') || '';
 
     // Dynamic import to avoid bundler resolving native modules
     const djs = await loadDiscordJs();
@@ -314,7 +320,7 @@ export class DiscordAdapter extends BaseChannelAdapter {
 
   getPreviewCapabilities(chatId: string): PreviewCapabilities | null {
     // Global kill switch
-    if (getBridgeContext().store.getSetting('bridge_discord_stream_enabled') === 'false') return null;
+    if (this.d('bridge_discord_stream_enabled') === 'false') return null;
 
     // Already degraded for this chat
     if (this.previewDegraded.has(chatId)) return null;
@@ -371,18 +377,18 @@ export class DiscordAdapter extends BaseChannelAdapter {
   // ── Config & Auth ───────────────────────────────────────────
 
   validateConfig(): string | null {
-    const enabled = getBridgeContext().store.getSetting('bridge_discord_enabled');
+    const enabled = this.d('bridge_discord_enabled');
     if (enabled !== 'true') return 'bridge_discord_enabled is not true';
 
-    const token = getBridgeContext().store.getSetting('bridge_discord_bot_token');
+    const token = this.d('bridge_discord_bot_token');
     if (!token) return 'bridge_discord_bot_token not configured';
 
     return null;
   }
 
   isAuthorized(userId: string, chatId: string): boolean {
-    const allowedUsers = getBridgeContext().store.getSetting('bridge_discord_allowed_users') || '';
-    const allowedChannels = getBridgeContext().store.getSetting('bridge_discord_allowed_channels') || '';
+    const allowedUsers = this.d('bridge_discord_allowed_users') || '';
+    const allowedChannels = this.d('bridge_discord_allowed_channels') || '';
 
     // If both are empty, deny all (security-first, default-deny)
     if (!allowedUsers && !allowedChannels) return false;
@@ -437,21 +443,21 @@ export class DiscordAdapter extends BaseChannelAdapter {
 
     // Guild (server) message policy
     if (isGuild) {
-      const allowedGuilds = (getBridgeContext().store.getSetting('bridge_discord_allowed_guilds') || '')
+      const allowedGuilds = (this.d('bridge_discord_allowed_guilds') || '')
         .split(',').map(s => s.trim()).filter(Boolean);
 
       if (allowedGuilds.length > 0 && !allowedGuilds.includes(message.guild!.id)) {
         return;
       }
 
-      const policy = getBridgeContext().store.getSetting('bridge_discord_group_policy') || 'open';
+      const policy = this.d('bridge_discord_group_policy') || 'open';
 
       if (policy === 'disabled') {
         return;
       }
 
       // Require @mention check
-      const requireMention = getBridgeContext().store.getSetting('bridge_discord_require_mention') === 'true';
+      const requireMention = this.d('bridge_discord_require_mention') === 'true';
       if (requireMention && this.botUserId) {
         // Check both user @mention and role @mention (bot's managed role)
         const userMentioned = message.mentions.users.has(this.botUserId);
@@ -467,7 +473,7 @@ export class DiscordAdapter extends BaseChannelAdapter {
         if (!mentioned) {
           try {
             getBridgeContext().store.insertAuditLog({
-              channelType: 'discord',
+              channelType: this.channelType,
               chatId,
               direction: 'inbound',
               messageId: message.id,
@@ -503,8 +509,8 @@ export class DiscordAdapter extends BaseChannelAdapter {
 
     // Handle attachments (images)
     const attachments: FileAttachment[] = [];
-    const imageEnabled = getBridgeContext().store.getSetting('bridge_discord_image_enabled') !== 'false';
-    const maxSize = parseInt(getBridgeContext().store.getSetting('bridge_discord_max_attachment_size') || '', 10) || DEFAULT_MAX_ATTACHMENT_SIZE;
+    const imageEnabled = this.d('bridge_discord_image_enabled') !== 'false';
+    const maxSize = parseInt(this.d('bridge_discord_max_attachment_size') || '', 10) || DEFAULT_MAX_ATTACHMENT_SIZE;
 
     if (imageEnabled && message.attachments.size > 0) {
       for (const [, attachment] of message.attachments) {
@@ -538,7 +544,7 @@ export class DiscordAdapter extends BaseChannelAdapter {
     if (!text.trim() && attachments.length === 0) return;
 
     const address = {
-      channelType: 'discord' as const,
+      channelType: this.channelType,
       chatId,
       userId,
       displayName,
@@ -558,7 +564,7 @@ export class DiscordAdapter extends BaseChannelAdapter {
         ? `[${attachments.length} attachment(s)] ${text.slice(0, 150)}`
         : text.slice(0, 200);
       getBridgeContext().store.insertAuditLog({
-        channelType: 'discord',
+        channelType: this.channelType,
         chatId,
         direction: 'inbound',
         messageId: message.id,
@@ -601,7 +607,7 @@ export class DiscordAdapter extends BaseChannelAdapter {
     const inbound: InboundMessage = {
       messageId: interactionId,
       address: {
-        channelType: 'discord',
+        channelType: this.channelType,
         chatId,
         userId,
         displayName,

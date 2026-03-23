@@ -78,7 +78,7 @@ describe('InstanceManager', () => {
     const manager = InstanceManager.getInstance({
       store,
       jiraClientFactory: () => jiraClient,
-      providerFactory: async () => ({
+      providerFactory: async (_instance, _pendingPermissions) => ({
         streamChat() {
           return new ReadableStream<string>({
             start(controller) {
@@ -122,7 +122,7 @@ describe('InstanceManager', () => {
       store,
       jiraClientFactory: () => jiraClient,
       approvalBaseUrl: 'http://localhost:8787',
-      providerFactory: async (_runtime, pendingPermissions) => ({
+      providerFactory: async (_instance, pendingPermissions) => ({
         streamChat() {
           return new ReadableStream<string>({
             start(controller) {
@@ -181,7 +181,7 @@ describe('InstanceManager', () => {
     const manager = InstanceManager.getInstance({
       store,
       jiraClientFactory: () => jiraClient,
-      providerFactory: async () => ({
+      providerFactory: async (_instance, _pendingPermissions) => ({
         streamChat() {
           return new ReadableStream<string>({
             start(controller) {

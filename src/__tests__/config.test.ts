@@ -3,7 +3,13 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { maskSecret, configToSettings, type Config } from '../config';
+import {
+  maskSecret,
+  configToSettings,
+  mergeConfigPatch,
+  configForAdminResponse,
+  type Config,
+} from '../config';
 
 // ── maskSecret ──
 
@@ -161,6 +167,79 @@ describe('configToSettings', () => {
     assert.equal(m.has('telegram_bot_token'), false);
     assert.equal(m.has('bridge_discord_bot_token'), false);
     assert.equal(m.has('bridge_feishu_app_id'), false);
+  });
+
+  it('maps imInstances to bridge_telegram_instances and token keys', () => {
+    const m = configToSettings({
+      ...base,
+      enabledChannels: ['telegram'],
+      imInstances: [
+        {
+          id: 'work',
+          channel: 'telegram',
+          tgBotToken: 'bot:secret',
+          tgAllowedUsers: ['1'],
+        },
+      ],
+    });
+    assert.equal(m.get('bridge_telegram_instances'), 'work');
+    assert.equal(m.get('telegram_work_bot_token'), 'bot:secret');
+  });
+});
+
+// ── mergeConfigPatch / configForAdminResponse (imInstances) ──
+
+describe('mergeConfigPatch imInstances', () => {
+  const base: Config = {
+    runtime: 'claude',
+    enabledChannels: [],
+    defaultWorkDir: '/tmp/test',
+    defaultMode: 'code',
+    imInstances: [
+      {
+        id: 'a',
+        channel: 'telegram',
+        tgBotToken: 'old-token',
+      },
+    ],
+  };
+
+  it('clears imInstances when patch has empty array', () => {
+    const next = mergeConfigPatch(base, { imInstances: [] });
+    assert.equal(next.imInstances, undefined);
+  });
+
+  it('keeps previous token when masked placeholder is sent', () => {
+    const next = mergeConfigPatch(base, {
+      imInstances: [{ id: 'a', channel: 'telegram', tgBotToken: '****5678' }],
+    });
+    assert.equal(next.imInstances?.[0].tgBotToken, 'old-token');
+  });
+
+  it('applies new token when explicitly changed', () => {
+    const next = mergeConfigPatch(base, {
+      imInstances: [{ id: 'a', channel: 'telegram', tgBotToken: 'brand-new' }],
+    });
+    assert.equal(next.imInstances?.[0].tgBotToken, 'brand-new');
+  });
+});
+
+describe('configForAdminResponse imInstances', () => {
+  it('masks per-instance secrets', () => {
+    const { config: out } = configForAdminResponse({
+      runtime: 'claude',
+      enabledChannels: ['telegram'],
+      defaultWorkDir: '/tmp',
+      defaultMode: 'code',
+      imInstances: [
+        {
+          id: 'x',
+          channel: 'discord',
+          discordBotToken: 'discord-secret-token',
+        },
+      ],
+    });
+    assert.equal(out.imInstances?.[0].discordBotToken, maskSecret('discord-secret-token'));
   });
 });
 

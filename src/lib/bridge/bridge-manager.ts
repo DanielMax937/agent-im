@@ -7,7 +7,8 @@
  * Uses globalThis to survive Next.js HMR in development.
  */
 
-import type { BridgeStatus, InboundMessage, OutboundMessage, StreamingPreviewState } from './types';
+import type { BridgeStatus, ChannelBinding, InboundMessage, OutboundMessage, StreamingPreviewState } from './types';
+import type { BridgeStore } from './host';
 import { createAdapter, getRegisteredTypes } from './channel-adapter';
 import type { BaseChannelAdapter } from './channel-adapter';
 // Side-effect import: triggers self-registration of all adapter factories
@@ -27,8 +28,32 @@ import {
   sanitizeInput,
   validateMode,
 } from './security/validators';
+import {
+  listInstanceIdsForChannel,
+  isInstanceImEnabled,
+  type ImBaseChannel,
+} from './im-instance-settings';
+import { getConfiguredAgentInstanceIds } from './adapters/agent-adapter';
 
 const GLOBAL_KEY = '__bridge_manager__';
+
+/** Runtime profiles for IM /runner (fallback when context omits `imRuntimeProfiles`). */
+function getImRuntimeProfileList(): Array<{ id: string; runtime: string; label?: string }> {
+  const { imRuntimeProfiles } = getBridgeContext();
+  if (imRuntimeProfiles && imRuntimeProfiles.length > 0) {
+    return [...imRuntimeProfiles];
+  }
+  return [{ id: 'default', runtime: 'claude' }];
+}
+
+/** Effective runner profile id for this chat (binding override or store default). */
+function effectiveRunnerProfileId(binding: ChannelBinding, store: BridgeStore): string {
+  const fromBinding = binding.runnerProfileId?.trim();
+  if (fromBinding) return fromBinding;
+  return store.getSetting('bridge_default_runner_profile_id')?.trim()
+    || getImRuntimeProfileList()[0]?.id
+    || 'default';
+}
 
 // ── Streaming preview helpers ──────────────────────────────────
 
@@ -228,19 +253,32 @@ export async function start(): Promise<void> {
     return;
   }
 
-  // Iterate all registered adapter types and create those that are enabled
+  // Iterate registered adapter factories — multiple instances per base channel (see CTI_IM_INSTANCES)
   for (const channelType of getRegisteredTypes()) {
-    const settingKey = `bridge_${channelType}_enabled`;
-    if (store.getSetting(settingKey) !== 'true') continue;
+    const instanceIds =
+      channelType === 'agent'
+        ? getConfiguredAgentInstanceIds()
+        : listInstanceIdsForChannel(channelType, store);
 
-    const adapter = createAdapter(channelType);
-    if (!adapter) continue;
+    for (const instanceId of instanceIds) {
+      if (channelType !== 'agent') {
+        if (!isInstanceImEnabled(store, channelType as ImBaseChannel, instanceId)) {
+          continue;
+        }
+      }
 
-    const configError = adapter.validateConfig();
-    if (!configError) {
-      registerAdapter(adapter);
-    } else {
-      console.warn(`[bridge-manager] ${channelType} adapter not valid:`, configError);
+      const adapter = createAdapter(channelType, instanceId);
+      if (!adapter) continue;
+
+      const configError = adapter.validateConfig();
+      if (!configError) {
+        registerAdapter(adapter);
+      } else {
+        console.warn(
+          `[bridge-manager] ${channelType} (${instanceId}) adapter not valid:`,
+          configError,
+        );
+      }
     }
   }
 
@@ -750,6 +788,7 @@ async function handleCommand(
         '/bind &lt;session_id&gt; - Bind to existing session',
         '/cwd /path - Change working directory',
         '/mode plan|code|ask - Change mode',
+        '/runner [id|default] - List or switch LLM runner for this chat',
         '/status - Show current status',
         '/sessions - List recent sessions',
         '/stop - Stop current session',
@@ -820,8 +859,90 @@ async function handleCommand(
       break;
     }
 
+    case '/runner':
+    case '/runners': {
+      const profiles = getImRuntimeProfileList();
+      const binding = router.resolve(msg.address);
+      const storeDefault = store.getSetting('bridge_default_runner_profile_id')?.trim() || undefined;
+
+      const rawArg = args.split(/\s+/)[0]?.trim() ?? '';
+      const argLc = rawArg.toLowerCase();
+
+      if (!rawArg) {
+        const eff = effectiveRunnerProfileId(binding, store);
+        const effMeta = profiles.find((p) => p.id === eff);
+        const lines: string[] = [
+          '<b>Runners (this chat)</b>',
+          '',
+          `Current profile: <code>${escapeHtml(eff)}</code>`,
+        ];
+        if (effMeta) {
+          lines.push(
+            `Backend: <b>${escapeHtml(effMeta.runtime)}</b>${effMeta.label ? ` (${escapeHtml(effMeta.label)})` : ''}`,
+          );
+        }
+        lines.push(
+          binding.runnerProfileId
+            ? 'This chat overrides the default.'
+            : `Using store default${storeDefault ? ` (<code>${escapeHtml(storeDefault)}</code>)` : ''}.`,
+          '',
+          '<b>Available:</b>',
+        );
+        for (const p of profiles) {
+          const mark =
+            p.id === storeDefault ? ' (server default)' : p.id === eff && !binding.runnerProfileId ? ' (effective)' : '';
+          const lbl = p.label ? ` — ${escapeHtml(p.label)}` : '';
+          lines.push(`• <code>${escapeHtml(p.id)}</code> — ${escapeHtml(p.runtime)}${lbl}${mark}`);
+        }
+        lines.push(
+          '',
+          'Use: <code>/runner &lt;profile_id&gt;</code>',
+          'Reset to server default: <code>/runner default</code>',
+        );
+        response = lines.join('\n');
+        break;
+      }
+
+      if (argLc === 'default' || argLc === 'reset') {
+        router.updateBinding(binding.id, { runnerProfileId: undefined });
+        const eff = effectiveRunnerProfileId(
+          { ...binding, runnerProfileId: undefined },
+          store,
+        );
+        response = `Runner reset to server default (effective profile: <code>${escapeHtml(eff)}</code>).`;
+        break;
+      }
+
+      const matched = profiles.find(
+        (p) => p.id === rawArg || p.id.toLowerCase() === argLc,
+      );
+      if (!matched) {
+        response = [
+          `Unknown profile <code>${escapeHtml(rawArg)}</code>.`,
+          '',
+          'Use <code>/runner</code> to list profiles.',
+        ].join('\n');
+        break;
+      }
+
+      router.updateBinding(binding.id, { runnerProfileId: matched.id });
+      response = [
+        '<b>Runner updated</b>',
+        '',
+        `Profile: <code>${escapeHtml(matched.id)}</code>`,
+        `Backend: <b>${escapeHtml(matched.runtime)}</b>${matched.label ? ` (${escapeHtml(matched.label)})` : ''}`,
+      ].join('\n');
+      break;
+    }
+
     case '/status': {
       const binding = router.resolve(msg.address);
+      const profiles = getImRuntimeProfileList();
+      const eff = effectiveRunnerProfileId(binding, store);
+      const effMeta = profiles.find((p) => p.id === eff);
+      const runnerLine = effMeta
+        ? `Runner: <code>${escapeHtml(eff)}</code> (${escapeHtml(effMeta.runtime)})`
+        : `Runner: <code>${escapeHtml(eff)}</code>`;
       response = [
         '<b>Bridge Status</b>',
         '',
@@ -829,6 +950,7 @@ async function handleCommand(
         `CWD: <code>${escapeHtml(binding.workingDirectory || '~')}</code>`,
         `Mode: <b>${binding.mode}</b>`,
         `Model: <code>${binding.model || 'default'}</code>`,
+        runnerLine,
       ].join('\n');
       break;
     }
@@ -890,6 +1012,7 @@ async function handleCommand(
         '/bind &lt;session_id&gt; - Bind to existing session',
         '/cwd /path - Change working directory',
         '/mode plan|code|ask - Change mode',
+        '/runner [id|default] - List or switch LLM runner for this chat',
         '/status - Show current status',
         '/sessions - List recent sessions',
         '/stop - Stop current session',

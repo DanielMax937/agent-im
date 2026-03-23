@@ -93,6 +93,11 @@ export class FakeInstanceManager {
     this.runningInstanceIds.delete(instanceId);
   }
 
+  async deleteInstance(instanceId: string): Promise<void> {
+    await this.stopInstance(instanceId);
+    this.store?.removeAgentInstance(instanceId);
+  }
+
   resolveApproval(approvalId: string, input: unknown): boolean {
     this.approvalResponses.push({ approvalId, input });
     return this.resolveApprovalResult;

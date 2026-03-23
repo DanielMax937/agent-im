@@ -217,6 +217,9 @@ export class JsonFileStore implements BridgeStore {
         model: data.model,
         updatedAt: now(),
       };
+      if (data.runnerProfileId !== undefined) {
+        updated.runnerProfileId = data.runnerProfileId;
+      }
       this.bindings.set(key, updated);
       this.persistBindings();
       return updated;
@@ -229,6 +232,7 @@ export class JsonFileStore implements BridgeStore {
       sdkSessionId: '',
       workingDirectory: data.workingDirectory,
       model: data.model,
+      runnerProfileId: data.runnerProfileId,
       mode: (this.settings.get('bridge_default_mode') as 'code' | 'plan' | 'ask') || 'code',
       active: true,
       createdAt: now(),

@@ -99,6 +99,11 @@ export interface ChannelBinding {
   workingDirectory: string;
   /** Model override for this binding */
   model: string;
+  /**
+   * IM-only: which runtime profile (`config.runtimeProfiles[].id`) powers this chat.
+   * Lets one bot serve multiple chats with different runners (Claude vs Codex, etc.).
+   */
+  runnerProfileId?: string;
   /** Chat mode */
   mode: 'code' | 'plan' | 'ask';
   /** Whether this binding is currently active */

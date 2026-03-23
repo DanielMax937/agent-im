@@ -1,4 +1,5 @@
 import type { LLMProvider, PermissionResolution } from '../lib/bridge/host';
+import { loadConfig, resolveRuntimeForPlatformInstance } from '../config';
 import { PendingPermissions } from '../permission-gateway';
 import { resolveProvider } from '../runtime-provider';
 import { JsonPlatformStore } from './json-platform-store';
@@ -12,7 +13,7 @@ function delay(ms: number): Promise<void> {
 }
 
 export interface ProviderFactory {
-  (runtime: AgentRuntime, pendingPermissions: PendingPermissions): Promise<LLMProvider>;
+  (instance: AgentInstanceRecord, pendingPermissions: PendingPermissions): Promise<LLMProvider>;
 }
 
 export interface JiraClientFactory {
@@ -60,7 +61,7 @@ class TaskAgentRunner implements ManagedRunner {
     if (this.running) return;
 
     const instance = this.requireInstance();
-    this.provider = await this.providerFactory(instance.runtime, this.pendingPermissions);
+    this.provider = await this.providerFactory(instance, this.pendingPermissions);
     this.adapter = new JiraAdapter(
       {
         instanceId: instance.id,
@@ -294,15 +295,16 @@ export class InstanceManager {
   private constructor(private readonly deps: InstanceManagerDeps) {
     this.providerFactory =
       deps.providerFactory ??
-      ((runtime, pendingPermissions) =>
-        resolveProvider({
-          config: {
-            runtime,
-            autoApprove: false,
-          },
+      ((instance, pendingPermissions) => {
+        const config = loadConfig();
+        const eff = resolveRuntimeForPlatformInstance(config, instance);
+        return resolveProvider({
+          config,
           pendingPermissions,
-          runtimeOverride: runtime,
-        }));
+          autoApproveOverride: false,
+          runtimeOverride: eff,
+        });
+      });
   }
 
   static getInstance(deps?: InstanceManagerDeps): InstanceManager {
@@ -365,6 +367,11 @@ export class InstanceManager {
     if (!runner) return;
     await runner.stop();
     this.runners.delete(instanceId);
+  }
+
+  async deleteInstance(instanceId: string): Promise<void> {
+    await this.stopInstance(instanceId);
+    this.deps.store.removeAgentInstance(instanceId);
   }
 
   resolveApproval(permissionRequestId: string, resolution: PermissionResolution): boolean {

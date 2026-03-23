@@ -8,6 +8,7 @@ import type {
   Sprint,
   TaskSession,
   AgentInstanceRecord,
+  AgentRole,
 } from './types';
 
 export interface PlatformStoreApi {
@@ -38,6 +39,11 @@ export interface WorkflowServiceApi {
   closeTask(taskSessionId: string): Promise<TaskSession>;
   resolveApproval(approvalId: string, input: unknown): boolean;
   handleJiraWebhook(payload: unknown): Promise<unknown>;
+  ensureAgentInstance(
+    taskSessionId: string,
+    role: AgentRole,
+    runtimeProfileId?: string,
+  ): Promise<AgentInstanceRecord>;
 }
 
 export interface InstanceManagerApi {
@@ -45,6 +51,7 @@ export interface InstanceManagerApi {
   reconcile(): Promise<void>;
   startInstance(instanceId: string): Promise<void>;
   stopInstance(instanceId: string): Promise<void>;
+  deleteInstance(instanceId: string): Promise<void>;
 }
 
 export interface CreatePlatformAppOptions {
@@ -221,6 +228,23 @@ export function createPlatformApp(options: CreatePlatformAppOptions): PlatformAp
         return jsonResponse(options.store.listAgentInstances());
       }
 
+      if (request.method === 'POST' && pathname === '/api/instances') {
+        const body = await readRequestBody<{
+          taskSessionId?: string;
+          role?: AgentRole;
+          runtimeProfileId?: string;
+        }>(request);
+        if (!body.taskSessionId || !body.role) {
+          return jsonResponse({ error: 'taskSessionId and role are required' }, 400);
+        }
+        const record = await options.workflowService.ensureAgentInstance(
+          body.taskSessionId,
+          body.role,
+          body.runtimeProfileId,
+        );
+        return jsonResponse(record, 201);
+      }
+
       const instanceParams = matchPath('/api/instances/:instanceId', pathname);
       if (request.method === 'GET' && instanceParams) {
         const instance = options.store.getAgentInstance(instanceParams.instanceId);
@@ -335,6 +359,11 @@ export function createPlatformApp(options: CreatePlatformAppOptions): PlatformAp
           instanceId: instanceStopParams.instanceId,
           runningInstances: options.instanceManager.listRunningInstanceIds(),
         });
+      }
+
+      if (request.method === 'DELETE' && instanceParams) {
+        await options.instanceManager.deleteInstance(instanceParams.instanceId);
+        return jsonResponse({ ok: true, instanceId: instanceParams.instanceId });
       }
 
       if (request.method === 'POST' && pathname === '/api/webhooks/jira') {

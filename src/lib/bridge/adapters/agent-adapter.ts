@@ -447,6 +447,11 @@ function parseAgentConfigs(): AgentConfig[] {
   return configs;
 }
 
+/** Instance ids that have a valid agent config (for bridge-manager multi-instance start). */
+export function getConfiguredAgentInstanceIds(): string[] {
+  return parseAgentConfigs().map((c) => c.instanceId);
+}
+
 // Register factory that creates agent instances based on instanceId
 registerAdapterFactory('agent', (instanceId: string) => {
   const configs = parseAgentConfigs();

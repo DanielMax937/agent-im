@@ -19,6 +19,7 @@ import type {
 import type { FileAttachment } from '../types';
 import { BaseChannelAdapter, registerAdapterFactory } from '../channel-adapter';
 import { getBridgeContext } from '../context';
+import { imScopedGet } from '../im-instance-settings';
 import {
   getAccessToken,
   getGatewayUrl,
@@ -50,6 +51,10 @@ export class QQAdapter extends BaseChannelAdapter {
     super('qq', instanceId);
   }
 
+  private q(key: string): string | null {
+    return imScopedGet(getBridgeContext().store, 'qq', this.instanceId, key);
+  }
+
   // ── Lifecycle ───────────────────────────────────────────────
 
   async start(): Promise<void> {
@@ -61,9 +66,8 @@ export class QQAdapter extends BaseChannelAdapter {
       return;
     }
 
-    const store = getBridgeContext().store;
-    const appId = store.getSetting('bridge_qq_app_id') || '';
-    const appSecret = store.getSetting('bridge_qq_app_secret') || '';
+    const appId = this.q('bridge_qq_app_id') || '';
+    const appSecret = this.q('bridge_qq_app_secret') || '';
 
     clearTokenCache();
 
@@ -139,8 +143,8 @@ export class QQAdapter extends BaseChannelAdapter {
 
     try {
       const store = getBridgeContext().store;
-      const appId = store.getSetting('bridge_qq_app_id') || '';
-      const appSecret = store.getSetting('bridge_qq_app_secret') || '';
+      const appId = this.q('bridge_qq_app_id') || '';
+      const appSecret = this.q('bridge_qq_app_secret') || '';
 
       const token = await getAccessToken(appId, appSecret);
       const msgSeq = nextMsgSeq(message.replyToMessageId);
@@ -164,18 +168,17 @@ export class QQAdapter extends BaseChannelAdapter {
   // ── Config & Auth ───────────────────────────────────────────
 
   validateConfig(): string | null {
-    const store = getBridgeContext().store;
-    const appId = store.getSetting('bridge_qq_app_id');
+    const appId = this.q('bridge_qq_app_id');
     if (!appId) return 'bridge_qq_app_id not configured';
 
-    const appSecret = store.getSetting('bridge_qq_app_secret');
+    const appSecret = this.q('bridge_qq_app_secret');
     if (!appSecret) return 'bridge_qq_app_secret not configured';
 
     return null;
   }
 
   isAuthorized(userId: string, _chatId: string): boolean {
-    const allowedUsers = getBridgeContext().store.getSetting('bridge_qq_allowed_users') || '';
+    const allowedUsers = this.q('bridge_qq_allowed_users') || '';
     if (!allowedUsers) return true;
 
     const allowed = allowedUsers
@@ -321,14 +324,14 @@ export class QQAdapter extends BaseChannelAdapter {
 
     const text = (data.content || '').trim();
     const address = {
-      channelType: 'qq' as const,
+      channelType: this.channelType,
       chatId: userId,
       userId,
       displayName: userId.slice(0, 8),
     };
 
     // Filter image attachments
-    const imageEnabled = getBridgeContext().store.getSetting('bridge_qq_image_enabled') !== 'false';
+    const imageEnabled = this.q('bridge_qq_image_enabled') !== 'false';
     const imageAttachments = imageEnabled
       ? (data.attachments || []).filter((a) => a.content_type?.startsWith('image/'))
       : [];
@@ -379,7 +382,7 @@ export class QQAdapter extends BaseChannelAdapter {
             ? `[${files.length} image(s)] ${text.slice(0, 150)}`
             : `[${failedCount} image(s) failed] ${text.slice(0, 150)}`;
           getBridgeContext().store.insertAuditLog({
-            channelType: 'qq',
+            channelType: this.channelType,
             chatId: userId,
             direction: 'inbound',
             messageId: data.id,
@@ -401,7 +404,7 @@ export class QQAdapter extends BaseChannelAdapter {
       // Audit log
       try {
         getBridgeContext().store.insertAuditLog({
-          channelType: 'qq',
+          channelType: this.channelType,
           chatId: userId,
           direction: 'inbound',
           messageId: data.id,
@@ -417,7 +420,7 @@ export class QQAdapter extends BaseChannelAdapter {
     attachments: QQAttachment[],
   ): Promise<{ files: FileAttachment[]; failedCount: number }> {
     const maxSizeMB = parseInt(
-      getBridgeContext().store.getSetting('bridge_qq_max_image_size') || '20',
+      this.q('bridge_qq_max_image_size') || '20',
       10,
     ) || 20;
     const maxSizeBytes = maxSizeMB * 1024 * 1024;
@@ -519,8 +522,8 @@ export class QQAdapter extends BaseChannelAdapter {
 
       try {
         const store = getBridgeContext().store;
-        const appId = store.getSetting('bridge_qq_app_id') || '';
-        const appSecret = store.getSetting('bridge_qq_app_secret') || '';
+        const appId = this.q('bridge_qq_app_id') || '';
+        const appSecret = this.q('bridge_qq_app_secret') || '';
         const token = await getAccessToken(appId, appSecret);
         const gatewayUrl = await getGatewayUrl(token);
         await this.connectGateway(gatewayUrl, token);

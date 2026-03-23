@@ -99,6 +99,7 @@ export class WorkflowService {
       title: input.title,
       workflowState: 'in_progress',
       runtime: input.runtime,
+      runtimeProfileId: input.runtimeProfileId ?? existing?.runtimeProfileId,
       role,
       sessionId: existing?.sessionId ?? crypto.randomUUID(),
       providerSessionId: existing?.providerSessionId,
@@ -270,6 +271,20 @@ export class WorkflowService {
     return taskSession;
   }
 
+  /** Create or restart an agent instance for an existing task (e.g. from the admin UI). */
+  async ensureAgentInstance(
+    taskSessionId: string,
+    role: AgentRole,
+    runtimeProfileId?: string,
+  ): Promise<AgentInstanceRecord> {
+    const taskSession = this.requireTaskSession(taskSessionId);
+    const instance = this.buildAgentInstance(taskSession, role);
+    return this.deps.instanceManager.upsertAndStart({
+      ...instance,
+      ...(runtimeProfileId !== undefined ? { runtimeProfileId } : {}),
+    });
+  }
+
   private buildAgentInstance(taskSession: TaskSession, role: AgentRole): AgentInstanceRecord {
     const project = this.requireProject(taskSession.projectId);
     const existing = this.deps.store.findAgentInstance(taskSession.id, role);
@@ -281,6 +296,7 @@ export class WorkflowService {
       taskId: taskSession.taskId,
       taskSessionId: taskSession.id,
       runtime: taskSession.runtime,
+      runtimeProfileId: taskSession.runtimeProfileId ?? existing?.runtimeProfileId,
       role,
       status: existing?.status ?? 'starting',
       branchName: taskSession.branchName,

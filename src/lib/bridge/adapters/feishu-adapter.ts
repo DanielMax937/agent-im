@@ -26,6 +26,7 @@ import type {
 import type { FileAttachment } from '../types';
 import { BaseChannelAdapter, registerAdapterFactory } from '../channel-adapter';
 import { getBridgeContext } from '../context';
+import { imScopedGet } from '../im-instance-settings';
 import {
   htmlToFeishuMarkdown,
   preprocessFeishuMarkdown,
@@ -98,6 +99,10 @@ export class FeishuAdapter extends BaseChannelAdapter {
     super('feishu', instanceId);
   }
 
+  private f(key: string): string | null {
+    return imScopedGet(getBridgeContext().store, 'feishu', this.instanceId, key);
+  }
+
   // ── Lifecycle ───────────────────────────────────────────────
 
   async start(): Promise<void> {
@@ -109,9 +114,9 @@ export class FeishuAdapter extends BaseChannelAdapter {
       return;
     }
 
-    const appId = getBridgeContext().store.getSetting('bridge_feishu_app_id') || '';
-    const appSecret = getBridgeContext().store.getSetting('bridge_feishu_app_secret') || '';
-    const domainSetting = getBridgeContext().store.getSetting('bridge_feishu_domain') || 'feishu';
+    const appId = this.f('bridge_feishu_app_id') || '';
+    const appSecret = this.f('bridge_feishu_app_secret') || '';
+    const domainSetting = this.f('bridge_feishu_domain') || 'feishu';
     const domain = domainSetting === 'lark'
       ? lark.Domain.Lark
       : lark.Domain.Feishu;
@@ -462,20 +467,20 @@ export class FeishuAdapter extends BaseChannelAdapter {
   // ── Config & Auth ───────────────────────────────────────────
 
   validateConfig(): string | null {
-    const enabled = getBridgeContext().store.getSetting('bridge_feishu_enabled');
+    const enabled = this.f('bridge_feishu_enabled');
     if (enabled !== 'true') return 'bridge_feishu_enabled is not true';
 
-    const appId = getBridgeContext().store.getSetting('bridge_feishu_app_id');
+    const appId = this.f('bridge_feishu_app_id');
     if (!appId) return 'bridge_feishu_app_id not configured';
 
-    const appSecret = getBridgeContext().store.getSetting('bridge_feishu_app_secret');
+    const appSecret = this.f('bridge_feishu_app_secret');
     if (!appSecret) return 'bridge_feishu_app_secret not configured';
 
     return null;
   }
 
   isAuthorized(userId: string, chatId: string): boolean {
-    const allowedUsers = getBridgeContext().store.getSetting('bridge_feishu_allowed_users') || '';
+    const allowedUsers = this.f('bridge_feishu_allowed_users') || '';
     if (!allowedUsers) {
       // No restriction configured — allow all
       return true;
@@ -531,7 +536,7 @@ export class FeishuAdapter extends BaseChannelAdapter {
 
     // Group chat policy
     if (isGroup) {
-      const policy = getBridgeContext().store.getSetting('bridge_feishu_group_policy') || 'open';
+      const policy = this.f('bridge_feishu_group_policy') || 'open';
 
       if (policy === 'disabled') {
         console.log('[feishu-adapter] Group message ignored (policy=disabled), chatId:', chatId);
@@ -539,7 +544,7 @@ export class FeishuAdapter extends BaseChannelAdapter {
       }
 
       if (policy === 'allowlist') {
-        const allowedGroups = (getBridgeContext().store.getSetting('bridge_feishu_group_allow_from') || '')
+        const allowedGroups = (this.f('bridge_feishu_group_allow_from') || '')
           .split(',')
           .map((s) => s.trim())
           .filter(Boolean);
@@ -550,12 +555,12 @@ export class FeishuAdapter extends BaseChannelAdapter {
       }
 
       // Require @mention check
-      const requireMention = getBridgeContext().store.getSetting('bridge_feishu_require_mention') !== 'false';
+      const requireMention = this.f('bridge_feishu_require_mention') !== 'false';
       if (requireMention && !this.isBotMentioned(msg.mentions)) {
         console.log('[feishu-adapter] Group message ignored (bot not @mentioned), chatId:', chatId, 'msgId:', msg.message_id);
         try {
           getBridgeContext().store.insertAuditLog({
-            channelType: 'feishu',
+            channelType: this.channelType,
             chatId,
             direction: 'inbound',
             messageId: msg.message_id,
@@ -589,7 +594,7 @@ export class FeishuAdapter extends BaseChannelAdapter {
           text = '[image download failed]';
           try {
             getBridgeContext().store.insertAuditLog({
-              channelType: 'feishu',
+              channelType: this.channelType,
               chatId,
               direction: 'inbound',
               messageId: msg.message_id,
@@ -612,7 +617,7 @@ export class FeishuAdapter extends BaseChannelAdapter {
           text = `[${messageType} download failed]`;
           try {
             getBridgeContext().store.insertAuditLog({
-              channelType: 'feishu',
+              channelType: this.channelType,
               chatId,
               direction: 'inbound',
               messageId: msg.message_id,
@@ -645,7 +650,7 @@ export class FeishuAdapter extends BaseChannelAdapter {
 
     const timestamp = parseInt(msg.create_time, 10) || Date.now();
     const address = {
-      channelType: 'feishu' as const,
+      channelType: this.channelType,
       chatId,
       userId,
     };
@@ -686,7 +691,7 @@ export class FeishuAdapter extends BaseChannelAdapter {
         ? `[${attachments.length} attachment(s)] ${text.slice(0, 150)}`
         : text.slice(0, 200);
       getBridgeContext().store.insertAuditLog({
-        channelType: 'feishu',
+        channelType: this.channelType,
         chatId,
         direction: 'inbound',
         messageId: msg.message_id,

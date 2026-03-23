@@ -21,8 +21,10 @@ export default function HomePage() {
           and multi-instance agent manager stay reusable behind native HTTP handlers.
         </p>
         <div className="actions">
-          <a href="/health">Open health endpoint</a>
-          <a href="/api/bridge/status">Open bridge status</a>
+          <a href="/admin">Admin (bridge + instances)</a>
+          <a href="/board">Task board</a>
+          <a href="/health">Health</a>
+          <a href="/api/bridge/status">Bridge status (JSON)</a>
         </div>
       </section>
 

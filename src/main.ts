@@ -14,11 +14,11 @@ import * as bridgeManager from './lib/bridge/bridge-manager';
 // Side-effect import to trigger adapter self-registration
 import './lib/bridge/adapters/index';
 
-import { loadConfig, configToSettings, CTI_HOME } from './config';
+import { loadConfig, configToSettings, CTI_HOME, syncConfigFileToProcessEnv, normalizeRuntimeProfiles } from './config';
+import { buildImBridgeLlmStack } from './lib/bridge/llm-registry';
 import { JsonFileStore } from './store';
 import { PendingPermissions } from './permission-gateway';
 import { setupLogger } from './logger';
-import { resolveProvider } from './runtime-provider';
 
 const RUNTIME_DIR = path.join(CTI_HOME, 'runtime');
 const STATUS_FILE = path.join(RUNTIME_DIR, 'status.json');
@@ -46,6 +46,7 @@ function writeStatus(info: StatusInfo): void {
 
 async function main(): Promise<void> {
   const config = loadConfig();
+  syncConfigFileToProcessEnv();
   setupLogger();
 
   const runId = crypto.randomUUID();
@@ -67,8 +68,10 @@ async function main(): Promise<void> {
   const settings = configToSettings(config);
   const store = new JsonFileStore(settings);
   const pendingPerms = new PendingPermissions();
-  const llm = await resolveProvider({ config, pendingPermissions: pendingPerms });
-  console.log(`[claude-to-im] Runtime: ${config.runtime}`);
+  const { defaultLlm, resolveLlmForBinding } = await buildImBridgeLlmStack(config, pendingPerms);
+  console.log(
+    `[claude-to-im] IM bridge: ${normalizeRuntimeProfiles(config).length} runtime profile(s); default + per-chat binding resolution`,
+  );
 
   const gateway = {
     resolvePendingPermission: (id: string, resolution: { behavior: 'allow' | 'deny'; message?: string }) =>
@@ -77,7 +80,13 @@ async function main(): Promise<void> {
 
   initBridgeContext({
     store,
-    llm,
+    llm: defaultLlm,
+    resolveLlmForBinding,
+    imRuntimeProfiles: normalizeRuntimeProfiles(config).map((p) => ({
+      id: p.id,
+      runtime: p.runtime,
+      label: p.label,
+    })),
     permissions: gateway,
     lifecycle: {
       onBridgeStart: () => {

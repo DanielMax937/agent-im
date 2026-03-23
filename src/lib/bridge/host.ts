@@ -132,6 +132,8 @@ export interface UpsertChannelBindingInput {
   codepilotSessionId: string;
   workingDirectory: string;
   model: string;
+  /** IM runtime profile id; see ChannelBinding.runnerProfileId */
+  runnerProfileId?: string;
 }
 
 /**

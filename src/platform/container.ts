@@ -1,11 +1,11 @@
 import { ProxyAgent, setGlobalDispatcher } from 'undici';
 
-import { loadConfig, configToSettings } from '../config';
+import { loadConfig, configToSettings, syncConfigFileToProcessEnv, normalizeRuntimeProfiles } from '../config';
+import { buildImBridgeLlmStack } from '../lib/bridge/llm-registry';
 import { initBridgeContext } from '../lib/bridge/context';
 import '../lib/bridge/adapters/index';
 import { getLogger, setupLogger } from '../logger';
 import { PendingPermissions } from '../permission-gateway';
-import { resolveProvider } from '../runtime-provider';
 import { JsonFileStore } from '../store';
 import { createPlatformApp, type PlatformApp } from './app';
 import { CompensationService } from './compensation-service';
@@ -26,6 +26,7 @@ const GLOBAL_KEY = '__agent_im_next_platform_container__';
 
 async function createPlatformContainer(): Promise<PlatformContainer> {
   const config = loadConfig();
+  syncConfigFileToProcessEnv();
   const logger = setupLogger();
 
   if (config.proxy) {
@@ -34,14 +35,17 @@ async function createPlatformContainer(): Promise<PlatformContainer> {
   }
 
   const pendingPermissions = new PendingPermissions();
-  const llm = await resolveProvider({
-    config,
-    pendingPermissions,
-  });
+  const { defaultLlm, resolveLlmForBinding } = await buildImBridgeLlmStack(config, pendingPermissions);
 
   initBridgeContext({
     store: new JsonFileStore(configToSettings(config)),
-    llm,
+    llm: defaultLlm,
+    resolveLlmForBinding,
+    imRuntimeProfiles: normalizeRuntimeProfiles(config).map((p) => ({
+      id: p.id,
+      runtime: p.runtime,
+      label: p.label,
+    })),
     permissions: {
       resolvePendingPermission: (permissionRequestId, resolution) =>
         pendingPermissions.resolve(permissionRequestId, resolution),
