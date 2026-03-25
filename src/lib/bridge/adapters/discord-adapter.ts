@@ -23,6 +23,12 @@ import type { FileAttachment } from '../types';
 import { BaseChannelAdapter, registerAdapterFactory } from '../channel-adapter';
 import { getBridgeContext } from '../context';
 import { imScopedGet } from '../im-instance-settings';
+import {
+  isLocalAgentIntentEnabled,
+  readLocalAgentSettings,
+  RedisLocalTransport,
+  runRedisLocalInboundLoop,
+} from '../redis-local-transport';
 
 /** Max number of message IDs to keep for dedup. */
 const DEDUP_MAX = 1000;
@@ -79,10 +85,36 @@ export class DiscordAdapter extends BaseChannelAdapter {
   /** Chats where preview has permanently failed. */
   private previewDegraded = new Set<string>();
 
+  private redisLocal: RedisLocalTransport | null = null;
+
   // ── Lifecycle ───────────────────────────────────────────────
 
   async start(): Promise<void> {
     if (this.running) return;
+
+    const la = readLocalAgentSettings(getBridgeContext().store, 'discord', this.instanceId);
+    if (la) {
+      const configError = this.validateConfig();
+      if (configError) {
+        console.warn('[discord-adapter] Cannot start (local agent):', configError);
+        return;
+      }
+      this.redisLocal = new RedisLocalTransport('discord', this.instanceId, la);
+      try {
+        await this.redisLocal.connect();
+        await this.redisLocal.seedFirstPromptIfNeeded();
+      } catch (err) {
+        console.error('[discord-adapter] Local agent Redis failed:', err);
+        this.redisLocal = null;
+        return;
+      }
+      this.running = true;
+      this.redisLocalPollLoop().catch((err) => {
+        console.error('[discord-adapter] Redis poll loop error:', err);
+      });
+      console.log(`[discord-adapter] Local Agent mode (Redis-only), instance=${this.instanceId}`);
+      return;
+    }
 
     const configError = this.validateConfig();
     if (configError) {
@@ -143,6 +175,11 @@ export class DiscordAdapter extends BaseChannelAdapter {
     if (!this.running) return;
     this.running = false;
 
+    if (this.redisLocal) {
+      await this.redisLocal.disconnect();
+      this.redisLocal = null;
+    }
+
     // Destroy client
     if (this.client) {
       try {
@@ -200,9 +237,25 @@ export class DiscordAdapter extends BaseChannelAdapter {
     }
   }
 
+  private async redisLocalPollLoop(): Promise<void> {
+    const rt = this.redisLocal;
+    if (!rt) return;
+    await runRedisLocalInboundLoop(
+      rt,
+      this.channelType,
+      (msg) => this.enqueue(msg),
+      () => this.running,
+      async () => {
+        console.log(`[discord-adapter] Local agent max turns (${this.instanceId})`);
+        await this.stop();
+      },
+    );
+  }
+
   // ── Typing indicator ───────────────────────────────────────
 
   onMessageStart(chatId: string): void {
+    if (this.redisLocal) return;
     this.stopTyping(chatId);
     if (!this.client) return;
 
@@ -236,6 +289,11 @@ export class DiscordAdapter extends BaseChannelAdapter {
   // ── Send ────────────────────────────────────────────────────
 
   async send(message: OutboundMessage): Promise<SendResult> {
+    if (this.redisLocal) {
+      const r = await this.redisLocal.deliverClaudeReply(message.text);
+      return r.ok ? { ok: true, messageId: crypto.randomUUID() } : { ok: false, error: r.error };
+    }
+
     if (!this.client) {
       return { ok: false, error: 'Discord client not initialized' };
     }
@@ -319,6 +377,7 @@ export class DiscordAdapter extends BaseChannelAdapter {
   // ── Streaming preview ──────────────────────────────────────
 
   getPreviewCapabilities(chatId: string): PreviewCapabilities | null {
+    if (readLocalAgentSettings(getBridgeContext().store, 'discord', this.instanceId)) return null;
     // Global kill switch
     if (this.d('bridge_discord_stream_enabled') === 'false') return null;
 
@@ -329,6 +388,7 @@ export class DiscordAdapter extends BaseChannelAdapter {
   }
 
   async sendPreview(chatId: string, text: string, _draftId: number): Promise<'sent' | 'skip' | 'degrade'> {
+    if (this.redisLocal) return 'skip';
     if (!this.client) return 'skip';
 
     const existingMsgId = this.previewMessages.get(chatId);
@@ -380,6 +440,14 @@ export class DiscordAdapter extends BaseChannelAdapter {
     const enabled = this.d('bridge_discord_enabled');
     if (enabled !== 'true') return 'bridge_discord_enabled is not true';
 
+    const store = getBridgeContext().store;
+    if (isLocalAgentIntentEnabled(store, 'discord', this.instanceId)) {
+      if (!readLocalAgentSettings(store, 'discord', this.instanceId)) {
+        return 'local agent enabled but bridge_discord_local_agent_redis_url is required';
+      }
+      return null;
+    }
+
     const token = this.d('bridge_discord_bot_token');
     if (!token) return 'bridge_discord_bot_token not configured';
 
@@ -387,6 +455,7 @@ export class DiscordAdapter extends BaseChannelAdapter {
   }
 
   isAuthorized(userId: string, chatId: string): boolean {
+    if (this.redisLocal) return true;
     const allowedUsers = this.d('bridge_discord_allowed_users') || '';
     const allowedChannels = this.d('bridge_discord_allowed_channels') || '';
 

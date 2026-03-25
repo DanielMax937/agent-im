@@ -15,31 +15,30 @@ export default function HomePage() {
     <main className="page-shell">
       <section className="hero-card">
         <p className="eyebrow">agent-im</p>
-        <h1>Next.js DevOps Agentic Platform</h1>
+        <h1>基于 Next.js 的 DevOps 智能体平台</h1>
         <p className="lead">
-          The web server now runs on Next.js, while the platform APIs, Jira workflow engine,
-          and multi-instance agent manager stay reusable behind native HTTP handlers.
+          Web 服务由 Next.js 承载；平台 API、Jira 工作流引擎与多实例运行器仍通过统一的 HTTP 层对外提供，便于复用与集成。
         </p>
         <div className="actions">
-          <a href="/admin">Admin (bridge + instances)</a>
-          <a href="/board">Task board</a>
-          <a href="/health">Health</a>
-          <a href="/api/bridge/status">Bridge status (JSON)</a>
+          <a href="/admin">管理后台（桥接与配置）</a>
+          <a href="/board">任务看板</a>
+          <a href="/health">健康检查</a>
+          <a href="/api/bridge/status">桥接状态（JSON）</a>
         </div>
       </section>
 
       <section className="grid">
         <article className="panel">
-          <h2>Server stack</h2>
+          <h2>技术栈</h2>
           <ul>
-            <li>Next.js app router for web and API routes</li>
-            <li>Pino-backed structured logging with secret masking</li>
-            <li>Shared workflow and instance services under `src/platform`</li>
+            <li>Next.js App Router：页面与 API 路由</li>
+            <li>Pino 结构化日志，敏感信息脱敏</li>
+            <li>工作流与实例服务位于 <code>src/platform</code>，与 UI 解耦</li>
           </ul>
         </article>
 
         <article className="panel">
-          <h2>Key endpoints</h2>
+          <h2>常用 API</h2>
           <ul>
             {platformEndpoints.map((endpoint) => (
               <li key={endpoint}>{endpoint}</li>

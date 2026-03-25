@@ -1,6 +1,13 @@
 import { ProxyAgent, setGlobalDispatcher } from 'undici';
 
-import { loadConfig, configToSettings, syncConfigFileToProcessEnv, normalizeRuntimeProfiles } from '../config';
+import {
+  loadConfig,
+  configToSettings,
+  syncConfigFileToProcessEnv,
+  normalizeRunners,
+  normalizeRunnersForChannelType,
+  defaultRunnerIdForChannelType,
+} from '../config';
 import { buildImBridgeLlmStack } from '../lib/bridge/llm-registry';
 import { initBridgeContext } from '../lib/bridge/context';
 import '../lib/bridge/adapters/index';
@@ -36,16 +43,22 @@ async function createPlatformContainer(): Promise<PlatformContainer> {
 
   const pendingPermissions = new PendingPermissions();
   const { defaultLlm, resolveLlmForBinding } = await buildImBridgeLlmStack(config, pendingPermissions);
+  const bridgeRunners = normalizeRunners(config);
+  const bridgeDefaultRunnerId = config.defaultRunnerId ?? bridgeRunners[0]?.id;
 
   initBridgeContext({
     store: new JsonFileStore(configToSettings(config)),
     llm: defaultLlm,
     resolveLlmForBinding,
-    imRuntimeProfiles: normalizeRuntimeProfiles(config).map((p) => ({
+    getRunnerConfigsForChannelType: (channelType) => normalizeRunnersForChannelType(config, channelType),
+    getDefaultRunnerIdForChannelType: (channelType) => defaultRunnerIdForChannelType(config, channelType),
+    imRunners: bridgeRunners.map((p) => ({
       id: p.id,
       runtime: p.runtime,
       label: p.label,
     })),
+    imRunnerConfigs: bridgeRunners,
+    defaultRunnerId: bridgeDefaultRunnerId,
     permissions: {
       resolvePendingPermission: (permissionRequestId, resolution) =>
         pendingPermissions.resolve(permissionRequestId, resolution),

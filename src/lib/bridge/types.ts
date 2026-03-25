@@ -100,7 +100,7 @@ export interface ChannelBinding {
   /** Model override for this binding */
   model: string;
   /**
-   * IM-only: which runtime profile (`config.runtimeProfiles[].id`) powers this chat.
+   * IM-only: which runner id (`imBot.runners[].id` for this bot) powers this chat.
    * Lets one bot serve multiple chats with different runners (Claude vs Codex, etc.).
    */
   runnerProfileId?: string;
@@ -119,6 +119,8 @@ export interface BridgeStatus {
   running: boolean;
   startedAt: string | null;
   adapters: AdapterStatus[];
+  /** When true, bridge was spawned by this Node (e.g. Next) process; API stop will SIGTERM it. */
+  managedByApp?: boolean;
 }
 
 /** Status of a single channel adapter */

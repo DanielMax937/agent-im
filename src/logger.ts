@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import pino, { multistream, type Logger } from 'pino';
 
-import { CTI_HOME } from './config';
+import { getCtiHome } from './config';
 
 const MASK_PATTERNS: RegExp[] = [
   /(?:token|secret|password|api_key)["']?\s*[:=]\s*["']?([^\s"',]+)/gi,
@@ -22,10 +22,11 @@ export function maskSecrets(text: string): string {
   return result;
 }
 
-const LOG_DIR = path.join(CTI_HOME, 'logs');
-const LOG_PATH = path.join(LOG_DIR, 'bridge.log');
-
 let loggerInstance: Logger | null = null;
+
+export function resetLoggerInstance(): void {
+  loggerInstance = null;
+}
 let consolePatched = false;
 
 function maskValue(value: unknown): unknown {
@@ -55,9 +56,11 @@ function maskValue(value: unknown): unknown {
 }
 
 function createLogger(): Logger {
-  fs.mkdirSync(LOG_DIR, { recursive: true });
+  const logDir = path.join(getCtiHome(), 'logs');
+  const logPath = path.join(logDir, 'bridge.log');
+  fs.mkdirSync(logDir, { recursive: true });
   const fileDestination = pino.destination({
-    dest: LOG_PATH,
+    dest: logPath,
     mkdir: true,
     sync: false,
   });

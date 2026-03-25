@@ -51,7 +51,7 @@ Bridge 将每个实例映射为带前缀的 `JsonFileStore` 设置键，供适�
 
 ## 与 profile / binding 的关系
 
-- **Runtime profile**（runner）：仍是**进程级**配置（`CTI_RUNTIME_PROFILES`）；每个 **chat binding** 通过 `runnerProfileId` 选择 profile（见 IM_BRIDGE_MODEL）。
+- **Runner**：**进程级**配置（`CTI_RUNNERS`）；每个 **chat binding** 通过 `runnerProfileId` 选择 Runner（见 IM_BRIDGE_MODEL）。
 - **IM 实例**：决定**哪一个 Telegram/Discord/… bot** 收到消息；`ChannelBinding.channelType` 为 `telegram:work` 这类值，与 `chatId` 一起唯一标识会话。
 
 二者正交：**先**定 IM 实例（bot），**再**在该 chat 上选 runner。

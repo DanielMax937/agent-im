@@ -1,6 +1,11 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 
 import * as bridgeManager from '../lib/bridge/bridge-manager';
+import {
+  getBridgeStatusForApi,
+  startBridgeDaemonChild,
+  stopBridgeDaemonChild,
+} from '../lib/bridge-app-child';
 import { getLogger } from '../logger';
 import type {
   PendingApprovalRecord,
@@ -67,7 +72,7 @@ export interface PlatformApp {
 
 const DIRECTORY_STRUCTURE_PLAN = {
   src: {
-    'main.ts': 'legacy daemon entrypoint for CLI bridge mode',
+    'main.ts': 'standalone bridge daemon entrypoint',
     'app': 'Next.js app router entrypoint for the web platform',
     platform: {
       'app.ts': 'native HTTP platform router shared by Next.js and tests',
@@ -179,7 +184,7 @@ export function createPlatformApp(options: CreatePlatformAppOptions): PlatformAp
       if (request.method === 'GET' && pathname === '/health') {
         return jsonResponse({
           ok: true,
-          bridge: bridgeManager.getStatus(),
+          bridge: getBridgeStatusForApi(),
           runningInstances: options.instanceManager.listRunningInstanceIds(),
         });
       }
@@ -376,22 +381,31 @@ export function createPlatformApp(options: CreatePlatformAppOptions): PlatformAp
       }
 
       if (request.method === 'GET' && pathname === '/api/bridge/status') {
-        return jsonResponse(bridgeManager.getStatus());
+        return jsonResponse(getBridgeStatusForApi());
       }
 
       const bridgeActionParams = matchPath('/api/bridge/:action', pathname);
       if (request.method === 'POST' && bridgeActionParams) {
         if (bridgeActionParams.action === 'start') {
-          await bridgeManager.start();
-          return jsonResponse(bridgeManager.getStatus());
+          await startBridgeDaemonChild();
+          return jsonResponse(getBridgeStatusForApi());
         }
         if (bridgeActionParams.action === 'stop') {
-          await bridgeManager.stop();
-          return jsonResponse(bridgeManager.getStatus());
+          const stopped = await stopBridgeDaemonChild();
+          if (!stopped.ok) {
+            return jsonResponse(
+              {
+                error:
+                  '桥接未由本应用启动，无法在此停止。请先使用 scripts/daemon.sh stop，或结束对应 PID。',
+              },
+              409,
+            );
+          }
+          return jsonResponse(getBridgeStatusForApi());
         }
         if (bridgeActionParams.action === 'auto-start') {
           bridgeManager.tryAutoStart();
-          return jsonResponse(bridgeManager.getStatus());
+          return jsonResponse(getBridgeStatusForApi());
         }
         return jsonResponse({ error: `Unknown bridge action: ${bridgeActionParams.action}` }, 404);
       }

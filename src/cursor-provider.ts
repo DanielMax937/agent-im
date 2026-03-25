@@ -18,8 +18,15 @@ import { buildSubprocessEnv } from './llm-provider';
 
 export type SpawnFn = (cmd: string, args: string[], opts: SpawnOptions) => ChildProcess;
 
-function resolveAgentPath(): string {
-  return process.env.CTI_CURSOR_EXECUTABLE || 'agent';
+function resolveAgentPath(explicit?: string): string {
+  return explicit?.trim() || process.env.CTI_CURSOR_EXECUTABLE || 'agent';
+}
+
+export interface CursorProviderOptions {
+  /** Overrides CTI_CURSOR_EXECUTABLE for this runner. */
+  agentPath?: string;
+  /** Default model when binding omits one (overrides env for this runner). */
+  defaultModel?: string;
 }
 
 /**
@@ -122,9 +129,13 @@ function extractToolResult(toolCall: Record<string, unknown>): { content: string
 
 export class CursorProvider implements LLMProvider {
   private spawnFn: SpawnFn;
+  private agentPath?: string;
+  private defaultModel?: string;
 
-  constructor(spawnFn?: SpawnFn) {
+  constructor(spawnFn?: SpawnFn, opts?: CursorProviderOptions) {
     this.spawnFn = spawnFn ?? spawn;
+    this.agentPath = opts?.agentPath;
+    this.defaultModel = opts?.defaultModel;
   }
 
   streamChat(params: StreamChatParams): ReadableStream<string> {
@@ -133,7 +144,7 @@ export class CursorProvider implements LLMProvider {
       start(controller) {
         (async () => {
           try {
-            const agentPath = resolveAgentPath();
+            const agentPath = resolveAgentPath(self.agentPath);
             const args = [
               '--print',
               '--output-format', 'stream-json',
@@ -146,7 +157,7 @@ export class CursorProvider implements LLMProvider {
               args.push('--workspace', params.workingDirectory);
             }
             
-            const model = process.env.CTI_CURSOR_MODEL || params.model;
+            const model = self.defaultModel || process.env.CTI_CURSOR_MODEL || params.model;
             if (model && !model.startsWith('claude')) {
               args.push('--model', model);
             }

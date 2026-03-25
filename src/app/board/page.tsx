@@ -2,15 +2,21 @@
 
 import { useCallback, useEffect, useMemo, useState } from 'react';
 
-import type { TaskSession, TaskWorkflowState } from '../../platform/types';
+import type { AgentRole, TaskSession, TaskWorkflowState } from '../../platform/types';
 
 const COLUMNS: { key: TaskWorkflowState; label: string }[] = [
-  { key: 'todo', label: 'To do' },
-  { key: 'in_progress', label: 'In progress' },
-  { key: 'review', label: 'Review' },
-  { key: 'testing', label: 'Testing' },
-  { key: 'closed', label: 'Closed' },
+  { key: 'todo', label: '待办' },
+  { key: 'in_progress', label: '进行中' },
+  { key: 'review', label: '评审' },
+  { key: 'testing', label: '测试中' },
+  { key: 'closed', label: '已关闭' },
 ];
+
+const ROLE_LABELS: Record<AgentRole, string> = {
+  developer: '开发',
+  reviewer: '评审',
+  tester: '测试',
+};
 
 export default function BoardPage() {
   const [tasks, setTasks] = useState<TaskSession[]>([]);
@@ -49,17 +55,16 @@ export default function BoardPage() {
   return (
     <main className="page-shell ui-board">
       <header className="ui-admin-header">
-        <p className="eyebrow">Tasks</p>
-        <h1>Jira-style board</h1>
+        <p className="eyebrow">任务</p>
+        <h1>类 Jira 看板</h1>
         <p className="lead ui-muted">
-          Columns follow `workflowState` in `task_sessions.json`. This is a local mirror — not a Jira
-          embed.
+          列对应 <code>task_sessions.json</code> 中的 <code>workflowState</code>。此为本地数据镜像，并非嵌入 Jira 页面。
         </p>
         <nav className="ui-nav">
-          <a href="/">Home</a>
-          <a href="/admin">Admin</a>
+          <a href="/">首页</a>
+          <a href="/admin">管理后台</a>
           <button type="button" className="ui-btn ghost" onClick={() => void load()}>
-            Refresh
+            刷新
           </button>
         </nav>
       </header>
@@ -67,7 +72,7 @@ export default function BoardPage() {
       {error ? <p className="ui-banner">{error}</p> : null}
 
       {loading ? (
-        <p className="ui-muted">Loading tasks…</p>
+        <p className="ui-muted">加载任务中…</p>
       ) : (
         <div className="ui-kanban">
           {COLUMNS.map((col) => (
@@ -85,11 +90,11 @@ export default function BoardPage() {
                       <span>{task.runtime}</span>
                     </p>
                     <p className="ui-card-meta">
-                      <span className="ui-pill">{task.role}</span>
+                      <span className="ui-pill">{ROLE_LABELS[task.role]}</span>
                     </p>
                     {task.pullRequestUrl ? (
                       <a className="ui-link" href={task.pullRequestUrl} target="_blank" rel="noreferrer">
-                        PR
+                        合并请求
                       </a>
                     ) : null}
                   </article>

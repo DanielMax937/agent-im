@@ -1,5 +1,5 @@
 import type { LLMProvider, PermissionResolution } from '../lib/bridge/host';
-import { loadConfig, resolveRuntimeForPlatformInstance } from '../config';
+import { loadConfig, normalizeRunners, resolveRuntimeForPlatformInstance } from '../config';
 import { PendingPermissions } from '../permission-gateway';
 import { resolveProvider } from '../runtime-provider';
 import { JsonPlatformStore } from './json-platform-store';
@@ -298,11 +298,15 @@ export class InstanceManager {
       ((instance, pendingPermissions) => {
         const config = loadConfig();
         const eff = resolveRuntimeForPlatformInstance(config, instance);
+        const runner = instance.runtimeProfileId
+          ? normalizeRunners(config).find((r) => r.id === instance.runtimeProfileId)
+          : undefined;
         return resolveProvider({
           config,
           pendingPermissions,
           autoApproveOverride: false,
           runtimeOverride: eff,
+          runner,
         });
       });
   }

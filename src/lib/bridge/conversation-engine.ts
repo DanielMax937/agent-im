@@ -16,6 +16,7 @@ import type {
   MessageContentBlock,
 } from './host';
 import { getBridgeContext } from './context';
+import { resolveRunnerForChannelBinding } from './im-instance-settings';
 import crypto from 'crypto';
 
 export interface PermissionRequestInfo {
@@ -62,7 +63,15 @@ export async function processMessage(
   files?: FileAttachment[],
   onPartialText?: OnPartialText,
 ): Promise<ConversationResult> {
-  const { store, llm, resolveLlmForBinding } = getBridgeContext();
+    const {
+      store,
+      llm,
+      resolveLlmForBinding,
+      getRunnerConfigsForChannelType,
+      getDefaultRunnerIdForChannelType,
+      imRunnerConfigs: legacyRunnerCfgs,
+      defaultRunnerId: ctxDefaultRunner,
+    } = getBridgeContext();
   const effectiveLlm = resolveLlmForBinding?.(binding) ?? llm;
   const sessionId = binding.codepilotSessionId;
 
@@ -131,8 +140,27 @@ export async function processMessage(
       if (defaultId) resolvedProvider = store.getProvider(defaultId);
     }
 
-    // Effective model
-    const effectiveModel = binding.model || session?.model || store.getSetting('default_model') || undefined;
+    const imRunnerConfigs =
+      getRunnerConfigsForChannelType?.(binding.channelType) ?? legacyRunnerCfgs;
+    const allRunnerIds = imRunnerConfigs?.map((r) => r.id) ?? [];
+    const defaultForChannel =
+      getDefaultRunnerIdForChannelType?.(binding.channelType) ?? ctxDefaultRunner ?? imRunnerConfigs?.[0]?.id;
+    const effRunnerId = resolveRunnerForChannelBinding(
+      store,
+      binding.channelType,
+      binding.runnerProfileId,
+      defaultForChannel,
+      allRunnerIds,
+    );
+    const runnerCfg = imRunnerConfigs?.find((r) => r.id === effRunnerId);
+
+    // Effective model (per-binding → session → runner default → store)
+    const effectiveModel =
+      binding.model ||
+      session?.model ||
+      runnerCfg?.defaultModel ||
+      store.getSetting('default_model') ||
+      undefined;
 
     // Permission mode from binding mode
     let permissionMode: string;

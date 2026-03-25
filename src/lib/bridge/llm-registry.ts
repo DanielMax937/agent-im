@@ -1,14 +1,22 @@
 /**
- * IM bridge: one LLM provider per runtime profile, resolved per ChannelBinding.
+ * IM bridge: one LLM provider per (IM bot × runner id), resolved per ChannelBinding.
  * Jira/platform agents use a separate stack in `src/platform/` — see docs/IM_BRIDGE_MODEL.md.
  */
 
 import type { Config } from '../../config';
-import { normalizeRuntimeProfiles } from '../../config';
+import {
+  collectImLlmBuildEntries,
+  defaultImLlmCompositeKey,
+  defaultRunnerIdForChannelType,
+  imLlmKeyPrefix,
+  normalizeRunnersForChannelType,
+} from '../../config';
 import type { PendingPermissions } from '../../permission-gateway';
 import { resolveProvider } from '../../runtime-provider';
 import type { ChannelBinding } from './types';
 import type { LLMProvider } from './host';
+import { getBridgeContext } from './context';
+import { resolveRunnerForChannelBinding } from './im-instance-settings';
 
 export interface ImBridgeLlmStack {
   defaultLlm: LLMProvider;
@@ -16,39 +24,53 @@ export interface ImBridgeLlmStack {
 }
 
 /**
- * Build one {@link LLMProvider} per configured runtime profile (shared PendingPermissions).
- * Bindings use `runnerProfileId` to pick a profile; unset uses default profile id.
+ * Build one {@link LLMProvider} per configured (bot, runner) pair (shared PendingPermissions).
+ * Bindings use `runnerProfileId` to pick a runner within **that bot's** list only.
  */
 export async function buildImBridgeLlmStack(
   config: Config,
   pendingPermissions: PendingPermissions,
 ): Promise<ImBridgeLlmStack> {
-  const profiles = normalizeRuntimeProfiles(config);
+  const entries = collectImLlmBuildEntries(config);
   const idToLlm = new Map<string, LLMProvider>();
 
-  for (const p of profiles) {
+  for (const { keyPrefix, runner } of entries) {
+    const key = `${keyPrefix}\0${runner.id}`;
     const llm = await resolveProvider({
       config,
       pendingPermissions,
-      runtimeOverride: p.runtime,
+      runtimeOverride: runner.runtime,
+      runner,
     });
-    idToLlm.set(p.id, llm);
+    idToLlm.set(key, llm);
   }
 
-  const defaultProfileId =
-    config.defaultRuntimeProfileId ?? profiles[0]?.id ?? 'default';
+  const defaultKey = defaultImLlmCompositeKey(config);
   const defaultLlm =
-    idToLlm.get(defaultProfileId) ?? [...idToLlm.values()][0] ?? (await resolveProvider({ config, pendingPermissions }));
+    idToLlm.get(defaultKey) ?? [...idToLlm.values()][0] ?? (await resolveProvider({ config, pendingPermissions }));
 
   return {
     defaultLlm,
     resolveLlmForBinding: (binding: ChannelBinding): LLMProvider => {
-      const pid =
-        binding.runnerProfileId ??
-        config.defaultRuntimeProfileId ??
-        profiles[0]?.id;
-      if (pid && idToLlm.has(pid)) {
-        return idToLlm.get(pid)!;
+      const store = getBridgeContext().store;
+      const runners = normalizeRunnersForChannelType(config, binding.channelType);
+      const allIds = runners.map((r) => r.id);
+      const globalDef = defaultRunnerIdForChannelType(config, binding.channelType);
+      const pid = resolveRunnerForChannelBinding(
+        store,
+        binding.channelType,
+        binding.runnerProfileId,
+        globalDef,
+        allIds,
+      );
+      const prefix = imLlmKeyPrefix(config, binding.channelType);
+      const key = `${prefix}\0${pid}`;
+      if (idToLlm.has(key)) {
+        return idToLlm.get(key)!;
+      }
+      if (!config.imBot) {
+        const legacy = `__legacy__\0${pid}`;
+        if (idToLlm.has(legacy)) return idToLlm.get(legacy)!;
       }
       return defaultLlm;
     },

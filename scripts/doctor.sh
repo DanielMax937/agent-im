@@ -1,6 +1,13 @@
 #!/usr/bin/env bash
 set -euo pipefail
-CTI_HOME="$HOME/.claude-to-im"
+CTI_BASE="${CTI_BASE:-$HOME/.claude-to-im}"
+if [ -z "${CTI_HOME:-}" ]; then
+  if [ -z "${CTI_BOT_NAME:-}" ]; then
+    echo "Set CTI_BOT_NAME or CTI_HOME (see scripts/daemon.sh)." >&2
+    exit 1
+  fi
+  CTI_HOME="$CTI_BASE/$CTI_BOT_NAME"
+fi
 CONFIG_FILE="$CTI_HOME/config.env"
 PID_FILE="$CTI_HOME/runtime/bridge.pid"
 LOG_FILE="$CTI_HOME/logs/bridge.log"

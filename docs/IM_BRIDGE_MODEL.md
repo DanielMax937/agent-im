@@ -21,8 +21,8 @@
 - **Channel binding（通道绑定）**  
   把某个 `channelType + chatId` 绑到本地 `codepilotSessionId`（会话）。**一个 Bot 下可以有多个 chat，每个 chat 一条 binding**。
 
-- **Runner / runtime profile**  
-  配置里的 **Runtime profile**（`config.runtimeProfiles[]`，见 `config.env` 中 `CTI_RUNTIME_PROFILES`）。每个 profile 指定一种后端：`claude` | `codex` | `cursor` | `auto`。
+- **Runner**  
+  配置里的 **`config.runners[]`**（`config.env` 中 **`CTI_RUNNERS`** JSON 数组）。每个 Runner 指定一种后端：`claude` | `codex` | `cursor` | `auto`。同一文件内可有多个 Runner（后端可重复，用不同 `id` 区分）。
 
 - **同一 Bot 下的「多实例」**（IM 语义）  
   指 **多个 binding / 多个 chat**，每个 binding 可带 **`runnerProfileId`**，在对话时走 **不同的 LLM 实例**（`buildImBridgeLlmStack` 按 profile 各建一个 `LLMProvider`）。  
@@ -32,12 +32,12 @@
 
 ## 行为（当前实现）
 
-1. 启动时按 **runtime profiles** 建 **多个** `LLMProvider`（共享 `PendingPermissions`）。
+1. 启动时按 **runners** 建 **多个** `LLMProvider`（共享 `PendingPermissions`）。
 2. 处理某条消息时，`conversation-engine` 使用  
    `resolveLlmForBinding(binding)`：  
-   - 若 `binding.runnerProfileId` 有值 → 用对应 profile；  
-   - 否则用 `bridge_default_runner_profile_id`（来自配置的 default profile）或第一个 profile。
-3. **新建** chat 的默认 `runnerProfileId` 来自 store 设置 `bridge_default_runner_profile_id`（由 `configToSettings` 从 `defaultRuntimeProfileId` 写入）。  
+   - 若 `binding.runnerProfileId` 有值 → 用对应 Runner；  
+   - 否则用 `bridge_default_runner_profile_id`（来自配置的 `defaultRunnerId` / `CTI_DEFAULT_RUNNER`）或第一个 Runner。
+3. **新建** chat 的默认 `runnerProfileId` 来自 store 设置 `bridge_default_runner_profile_id`（由 `configToSettings` 从 `defaultRunnerId` 写入）。  
 4. 已有 binding 可通过 `updateChannelBinding` 更新 `runnerProfileId`（或改 `bindings.json` 后重启）。
 5. **IM 命令**：在聊天中发送 **`/runner`** 列出当前 chat 的生效 profile 与全部可选 profile；**`/runner &lt;profile_id&gt;`** 切换本 chat 的 runner；**`/runner default`**（或 `reset`）清除本 chat 的覆盖，回到服务端默认。别名 **`/runners`** 与无参数的 **`/runner`** 相同。Discord 可用 **`!runner`**（与 `!` → `/` 的约定一致）。
 

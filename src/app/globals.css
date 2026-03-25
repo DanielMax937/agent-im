@@ -29,7 +29,7 @@ a {
 }
 
 .hero-card {
-  max-width: 900px;
+  max-width: 960px;
   margin: 0 auto 24px;
   padding: 32px;
 }
@@ -104,7 +104,7 @@ a {
 }
 
 .ui-admin-header {
-  max-width: 900px;
+  max-width: 960px;
   margin: 0 auto 24px;
 }
 
@@ -134,7 +134,7 @@ a {
 }
 
 .ui-banner {
-  max-width: 900px;
+  max-width: 960px;
   margin: 0 auto 16px;
   padding: 12px 16px;
   border-radius: 12px;
@@ -157,6 +157,33 @@ a {
   justify-content: space-between;
   gap: 12px;
   flex-wrap: wrap;
+}
+
+/* Admin: one Bridge card with stacked subsections (channels / bots / runners) */
+.ui-bridge-subsection {
+  margin-top: 1.75rem;
+  padding-top: 1.5rem;
+  border-top: 1px solid rgba(148, 163, 184, 0.18);
+}
+
+.ui-bridge-subsection:first-of-type {
+  margin-top: 1rem;
+  padding-top: 0;
+  border-top: none;
+}
+
+.ui-bridge-subsection > h3 {
+  margin: 0 0 12px;
+  font-size: 1.05rem;
+  font-weight: 650;
+  color: #e2e8f0;
+}
+
+.ui-bridge-subsection .ui-section-title h3 {
+  margin: 0;
+  font-size: 1.1rem;
+  font-weight: 650;
+  color: #e2e8f0;
 }
 
 .ui-grid {
@@ -243,6 +270,16 @@ a {
 .ui-btn.danger {
   border-color: rgba(248, 113, 113, 0.45);
   color: #fecaca;
+}
+
+.ui-btn:disabled,
+.ui-btn[disabled],
+.ui-btn.primary:disabled,
+.ui-btn.secondary:disabled,
+.ui-btn.ghost:disabled,
+.ui-btn.danger:disabled {
+  color: #999;
+  cursor: not-allowed;
 }
 
 .ui-inline {

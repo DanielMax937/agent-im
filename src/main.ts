@@ -14,15 +14,29 @@ import * as bridgeManager from './lib/bridge/bridge-manager';
 // Side-effect import to trigger adapter self-registration
 import './lib/bridge/adapters/index';
 
-import { loadConfig, configToSettings, CTI_HOME, syncConfigFileToProcessEnv, normalizeRuntimeProfiles } from './config';
+import {
+  loadConfig,
+  configToSettings,
+  getCtiHome,
+  syncConfigFileToProcessEnv,
+  normalizeRunners,
+  normalizeRunnersForChannelType,
+  defaultRunnerIdForChannelType,
+} from './config';
 import { buildImBridgeLlmStack } from './lib/bridge/llm-registry';
 import { JsonFileStore } from './store';
 import { PendingPermissions } from './permission-gateway';
 import { setupLogger } from './logger';
 
-const RUNTIME_DIR = path.join(CTI_HOME, 'runtime');
-const STATUS_FILE = path.join(RUNTIME_DIR, 'status.json');
-const PID_FILE = path.join(RUNTIME_DIR, 'bridge.pid');
+function runtimeDir(): string {
+  return path.join(getCtiHome(), 'runtime');
+}
+function statusFile(): string {
+  return path.join(runtimeDir(), 'status.json');
+}
+function pidFile(): string {
+  return path.join(runtimeDir(), 'bridge.pid');
+}
 
 interface StatusInfo {
   running: boolean;
@@ -34,14 +48,15 @@ interface StatusInfo {
 }
 
 function writeStatus(info: StatusInfo): void {
-  fs.mkdirSync(RUNTIME_DIR, { recursive: true });
+  fs.mkdirSync(runtimeDir(), { recursive: true });
+  const sf = statusFile();
   // Merge with existing status to preserve fields like lastExitReason
   let existing: Record<string, unknown> = {};
-  try { existing = JSON.parse(fs.readFileSync(STATUS_FILE, 'utf-8')); } catch { /* first write */ }
+  try { existing = JSON.parse(fs.readFileSync(sf, 'utf-8')); } catch { /* first write */ }
   const merged = { ...existing, ...info };
-  const tmp = STATUS_FILE + '.tmp';
+  const tmp = sf + '.tmp';
   fs.writeFileSync(tmp, JSON.stringify(merged, null, 2), 'utf-8');
-  fs.renameSync(tmp, STATUS_FILE);
+  fs.renameSync(tmp, sf);
 }
 
 async function main(): Promise<void> {
@@ -69,8 +84,11 @@ async function main(): Promise<void> {
   const store = new JsonFileStore(settings);
   const pendingPerms = new PendingPermissions();
   const { defaultLlm, resolveLlmForBinding } = await buildImBridgeLlmStack(config, pendingPerms);
+  const bridgeRunners = normalizeRunners(config);
+  const bridgeDefaultRunnerId = config.defaultRunnerId ?? bridgeRunners[0]?.id;
+  const nBots = config.imBot ? 1 : 0;
   console.log(
-    `[claude-to-im] IM bridge: ${normalizeRuntimeProfiles(config).length} runtime profile(s); default + per-chat binding resolution`,
+    `[claude-to-im] IM bridge: ${nBots ? `1 bot (CTI_IM_BOT), per-bot runners` : `${bridgeRunners.length} global runner(s)`}; per-chat binding resolution`,
   );
 
   const gateway = {
@@ -82,17 +100,21 @@ async function main(): Promise<void> {
     store,
     llm: defaultLlm,
     resolveLlmForBinding,
-    imRuntimeProfiles: normalizeRuntimeProfiles(config).map((p) => ({
+    getRunnerConfigsForChannelType: (channelType) => normalizeRunnersForChannelType(config, channelType),
+    getDefaultRunnerIdForChannelType: (channelType) => defaultRunnerIdForChannelType(config, channelType),
+    imRunners: bridgeRunners.map((p) => ({
       id: p.id,
       runtime: p.runtime,
       label: p.label,
     })),
+    imRunnerConfigs: bridgeRunners,
+    defaultRunnerId: bridgeDefaultRunnerId,
     permissions: gateway,
     lifecycle: {
       onBridgeStart: () => {
         // Write authoritative PID from the actual process (not shell $!)
-        fs.mkdirSync(RUNTIME_DIR, { recursive: true });
-        fs.writeFileSync(PID_FILE, String(process.pid), 'utf-8');
+        fs.mkdirSync(runtimeDir(), { recursive: true });
+        fs.writeFileSync(pidFile(), String(process.pid), 'utf-8');
         writeStatus({
           running: true,
           pid: process.pid,

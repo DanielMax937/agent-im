@@ -57,6 +57,10 @@ export interface CodexProviderConfig {
   passModelEnvVar: string;
   /** Prefix for log messages (e.g. 'codex-provider'). */
   logPrefix: string;
+  /** When set, overrides `CTI_CODEX_USE_LOGIN` for this provider instance. */
+  useLogin?: boolean;
+  /** When set, overrides the pass-model env var for this provider instance. */
+  passModel?: boolean;
 }
 
 export const DEFAULT_CODEX_CONFIG: CodexProviderConfig = {
@@ -124,7 +128,10 @@ export class CodexProvider implements LLMProvider {
       );
     }
 
-    const useLogin = process.env.CTI_CODEX_USE_LOGIN === 'true';
+    const useLogin =
+      this.cfg.useLogin !== undefined
+        ? this.cfg.useLogin
+        : process.env.CTI_CODEX_USE_LOGIN === 'true';
 
     let apiKey: string | undefined;
     if (!useLogin) {
@@ -172,7 +179,10 @@ export class CodexProvider implements LLMProvider {
             }
 
             const approvalPolicy = toApprovalPolicy(params.permissionMode);
-            const passModel = process.env[self.cfg.passModelEnvVar] === 'true';
+            const passModel =
+              self.cfg.passModel !== undefined
+                ? self.cfg.passModel
+                : process.env[self.cfg.passModelEnvVar] === 'true';
 
             const threadOptions: Record<string, unknown> = {
               ...(passModel && params.model ? { model: params.model } : {}),

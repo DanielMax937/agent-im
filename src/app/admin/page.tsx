@@ -1,20 +1,63 @@
 'use client';
 
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 
-import type {
-  AgentEnvSlot,
-  Config,
-  ImInstanceChannel,
-  ImInstanceSpec,
-  RuntimeProfile,
-} from '../../config';
-import type { AgentInstanceRecord, AgentRole, TaskSession } from '../../platform/types';
+import {
+  normalizeRunners,
+  type Config,
+  type ImInstanceChannel,
+  type ImInstanceSpec,
+  type RunnerConfig,
+} from '../../config-shared';
 
-const CHANNEL_OPTIONS = ['telegram', 'discord', 'feishu', 'qq', 'agent'] as const;
 const IM_INSTANCE_CHANNELS: ImInstanceChannel[] = ['telegram', 'discord', 'feishu', 'qq'];
 const RUNTIMES = ['claude', 'codex', 'cursor', 'auto'] as const;
-const ROLES: AgentRole[] = ['developer', 'reviewer', 'tester'];
+const RUNNER_MODES = ['code', 'plan', 'ask'] as const;
+
+async function readJsonFromResponse(res: Response): Promise<unknown> {
+  const text = await res.text();
+  const trimmed = text.trim();
+  if (!trimmed) return {};
+  try {
+    return JSON.parse(trimmed) as unknown;
+  } catch {
+    const preview = trimmed.slice(0, 280);
+    throw new Error(
+      res.ok
+        ? `服务器返回非 JSON（${preview}${trimmed.length > 280 ? '…' : ''}）`
+        : `HTTP ${res.status}: ${preview}${trimmed.length > 280 ? '…' : ''}`,
+    );
+  }
+}
+
+/** From GET /api/bridge/status（桥接为 Next 子进程时 `managedByApp` 为 true）。 */
+type EmbeddedBridgeStatus = {
+  running?: boolean;
+  startedAt?: string | null;
+  managedByApp?: boolean;
+  adapters?: Array<{ channelType?: string; running?: boolean }>;
+};
+
+/** From GET /api/local-config `daemonStatus` (独立守护进程 status.json). */
+type DaemonDiskStatus = {
+  statusFilePresent: boolean;
+  fileSaysRunning: boolean;
+  effectiveRunning: boolean;
+  stale: boolean;
+  pid?: number;
+  startedAt?: string;
+  runId?: string;
+  channels?: string[];
+  lastExitReason?: string;
+};
+
+/** 机器人「平台」下拉的展示名（与 ImInstanceChannel 一致） */
+const IM_CHANNEL_LABELS: Record<ImInstanceChannel, string> = {
+  telegram: 'Telegram',
+  discord: 'Discord',
+  feishu: '飞书 / Lark',
+  qq: 'QQ',
+};
 
 function defaultConfig(): Config {
   return {
@@ -23,155 +66,173 @@ function defaultConfig(): Config {
     defaultWorkDir: '',
     defaultMode: 'code',
     autoApprove: false,
+    runners: [{ id: 'default', runtime: 'claude', label: '默认' }],
   };
 }
 
-export default function AdminPage() {
-  const [cfg, setCfg] = useState<Config>(defaultConfig);
-  const [configPath, setConfigPath] = useState('');
-  const [loading, setLoading] = useState(true);
-  const [saving, setSaving] = useState(false);
-  const [message, setMessage] = useState<string | null>(null);
-  const [tasks, setTasks] = useState<TaskSession[]>([]);
-  const [instances, setInstances] = useState<AgentInstanceRecord[]>([]);
-  const [newInstance, setNewInstance] = useState({
-    taskSessionId: '',
-    role: 'developer' as AgentRole,
-    runtimeProfileId: '' as string,
-  });
+/** Local admin state: `imBot: null` is sent in PUT JSON to clear CTI_IM_BOT (undefined is omitted by JSON.stringify). */
+type AdminConfig = Omit<Config, 'imBot'> & { imBot?: ImInstanceSpec | null };
 
-  const load = useCallback(async () => {
-    setLoading(true);
-    setMessage(null);
+function asConfig(c: AdminConfig): Config {
+  return { ...c, imBot: c.imBot ?? undefined };
+}
+
+export default function AdminPage() {
+  const [cfg, setCfg] = useState<AdminConfig>(defaultConfig);
+  const [configPath, setConfigPath] = useState('');
+  /** Full config + form (can lag behind status query). */
+  const [configLoading, setConfigLoading] = useState(true);
+  /** First poll for daemon + embedded status finished (may fail silently). */
+  const [statusReady, setStatusReady] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [newBridging, setNewBridging] = useState(false);
+  const [switchingBridge, setSwitchingBridge] = useState(false);
+  const [bridges, setBridges] = useState<string[]>([]);
+  const [activeBotName, setActiveBotName] = useState('');
+  const [canSwitchBridges, setCanSwitchBridges] = useState(false);
+  const [daemonStatus, setDaemonStatus] = useState<DaemonDiskStatus | null>(null);
+  const [embeddedStatus, setEmbeddedStatus] = useState<EmbeddedBridgeStatus | null>(null);
+  const [message, setMessage] = useState<string | null>(null);
+
+  /** 按当前服务端解析的桥接目录（botName / CTI_HOME）查询独立进程 + Next 内嵌状态。 */
+  const pollBridgeStatus = useCallback(async () => {
     try {
-      const [cRes, tRes, iRes] = await Promise.all([
+      const [cRes, bRes] = await Promise.all([
         fetch('/api/local-config'),
-        fetch('/api/tasks'),
-        fetch('/api/instances'),
+        fetch('/api/bridge/status'),
       ]);
-      const cJson = (await cRes.json()) as { config?: Config; configPath?: string };
+      const cJson = (await readJsonFromResponse(cRes)) as {
+        ok?: boolean;
+        daemonStatus?: DaemonDiskStatus;
+        botName?: string;
+        bridges?: string[];
+        canSwitchBridges?: boolean;
+        error?: string;
+      };
+      if (cRes.ok && cJson.ok !== false) {
+        if (cJson.daemonStatus) setDaemonStatus(cJson.daemonStatus);
+        if (typeof cJson.botName === 'string') setActiveBotName(cJson.botName);
+        if (Array.isArray(cJson.bridges)) setBridges(cJson.bridges);
+        setCanSwitchBridges(cJson.canSwitchBridges === true);
+      }
+      if (bRes.ok) {
+        const b = (await readJsonFromResponse(bRes)) as EmbeddedBridgeStatus;
+        setEmbeddedStatus(b);
+      } else {
+        setEmbeddedStatus(null);
+      }
+    } catch {
+      /* ignore */
+    } finally {
+      setStatusReady(true);
+    }
+  }, []);
+
+  const load = useCallback(async (opts?: { silent?: boolean }) => {
+    if (!opts?.silent) {
+      setConfigLoading(true);
+      setMessage(null);
+    }
+    try {
+      const cRes = await fetch('/api/local-config');
+      const cJson = (await readJsonFromResponse(cRes)) as {
+        ok?: boolean;
+        config?: Config;
+        configPath?: string;
+        bridges?: string[];
+        botName?: string;
+        canSwitchBridges?: boolean;
+        error?: string;
+      };
+      if (!cRes.ok || cJson.ok === false) {
+        throw new Error(cJson.error || `HTTP ${cRes.status}`);
+      }
       if (cJson.config) {
         const merged = { ...defaultConfig(), ...cJson.config };
-        if (!merged.runtimeProfiles?.length) {
-          merged.runtimeProfiles = [{ id: 'default', runtime: merged.runtime, label: 'Default' }];
+        if (!merged.runners?.length) {
+          merged.runners = [{ id: 'default', runtime: merged.runtime, label: '默认' }];
         }
         setCfg(merged);
       }
       if (cJson.configPath) setConfigPath(cJson.configPath);
-      if (tRes.ok) {
-        const tJson = (await tRes.json()) as TaskSession[];
-        setTasks(Array.isArray(tJson) ? tJson : []);
-      }
-      if (iRes.ok) {
-        const iJson = (await iRes.json()) as AgentInstanceRecord[];
-        setInstances(Array.isArray(iJson) ? iJson : []);
-      }
+      if (Array.isArray(cJson.bridges)) setBridges(cJson.bridges);
+      if (typeof cJson.botName === 'string') setActiveBotName(cJson.botName);
+      setCanSwitchBridges(cJson.canSwitchBridges === true);
     } catch (e) {
       setMessage(e instanceof Error ? e.message : String(e));
     } finally {
-      setLoading(false);
+      if (!opts?.silent) setConfigLoading(false);
     }
   }, []);
 
   useEffect(() => {
+    void pollBridgeStatus();
     void load();
-  }, [load]);
+  }, [load, pollBridgeStatus]);
 
-  const hasImFor = (ch: ImInstanceChannel) =>
-    (cfg.imInstances ?? []).some((s) => s.channel === ch);
+  useEffect(() => {
+    const id = window.setInterval(() => {
+      void pollBridgeStatus();
+    }, 4000);
+    return () => window.clearInterval(id);
+  }, [pollBridgeStatus]);
 
-  const updateImInstance = (index: number, patch: Partial<ImInstanceSpec>) => {
+  const updateImBot = (patch: Partial<ImInstanceSpec>) => {
     setCfg((prev) => {
-      const list = [...(prev.imInstances ?? [])];
-      list[index] = { ...list[index], ...patch } as ImInstanceSpec;
-      return { ...prev, imInstances: list };
+      if (!prev.imBot) return prev;
+      return { ...prev, imBot: { ...prev.imBot, ...patch } };
     });
   };
 
-  const addImInstance = () => {
+  const addImBot = () => {
     setCfg((prev) => {
-      const n = (prev.imInstances?.length ?? 0) + 1;
+      const template = normalizeRunners(asConfig(prev)).map((r) => ({ ...r }));
+      if (!template.length) {
+        template.push({ id: 'default', runtime: prev.runtime, label: '默认' });
+      }
       const spec: ImInstanceSpec = {
-        id: `im${n}`,
+        id: 'im1',
         channel: 'telegram',
         enabled: true,
+        runners: template,
+        defaultRunnerId: template[0]?.id,
       };
-      return { ...prev, imInstances: [...(prev.imInstances ?? []), spec] };
+      return { ...prev, imBot: spec };
     });
   };
 
-  const removeImInstance = (index: number) => {
-    setCfg((prev) => ({
-      ...prev,
-      imInstances: (prev.imInstances ?? []).filter((_, i) => i !== index),
-    }));
+  const removeImBot = () => {
+    setCfg((prev) => ({ ...prev, imBot: null }));
   };
 
-  const toggleChannel = (ch: (typeof CHANNEL_OPTIONS)[number]) => {
+  const updateImRunner = (runnerIdx: number, patch: Partial<RunnerConfig>) => {
     setCfg((prev) => {
-      const set = new Set(prev.enabledChannels);
-      if (set.has(ch)) set.delete(ch);
-      else set.add(ch);
-      return { ...prev, enabledChannels: Array.from(set) };
+      const spec = prev.imBot;
+      if (!spec) return prev;
+      const runners = [...(spec.runners ?? normalizeRunners(asConfig(prev)))];
+      runners[runnerIdx] = { ...runners[runnerIdx], ...patch } as RunnerConfig;
+      return { ...prev, imBot: { ...spec, runners } };
     });
   };
 
-  const updateSlot = (index: number, patch: Partial<AgentEnvSlot>) => {
+  const addImRunner = () => {
     setCfg((prev) => {
-      const slots = [...(prev.agentEnvSlots ?? [])];
-      slots[index] = { ...slots[index], ...patch, slot: slots[index]?.slot ?? index + 1 };
-      return { ...prev, agentEnvSlots: slots };
+      const spec = prev.imBot;
+      if (!spec) return prev;
+      const runners = [...(spec.runners ?? normalizeRunners(asConfig(prev)))];
+      const n = runners.length + 1;
+      runners.push({ id: `rt-${n}`, runtime: 'claude', label: `Runner ${n}` });
+      return { ...prev, imBot: { ...spec, runners } };
     });
   };
 
-  const addAgentSlot = () => {
+  const removeImRunner = (runnerIdx: number) => {
     setCfg((prev) => {
-      const slots = [...(prev.agentEnvSlots ?? [])];
-      const used = new Set(slots.map((s) => s.slot));
-      let nextSlot = 1;
-      while (used.has(nextSlot) && nextSlot <= 10) nextSlot += 1;
-      if (nextSlot > 10) return prev;
-      slots.push({
-        slot: nextSlot,
-        redisUrl: 'redis://127.0.0.1:6379',
-        firstPrompt: 'Hello, how are you?',
-        openaiBaseUrl: 'https://api.openai.com/v1',
-        openaiModel: 'gpt-4o-mini',
-        maxTurns: 10,
-      });
-      return { ...prev, agentEnvSlots: slots };
+      const spec = prev.imBot;
+      if (!spec) return prev;
+      const runners = [...(spec.runners ?? [])].filter((_, i) => i !== runnerIdx);
+      return { ...prev, imBot: { ...spec, runners } };
     });
-  };
-
-  const removeAgentSlot = (index: number) => {
-    setCfg((prev) => ({
-      ...prev,
-      agentEnvSlots: (prev.agentEnvSlots ?? []).filter((_, i) => i !== index),
-    }));
-  };
-
-  const updateRuntimeProfile = (index: number, patch: Partial<RuntimeProfile>) => {
-    setCfg((prev) => {
-      const list = [...(prev.runtimeProfiles ?? [])];
-      list[index] = { ...list[index], ...patch } as RuntimeProfile;
-      return { ...prev, runtimeProfiles: list };
-    });
-  };
-
-  const addRuntimeProfile = () => {
-    setCfg((prev) => {
-      const list = [...(prev.runtimeProfiles ?? [])];
-      const n = list.length + 1;
-      list.push({ id: `rt-${n}`, runtime: 'claude', label: `Profile ${n}` });
-      return { ...prev, runtimeProfiles: list };
-    });
-  };
-
-  const removeRuntimeProfile = (index: number) => {
-    setCfg((prev) => ({
-      ...prev,
-      runtimeProfiles: (prev.runtimeProfiles ?? []).filter((_, i) => i !== index),
-    }));
   };
 
   const saveConfig = async () => {
@@ -183,10 +244,12 @@ export default function AdminPage() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(cfg),
       });
-      const j = (await res.json()) as { ok?: boolean; error?: string };
-      if (!res.ok) throw new Error(j.error || res.statusText);
-      setMessage('Saved to ~/.claude-to-im/config.env. Restart the bridge or Next server if needed.');
+      const j = (await readJsonFromResponse(res)) as { ok?: boolean; error?: string; configPath?: string };
+      if (!res.ok || j.ok === false) throw new Error(j.error || res.statusText);
+      if (j.configPath) setConfigPath(j.configPath);
+      setMessage(`已写入 ${j.configPath || configPath || 'config.env'}。修改后请按需重启桥接进程或 Next 服务。`);
       await load();
+      await pollBridgeStatus();
     } catch (e) {
       setMessage(e instanceof Error ? e.message : String(e));
     } finally {
@@ -194,262 +257,229 @@ export default function AdminPage() {
     }
   };
 
-  const createInstance = async () => {
-    if (!newInstance.taskSessionId) return;
-    setMessage(null);
-    try {
-      const res = await fetch('/api/instances', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          taskSessionId: newInstance.taskSessionId,
-          role: newInstance.role,
-          ...(newInstance.runtimeProfileId ? { runtimeProfileId: newInstance.runtimeProfileId } : {}),
-        }),
-      });
-      const j = (await res.json()) as { error?: string };
-      if (!res.ok) throw new Error(j.error || res.statusText);
-      await load();
-      setMessage('Instance created and start requested.');
-    } catch (e) {
-      setMessage(e instanceof Error ? e.message : String(e));
-    }
-  };
-
   const bridgeAction = async (action: 'start' | 'stop') => {
     setMessage(null);
     try {
       const res = await fetch(`/api/bridge/${action}`, { method: 'POST' });
-      if (!res.ok) throw new Error(await res.text());
-      setMessage(`Bridge ${action} OK.`);
+      const j = (await readJsonFromResponse(res)) as EmbeddedBridgeStatus & { error?: string };
+      if (!res.ok) throw new Error(j.error || res.statusText);
+      setEmbeddedStatus(j);
+      await pollBridgeStatus();
+      setMessage(action === 'start' ? '桥接启动指令已发送。' : '桥接停止指令已发送。');
     } catch (e) {
       setMessage(e instanceof Error ? e.message : String(e));
     }
   };
 
-  const instanceAction = async (id: string, action: 'start' | 'stop' | 'delete') => {
+  const switchBridge = async (slug: string) => {
+    if (!slug || slug === activeBotName) return;
+    setSwitchingBridge(true);
     setMessage(null);
     try {
-      const url =
-        action === 'delete'
-          ? `/api/instances/${encodeURIComponent(id)}`
-          : `/api/instances/${encodeURIComponent(id)}/${action}`;
-      const res = await fetch(url, { method: action === 'delete' ? 'DELETE' : 'POST' });
-      if (!res.ok) throw new Error(await res.text());
-      await load();
+      const res = await fetch('/api/local-config', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ switchBridge: slug }),
+      });
+      const j = (await readJsonFromResponse(res)) as {
+        ok?: boolean;
+        error?: string;
+        configPath?: string;
+        botName?: string;
+      };
+      if (!res.ok || j.ok === false) throw new Error(j.error || res.statusText);
+      if (j.configPath) setConfigPath(j.configPath);
+      if (j.botName) setActiveBotName(j.botName);
+      setStatusReady(false);
+      await load({ silent: true });
+      await pollBridgeStatus();
+      setMessage(`已切换到桥接「${j.botName ?? slug}」。表单已加载该目录下的配置。`);
     } catch (e) {
       setMessage(e instanceof Error ? e.message : String(e));
+    } finally {
+      setSwitchingBridge(false);
     }
   };
 
-  const taskOptions = useMemo(
-    () =>
-      tasks.map((t) => ({
-        id: t.id,
-        label: `${t.issueId} — ${t.title}`,
-      })),
-    [tasks],
-  );
+  const createNewBridge = async () => {
+    setNewBridging(true);
+    setMessage(null);
+    try {
+      const res = await fetch('/api/local-config', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ newBridge: true }),
+      });
+      const j = (await readJsonFromResponse(res)) as {
+        ok?: boolean;
+        error?: string;
+        configPath?: string;
+        botName?: string;
+      };
+      if (!res.ok || j.ok === false) throw new Error(j.error || res.statusText);
+      if (j.configPath) setConfigPath(j.configPath);
+      if (j.botName) setActiveBotName(j.botName);
+      setStatusReady(false);
+      await load({ silent: true });
+      await pollBridgeStatus();
+      setMessage(`已新建桥接目录 ${j.botName ?? ''}，配置路径：${j.configPath ?? ''}。表单已重新加载，请按需填写并保存。`);
+    } catch (e) {
+      setMessage(e instanceof Error ? e.message : String(e));
+    } finally {
+      setNewBridging(false);
+    }
+  };
 
-  if (loading) {
-    return (
-      <main className="page-shell ui-admin">
-        <p className="ui-muted">Loading…</p>
-      </main>
-    );
+  /** 磁盘或 API 任一方认为在跑，则视为运行中（用于与「启动」互斥）。 */
+  const anyBridgeRunning =
+    embeddedStatus?.running === true || daemonStatus?.effectiveRunning === true;
+  /** 仅当本应用子进程且 API 确认在跑时，才允许「停止」。 */
+  const canStopManagedBridge =
+    embeddedStatus?.running === true && embeddedStatus?.managedByApp === true;
+
+  const bridgeActionsLocked =
+    !statusReady || saving || newBridging || switchingBridge;
+
+  const startDisabled = bridgeActionsLocked || configLoading || anyBridgeRunning;
+  const stopDisabled = bridgeActionsLocked || configLoading || !canStopManagedBridge;
+
+  let daemonLine = '独立进程：正在查询当前目录下的 status.json / PID…';
+  if (statusReady) {
+    if (!daemonStatus) {
+      daemonLine = '独立进程：暂无状态数据';
+    } else if (!daemonStatus.statusFilePresent) {
+      daemonLine =
+        '独立进程：未发现 status.json（通常表示尚未用 daemon/守护进程在本目录启动过）';
+    } else if (daemonStatus.stale) {
+      daemonLine =
+        '独立进程：状态仍为「运行中」但 PID 已不存在（可重新点「启动桥接」或检查守护进程）';
+    } else if (daemonStatus.effectiveRunning) {
+      const pidPart = daemonStatus.pid != null ? ` · PID ${daemonStatus.pid}` : '';
+      const ch =
+        daemonStatus.channels?.length ? ` · 通道 ${daemonStatus.channels.join(', ')}` : '';
+      daemonLine = `独立进程：运行中${pidPart}${ch}`;
+    } else {
+      daemonLine = '独立进程：已停止';
+    }
   }
+
+  const childLine = !statusReady
+    ? '本应用桥接：查询中…'
+    : embeddedStatus?.running === true && embeddedStatus?.managedByApp === true
+      ? '本应用桥接：由 Next 以子进程启动；关闭本服务或点「停止」会结束该进程。'
+      : embeddedStatus?.running === true && embeddedStatus?.managedByApp !== true
+        ? '本应用桥接：当前为外部进程（非本机 Next 子进程）；关闭 Next 不会自动结束，请用 scripts/daemon.sh stop 或结束对应 PID。'
+        : '本应用桥接：未运行（点「启动」由 Next 启动子进程）。';
 
   return (
     <main className="page-shell ui-admin">
-      <header className="ui-admin-header">
-        <p className="eyebrow">Local admin</p>
-        <h1>Bridge &amp; platform</h1>
-        <p className="lead ui-muted">
-          Edit <code>{configPath || '~/.claude-to-im/config.env'}</code>, enable IM channels, add numbered Agent
-          instances, and manage platform agent runners. Secrets you do not change stay as-is (masked on load).
-        </p>
-        <nav className="ui-nav">
-          <a href="/">Home</a>
-          <a href="/board">Jira-style board</a>
-          <a href="/health">Health</a>
-        </nav>
+      <header
+        className="ui-admin-header"
+        style={{
+          display: 'flex',
+          flexWrap: 'wrap',
+          justifyContent: 'space-between',
+          alignItems: 'flex-start',
+          gap: '1rem',
+        }}
+      >
+        <div>
+          <p className="eyebrow">本机管理</p>
+          <h1 style={{ marginBottom: '0.5rem' }}>桥接与平台</h1>
+          <nav className="ui-nav">
+            <a href="/">首页</a>
+            <a href="/board">任务看板</a>
+            <a href="/health">健康检查</a>
+          </nav>
+        </div>
+        <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: '0.35rem' }}>
+          <button
+            type="button"
+            className="ui-btn secondary"
+            disabled={saving || newBridging || switchingBridge}
+            onClick={() => void createNewBridge()}
+          >
+            {newBridging ? '正在新建…' : '新建桥接'}
+          </button>
+        </div>
       </header>
 
       {message ? <p className="ui-banner">{message}</p> : null}
 
       <section className="ui-section hero-card">
+        <h2>Bridge（桥接）</h2>
+        <div
+          className="ui-bridge-status"
+          style={{
+            marginBottom: '1rem',
+            padding: '0.75rem 1rem',
+            borderRadius: '8px',
+            border: '1px solid var(--ui-border, #333)',
+            background: 'rgba(148, 163, 184, 0.08)',
+          }}
+        >
+          <p style={{ margin: 0, fontSize: '0.95rem' }}>
+            <strong>当前桥接</strong> · <code>{activeBotName || '—'}</code>
+          </p>
+          <p className="ui-muted ui-small" style={{ margin: '0.4rem 0 0' }}>
+            {daemonLine}
+          </p>
+          <p className="ui-muted ui-small" style={{ margin: '0.25rem 0 0' }}>
+            {childLine}
+          </p>
+        </div>
+        <p className="ui-muted ui-small">
+          未勾「启用」的 bot 不会计入该通道。保存后如需生效请重启桥接。
+        </p>
+
+        {configLoading ? (
+          <p className="ui-muted">正在加载配置表单…</p>
+        ) : (
+        <div className="ui-bridge-subsection">
         <div className="ui-section-title">
-          <h2>Runtime profiles (多 Runtime)</h2>
-          <button type="button" className="ui-btn secondary" onClick={addRuntimeProfile}>
-            Add profile
-          </button>
+          <h3>IM 机器人（CTI_IM_BOT）</h3>
+          {!cfg.imBot ? (
+            <button type="button" className="ui-btn secondary" onClick={addImBot}>
+              添加机器人
+            </button>
+          ) : (
+            <button type="button" className="ui-btn secondary" onClick={removeImBot}>
+              移除机器人
+            </button>
+          )}
         </div>
         <p className="ui-muted ui-small">
-          Each profile is one backend (claude / codex / cursor / auto). The IM bridge uses the
-          default profile below; platform tasks can reference a profile id or fall back to the task&apos;s
-          stored runtime.
+          会话绑定里的 channelType 形如 <code>telegram:你的-id</code>。未使用 <code>CTI_IM_BOT</code> 时仍可依赖顶格{' '}
+          <code>CTI_TG_BOT_TOKEN</code> 等字段（可直接编辑 config.env）。
         </p>
-        {(cfg.runtimeProfiles ?? []).map((prof, index) => (
-          <div key={`${prof.id}-${index}`} className="ui-slot">
-            <div className="ui-slot-head">
-              <strong>Profile</strong>
-              <button type="button" className="ui-btn ghost" onClick={() => removeRuntimeProfile(index)}>
-                Remove
-              </button>
-            </div>
-            <div className="ui-grid">
-              <label className="ui-field">
-                <span>Id (unique)</span>
-                <input
-                  value={prof.id}
-                  onChange={(e) => updateRuntimeProfile(index, { id: e.target.value })}
-                />
-              </label>
-              <label className="ui-field">
-                <span>Label</span>
-                <input
-                  value={prof.label ?? ''}
-                  onChange={(e) => updateRuntimeProfile(index, { label: e.target.value || undefined })}
-                />
-              </label>
-              <label className="ui-field">
-                <span>Runtime</span>
-                <select
-                  value={prof.runtime}
-                  onChange={(e) => updateRuntimeProfile(index, { runtime: e.target.value as RuntimeProfile['runtime'] })}
-                >
-                  {RUNTIMES.map((r) => (
-                    <option key={r} value={r}>
-                      {r}
-                    </option>
-                  ))}
-                </select>
-              </label>
-            </div>
-          </div>
-        ))}
-        <label className="ui-field">
-          <span>Default profile for IM bridge (CTI_DEFAULT_RUNTIME_PROFILE)</span>
-          <select
-            value={cfg.defaultRuntimeProfileId ?? (cfg.runtimeProfiles?.[0]?.id ?? '')}
-            onChange={(e) => setCfg({ ...cfg, defaultRuntimeProfileId: e.target.value || undefined })}
-          >
-            {(cfg.runtimeProfiles ?? []).map((p) => (
-              <option key={p.id} value={p.id}>
-                {p.id} ({p.runtime})
-              </option>
-            ))}
-          </select>
-        </label>
-        <p className="ui-muted ui-small">
-          Effective bridge runtime (saved as CTI_RUNTIME): <code>{cfg.runtime}</code>
-        </p>
-      </section>
-
-      <section className="ui-section hero-card">
-        <h2>Defaults</h2>
-        <div className="ui-grid">
-          <label className="ui-field">
-            <span>Default workdir</span>
-            <input
-              value={cfg.defaultWorkDir ?? ''}
-              onChange={(e) => setCfg({ ...cfg, defaultWorkDir: e.target.value })}
-            />
-          </label>
-          <label className="ui-field">
-            <span>Default model (optional)</span>
-            <input
-              value={cfg.defaultModel ?? ''}
-              onChange={(e) => setCfg({ ...cfg, defaultModel: e.target.value || undefined })}
-            />
-          </label>
-          <label className="ui-field">
-            <span>Default mode</span>
-            <input
-              value={cfg.defaultMode ?? 'code'}
-              onChange={(e) => setCfg({ ...cfg, defaultMode: e.target.value })}
-            />
-          </label>
-          <label className="ui-field">
-            <span>Proxy (optional)</span>
-            <input value={cfg.proxy ?? ''} onChange={(e) => setCfg({ ...cfg, proxy: e.target.value || undefined })} />
-          </label>
-          <label className="ui-field ui-check">
-            <input
-              type="checkbox"
-              checked={!!cfg.autoApprove}
-              onChange={(e) => setCfg({ ...cfg, autoApprove: e.target.checked })}
-            />
-            <span>CTI_AUTO_APPROVE</span>
-          </label>
-          <label className="ui-field">
-            <span>Web base URL (approval links)</span>
-            <input
-              value={cfg.webBaseUrl ?? ''}
-              onChange={(e) => setCfg({ ...cfg, webBaseUrl: e.target.value || undefined })}
-              placeholder="http://127.0.0.1:3000"
-            />
-          </label>
-        </div>
-      </section>
-
-      <section className="ui-section hero-card">
-        <h2>Channels (CTI_ENABLED_CHANNELS)</h2>
-        <div className="ui-channel-row">
-          {CHANNEL_OPTIONS.map((ch) => (
-            <label key={ch} className="ui-check">
-              <input
-                type="checkbox"
-                checked={cfg.enabledChannels.includes(ch)}
-                onChange={() => toggleChannel(ch)}
-              />
-              <span>{ch}</span>
-            </label>
-          ))}
-        </div>
-        <p className="ui-muted ui-small">
-          Configure credentials per channel below. Restart the bridge after saving.
-        </p>
-      </section>
-
-      <section className="ui-section hero-card">
-        <div className="ui-section-title">
-          <h2>IM multi-instance (CTI_IM_INSTANCES)</h2>
-          <button type="button" className="ui-btn secondary" onClick={addImInstance}>
-            Add bot instance
-          </button>
-        </div>
-        <p className="ui-muted ui-small">
-          Multiple bots in one bridge (same or mixed platforms). Each row is one bot;{' '}
-          <code>channelType</code> in bindings becomes <code>telegram:your-id</code>. For any channel
-          listed here, the single-channel form below for that platform is ignored.
-        </p>
-        {(cfg.imInstances ?? []).length === 0 ? (
-          <p className="ui-muted ui-small">No extra instances — legacy single-token fields apply.</p>
+        {!cfg.imBot ? (
+          <p className="ui-muted ui-small">尚未配置机器人：请点击「添加机器人」。</p>
         ) : (
           <div className="ui-stack">
-            {(cfg.imInstances ?? []).map((spec, idx) => (
-              <div key={idx} className="ui-card" style={{ padding: '1rem', border: '1px solid var(--ui-border, #333)' }}>
+            {(() => {
+              const spec = cfg.imBot;
+              return (
+              <div key="im-bot" className="ui-card" style={{ padding: '1rem', border: '1px solid var(--ui-border, #333)' }}>
                 <div className="ui-grid" style={{ alignItems: 'flex-end' }}>
                   <label className="ui-field">
-                    <span>Instance id (slug)</span>
+                    <span>机器人标识（slug，用于路由）</span>
                     <input
                       value={spec.id}
-                      onChange={(e) => updateImInstance(idx, { id: e.target.value.trim() })}
+                      onChange={(e) => updateImBot({ id: e.target.value.trim() })}
                       placeholder="work"
                     />
                   </label>
                   <label className="ui-field">
-                    <span>Channel</span>
+                    <span>平台</span>
                     <select
                       value={spec.channel}
                       onChange={(e) =>
-                        updateImInstance(idx, { channel: e.target.value as ImInstanceChannel })
+                        updateImBot({ channel: e.target.value as ImInstanceChannel })
                       }
                     >
                       {IM_INSTANCE_CHANNELS.map((c) => (
                         <option key={c} value={c}>
-                          {c}
+                          {IM_CHANNEL_LABELS[c]}
                         </option>
                       ))}
                     </select>
@@ -458,16 +488,256 @@ export default function AdminPage() {
                     <input
                       type="checkbox"
                       checked={spec.enabled !== false}
-                      onChange={(e) => updateImInstance(idx, { enabled: e.target.checked })}
+                      onChange={(e) => updateImBot({ enabled: e.target.checked })}
                     />
-                    <span>Enabled</span>
+                    <span>启用</span>
                   </label>
-                  <button
-                    type="button"
-                    className="ui-btn secondary"
-                    onClick={() => removeImInstance(idx)}
-                  >
-                    Remove
+                </div>
+                <h4
+                  style={{
+                    marginTop: '1rem',
+                    marginBottom: '0.5rem',
+                    fontSize: '0.95rem',
+                    fontWeight: 600,
+                    color: '#cbd5e1',
+                  }}
+                >
+                  桥接默认值（写入顶格 CTI_*）
+                </h4>
+                <div className="ui-grid">
+                  <label className="ui-field">
+                    <span>默认工作目录（CTI_DEFAULT_WORKDIR）</span>
+                    <input
+                      value={spec.defaultWorkDir ?? ''}
+                      onChange={(e) => updateImBot({ defaultWorkDir: e.target.value || undefined })}
+                    />
+                  </label>
+                  <label className="ui-field">
+                    <span>HTTP 代理（CTI_PROXY）</span>
+                    <input
+                      value={spec.proxy ?? ''}
+                      onChange={(e) => updateImBot({ proxy: e.target.value || undefined })}
+                    />
+                  </label>
+                  <label className="ui-field">
+                    <span>Web 基址（CTI_WEB_BASE_URL）</span>
+                    <input
+                      value={spec.webBaseUrl ?? ''}
+                      onChange={(e) => updateImBot({ webBaseUrl: e.target.value || undefined })}
+                      placeholder="http://127.0.0.1:3000"
+                    />
+                  </label>
+                  <label className="ui-field ui-check">
+                    <input
+                      type="checkbox"
+                      checked={!!spec.autoApprove}
+                      onChange={(e) => updateImBot({ autoApprove: e.target.checked })}
+                    />
+                    <span>自动批准工具（CTI_AUTO_APPROVE）</span>
+                  </label>
+                  <label className="ui-field">
+                    <span>默认模型（CTI_DEFAULT_MODEL）</span>
+                    <input
+                      value={spec.defaultModel ?? ''}
+                      onChange={(e) => updateImBot({ defaultModel: e.target.value || undefined })}
+                    />
+                  </label>
+                  <label className="ui-field">
+                    <span>默认模式（CTI_DEFAULT_MODE）</span>
+                    <input
+                      value={spec.defaultMode ?? cfg.defaultMode ?? 'code'}
+                      onChange={(e) => updateImBot({ defaultMode: e.target.value })}
+                    />
+                  </label>
+                </div>
+                <div
+                  style={{
+                    marginTop: '0.75rem',
+                    borderTop: '1px solid var(--ui-border, #333)',
+                    paddingTop: '0.75rem',
+                  }}
+                >
+                  <p className="ui-muted ui-small">
+                    <strong>Runners</strong>（<code>imBot.runners</code>，保存时同步 <code>CTI_RUNNERS</code>）
+                  </p>
+                  <label className="ui-field">
+                    <span>此 bot 默认 Runner</span>
+                    <select
+                      value={spec.defaultRunnerId ?? (spec.runners?.[0]?.id ?? '')}
+                      onChange={(e) => updateImBot({ defaultRunnerId: e.target.value || undefined })}
+                    >
+                      {(spec.runners ?? normalizeRunners(asConfig(cfg))).map((r) => (
+                        <option key={r.id} value={r.id}>
+                          {r.id}（{r.runtime}）
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                  {(spec.runners ?? normalizeRunners(asConfig(cfg))).map((prof, ridx) => (
+                    <div key={`${ridx}-${prof.id}`} className="ui-slot" style={{ marginTop: '0.5rem' }}>
+                      <div className="ui-slot-head">
+                        <strong>Runner</strong>
+                        <button type="button" className="ui-btn ghost" onClick={() => removeImRunner(ridx)}>
+                          删除
+                        </button>
+                      </div>
+                      <div className="ui-grid">
+                        <label className="ui-field">
+                          <span>Runner ID</span>
+                          <input
+                            value={prof.id}
+                            onChange={(e) => updateImRunner(ridx, { id: e.target.value })}
+                          />
+                        </label>
+                        <label className="ui-field">
+                          <span>显示名称</span>
+                          <input
+                            value={prof.label ?? ''}
+                            onChange={(e) => updateImRunner(ridx, { label: e.target.value || undefined })}
+                          />
+                        </label>
+                        <label className="ui-field">
+                          <span>后端类型</span>
+                          <select
+                            value={prof.runtime}
+                            onChange={(e) =>
+                              updateImRunner(ridx, { runtime: e.target.value as RunnerConfig['runtime'] })
+                            }
+                          >
+                            {RUNTIMES.map((r) => (
+                              <option key={r} value={r}>
+                                {r}
+                              </option>
+                            ))}
+                          </select>
+                        </label>
+                        <label className="ui-field">
+                          <span>默认模型（可选）</span>
+                          <input
+                            value={prof.defaultModel ?? ''}
+                            onChange={(e) =>
+                              updateImRunner(ridx, { defaultModel: e.target.value || undefined })
+                            }
+                          />
+                        </label>
+                        <label className="ui-field">
+                          <span>建议模式</span>
+                          <select
+                            value={prof.defaultMode ?? ''}
+                            onChange={(e) => {
+                              const v = e.target.value;
+                              updateImRunner(ridx, {
+                                defaultMode: v === 'code' || v === 'plan' || v === 'ask' ? v : undefined,
+                              });
+                            }}
+                          >
+                            <option value="">（未设置）</option>
+                            {RUNNER_MODES.map((m) => (
+                              <option key={m} value={m}>
+                                {m}
+                              </option>
+                            ))}
+                          </select>
+                        </label>
+                        <label className="ui-field">
+                          <span>自动批准工具</span>
+                          <select
+                            value={prof.autoApprove === undefined ? '' : prof.autoApprove ? 'yes' : 'no'}
+                            onChange={(e) => {
+                              const v = e.target.value;
+                              updateImRunner(ridx, {
+                                autoApprove: v === '' ? undefined : v === 'yes',
+                              });
+                            }}
+                          >
+                            <option value="">继承桥接默认</option>
+                            <option value="yes">是</option>
+                            <option value="no">否</option>
+                          </select>
+                        </label>
+                      </div>
+                      {(prof.runtime === 'claude' || prof.runtime === 'auto') && (
+                        <div className="ui-grid">
+                          <label className="ui-field">
+                            <span>Claude CLI 路径</span>
+                            <input
+                              value={prof.claudeExecutable ?? ''}
+                              onChange={(e) =>
+                                updateImRunner(ridx, { claudeExecutable: e.target.value || undefined })
+                              }
+                            />
+                          </label>
+                          <label className="ui-field ui-check">
+                            <input
+                              type="checkbox"
+                              checked={prof.passModelToCli === true}
+                              onChange={(e) =>
+                                updateImRunner(ridx, { passModelToCli: e.target.checked ? true : undefined })
+                              }
+                            />
+                            <span>向 Claude CLI 传递模型</span>
+                          </label>
+                        </div>
+                      )}
+                      {(prof.runtime === 'codex' || prof.runtime === 'auto') && (
+                        <div className="ui-grid">
+                          <label className="ui-field">
+                            <span>Codex wrapper 路径</span>
+                            <input
+                              value={prof.codexExecutable ?? ''}
+                              onChange={(e) =>
+                                updateImRunner(ridx, { codexExecutable: e.target.value || undefined })
+                              }
+                            />
+                          </label>
+                          <label className="ui-field ui-check">
+                            <input
+                              type="checkbox"
+                              checked={prof.codexUseLogin === true}
+                              onChange={(e) =>
+                                updateImRunner(ridx, { codexUseLogin: e.target.checked ? true : undefined })
+                              }
+                            />
+                            <span>Codex 使用 CLI login</span>
+                          </label>
+                          <label className="ui-field ui-check">
+                            <input
+                              type="checkbox"
+                              checked={prof.codexPassModel === true}
+                              onChange={(e) =>
+                                updateImRunner(ridx, { codexPassModel: e.target.checked ? true : undefined })
+                              }
+                            />
+                            <span>Codex 向线程传递模型</span>
+                          </label>
+                        </div>
+                      )}
+                      {prof.runtime === 'cursor' && (
+                        <div className="ui-grid">
+                          <label className="ui-field">
+                            <span>Cursor agent 路径</span>
+                            <input
+                              value={prof.cursorExecutable ?? ''}
+                              onChange={(e) =>
+                                updateImRunner(ridx, { cursorExecutable: e.target.value || undefined })
+                              }
+                            />
+                          </label>
+                          <label className="ui-field">
+                            <span>默认模型</span>
+                            <input
+                              value={prof.cursorDefaultModel ?? ''}
+                              onChange={(e) =>
+                                updateImRunner(ridx, { cursorDefaultModel: e.target.value || undefined })
+                              }
+                            />
+                          </label>
+                        </div>
+                      )}
+                    </div>
+                  ))}
+                  <button type="button" className="ui-btn secondary" style={{ marginTop: '0.5rem' }} onClick={() => addImRunner()}>
+                    添加 Runner
                   </button>
                 </div>
                 {spec.channel === 'telegram' ? (
@@ -478,22 +748,22 @@ export default function AdminPage() {
                         type="password"
                         autoComplete="off"
                         value={spec.tgBotToken ?? ''}
-                        onChange={(e) => updateImInstance(idx, { tgBotToken: e.target.value || undefined })}
+                        onChange={(e) => updateImBot({ tgBotToken: e.target.value || undefined })}
                       />
                     </label>
                     <label className="ui-field">
                       <span>tgChatId</span>
                       <input
                         value={spec.tgChatId ?? ''}
-                        onChange={(e) => updateImInstance(idx, { tgChatId: e.target.value || undefined })}
+                        onChange={(e) => updateImBot({ tgChatId: e.target.value || undefined })}
                       />
                     </label>
                     <label className="ui-field">
-                      <span>tgAllowedUsers (comma)</span>
+                      <span>tgAllowedUsers（逗号分隔）</span>
                       <input
                         value={spec.tgAllowedUsers?.join(',') ?? ''}
                         onChange={(e) =>
-                          updateImInstance(idx, {
+                          updateImBot({
                             tgAllowedUsers: e.target.value
                               .split(',')
                               .map((s) => s.trim())
@@ -512,16 +782,16 @@ export default function AdminPage() {
                         type="password"
                         value={spec.discordBotToken ?? ''}
                         onChange={(e) =>
-                          updateImInstance(idx, { discordBotToken: e.target.value || undefined })
+                          updateImBot({ discordBotToken: e.target.value || undefined })
                         }
                       />
                     </label>
                     <label className="ui-field">
-                      <span>Allowed users (comma)</span>
+                      <span>允许的用户 ID（逗号）</span>
                       <input
                         value={spec.discordAllowedUsers?.join(',') ?? ''}
                         onChange={(e) =>
-                          updateImInstance(idx, {
+                          updateImBot({
                             discordAllowedUsers: e.target.value
                               .split(',')
                               .map((s) => s.trim())
@@ -531,11 +801,11 @@ export default function AdminPage() {
                       />
                     </label>
                     <label className="ui-field">
-                      <span>Allowed channels (comma)</span>
+                      <span>允许的频道（逗号）</span>
                       <input
                         value={spec.discordAllowedChannels?.join(',') ?? ''}
                         onChange={(e) =>
-                          updateImInstance(idx, {
+                          updateImBot({
                             discordAllowedChannels: e.target.value
                               .split(',')
                               .map((s) => s.trim())
@@ -545,11 +815,11 @@ export default function AdminPage() {
                       />
                     </label>
                     <label className="ui-field">
-                      <span>Allowed guilds (comma)</span>
+                      <span>允许的服务器（逗号）</span>
                       <input
                         value={spec.discordAllowedGuilds?.join(',') ?? ''}
                         onChange={(e) =>
-                          updateImInstance(idx, {
+                          updateImBot({
                             discordAllowedGuilds: e.target.value
                               .split(',')
                               .map((s) => s.trim())
@@ -566,7 +836,7 @@ export default function AdminPage() {
                       <span>feishuAppId</span>
                       <input
                         value={spec.feishuAppId ?? ''}
-                        onChange={(e) => updateImInstance(idx, { feishuAppId: e.target.value || undefined })}
+                        onChange={(e) => updateImBot({ feishuAppId: e.target.value || undefined })}
                       />
                     </label>
                     <label className="ui-field">
@@ -575,7 +845,7 @@ export default function AdminPage() {
                         type="password"
                         value={spec.feishuAppSecret ?? ''}
                         onChange={(e) =>
-                          updateImInstance(idx, { feishuAppSecret: e.target.value || undefined })
+                          updateImBot({ feishuAppSecret: e.target.value || undefined })
                         }
                       />
                     </label>
@@ -583,15 +853,15 @@ export default function AdminPage() {
                       <span>feishuDomain</span>
                       <input
                         value={spec.feishuDomain ?? ''}
-                        onChange={(e) => updateImInstance(idx, { feishuDomain: e.target.value || undefined })}
+                        onChange={(e) => updateImBot({ feishuDomain: e.target.value || undefined })}
                       />
                     </label>
                     <label className="ui-field">
-                      <span>Allowed users (comma)</span>
+                      <span>允许的用户（逗号）</span>
                       <input
                         value={spec.feishuAllowedUsers?.join(',') ?? ''}
                         onChange={(e) =>
-                          updateImInstance(idx, {
+                          updateImBot({
                             feishuAllowedUsers: e.target.value
                               .split(',')
                               .map((s) => s.trim())
@@ -608,7 +878,7 @@ export default function AdminPage() {
                       <span>qqAppId</span>
                       <input
                         value={spec.qqAppId ?? ''}
-                        onChange={(e) => updateImInstance(idx, { qqAppId: e.target.value || undefined })}
+                        onChange={(e) => updateImBot({ qqAppId: e.target.value || undefined })}
                       />
                     </label>
                     <label className="ui-field">
@@ -616,15 +886,15 @@ export default function AdminPage() {
                       <input
                         type="password"
                         value={spec.qqAppSecret ?? ''}
-                        onChange={(e) => updateImInstance(idx, { qqAppSecret: e.target.value || undefined })}
+                        onChange={(e) => updateImBot({ qqAppSecret: e.target.value || undefined })}
                       />
                     </label>
                     <label className="ui-field">
-                      <span>Allowed users (comma)</span>
+                      <span>允许的用户（逗号）</span>
                       <input
                         value={spec.qqAllowedUsers?.join(',') ?? ''}
                         onChange={(e) =>
-                          updateImInstance(idx, {
+                          updateImBot({
                             qqAllowedUsers: e.target.value
                               .split(',')
                               .map((s) => s.trim())
@@ -637,7 +907,7 @@ export default function AdminPage() {
                       <input
                         type="checkbox"
                         checked={spec.qqImageEnabled !== false}
-                        onChange={(e) => updateImInstance(idx, { qqImageEnabled: e.target.checked })}
+                        onChange={(e) => updateImBot({ qqImageEnabled: e.target.checked })}
                       />
                       <span>qqImageEnabled</span>
                     </label>
@@ -647,7 +917,7 @@ export default function AdminPage() {
                         type="number"
                         value={spec.qqMaxImageSize ?? ''}
                         onChange={(e) =>
-                          updateImInstance(idx, {
+                          updateImBot({
                             qqMaxImageSize: e.target.value ? Number(e.target.value) : undefined,
                           })
                         }
@@ -655,448 +925,133 @@ export default function AdminPage() {
                     </label>
                   </div>
                 ) : null}
+                <div
+                  style={{
+                    marginTop: '1rem',
+                    borderTop: '1px solid var(--ui-border, #333)',
+                    paddingTop: '0.75rem',
+                  }}
+                >
+                  <p className="ui-muted ui-small">
+                    <strong>Local Agent</strong>：勾选后该 bot 不再走上方平台 API；仅在此模式下连接 Redis（普通频道不会用 Redis）。
+                    Runner 从 <code>input</code> 取用户文本，回复写入 <code>out</code>，可转发到同平台另一实例的{' '}
+                    <code>input</code>。键前缀：<code>cti:localagent:平台:实例id:</code>。下方 Redis URL 为<strong>必填</strong>
+                    （不使用全局 <code>CTI_AGENT_REDIS_URL</code>）。
+                  </p>
+                  <div className="ui-grid">
+                    <label className="ui-field ui-check">
+                      <input
+                        type="checkbox"
+                        checked={!!spec.localAgentEnabled}
+                        onChange={(e) =>
+                          updateImBot({ localAgentEnabled: e.target.checked ? true : false })
+                        }
+                      />
+                      <span>启用 Local Agent</span>
+                    </label>
+                  </div>
+                  {spec.localAgentEnabled ? (
+                    <div className="ui-grid">
+                      <label className="ui-field">
+                        <span>Redis URL（必填）</span>
+                        <input
+                          value={spec.localAgentRedisUrl ?? ''}
+                          onChange={(e) =>
+                            updateImBot({ localAgentRedisUrl: e.target.value || undefined })
+                          }
+                          placeholder="redis://127.0.0.1:6379"
+                          required
+                        />
+                      </label>
+                      <label className="ui-field">
+                        <span>首条入队文本（LPUSH 到 input）</span>
+                        <input
+                          value={spec.localAgentFirstPrompt ?? ''}
+                          onChange={(e) =>
+                            updateImBot({ localAgentFirstPrompt: e.target.value || undefined })
+                          }
+                        />
+                      </label>
+                      <label className="ui-field">
+                        <span>最大轮次</span>
+                        <input
+                          type="number"
+                          min={1}
+                          value={spec.localAgentMaxTurns ?? ''}
+                          onChange={(e) =>
+                            updateImBot({
+                              localAgentMaxTurns: e.target.value ? Number(e.target.value) : undefined,
+                            })
+                          }
+                        />
+                      </label>
+                      <label className="ui-field">
+                        <span>Peer 实例 id（可选，同平台）</span>
+                        <input
+                          value={spec.localAgentPeerInstanceId ?? ''}
+                          onChange={(e) =>
+                            updateImBot({
+                              localAgentPeerInstanceId: e.target.value.trim() || undefined,
+                            })
+                          }
+                          placeholder="另一 bot 的 slug，转发 Claude 回复到其 input"
+                        />
+                      </label>
+                    </div>
+                  ) : null}
+                </div>
               </div>
-            ))}
+            );})()}
           </div>
         )}
-      </section>
-
-      {!hasImFor('telegram') ? (
-      <section className="ui-section hero-card">
-        <h2>Telegram</h2>
-        <div className="ui-grid">
-          <label className="ui-field">
-            <span>Bot token</span>
-            <input
-              type="password"
-              autoComplete="off"
-              value={cfg.tgBotToken ?? ''}
-              onChange={(e) => setCfg({ ...cfg, tgBotToken: e.target.value || undefined })}
-            />
-          </label>
-          <label className="ui-field">
-            <span>Chat ID</span>
-            <input value={cfg.tgChatId ?? ''} onChange={(e) => setCfg({ ...cfg, tgChatId: e.target.value || undefined })} />
-          </label>
-          <label className="ui-field">
-            <span>Allowed users (comma-separated)</span>
-            <input
-              value={cfg.tgAllowedUsers?.join(',') ?? ''}
-              onChange={(e) =>
-                setCfg({
-                  ...cfg,
-                  tgAllowedUsers: e.target.value
-                    .split(',')
-                    .map((s) => s.trim())
-                    .filter(Boolean),
-                })
-              }
-            />
-          </label>
-        </div>
-      </section>
-      ) : (
-      <section className="ui-section hero-card">
-        <h2>Telegram</h2>
-        <p className="ui-muted ui-small">Credentials are configured under IM multi-instance.</p>
-      </section>
-      )}
-
-      {!hasImFor('discord') ? (
-      <section className="ui-section hero-card">
-        <h2>Discord</h2>
-        <div className="ui-grid">
-          <label className="ui-field">
-            <span>Bot token</span>
-            <input
-              type="password"
-              value={cfg.discordBotToken ?? ''}
-              onChange={(e) => setCfg({ ...cfg, discordBotToken: e.target.value || undefined })}
-            />
-          </label>
-          <label className="ui-field">
-            <span>Allowed users</span>
-            <input
-              value={cfg.discordAllowedUsers?.join(',') ?? ''}
-              onChange={(e) =>
-                setCfg({
-                  ...cfg,
-                  discordAllowedUsers: e.target.value
-                    .split(',')
-                    .map((s) => s.trim())
-                    .filter(Boolean),
-                })
-              }
-            />
-          </label>
-          <label className="ui-field">
-            <span>Allowed channels</span>
-            <input
-              value={cfg.discordAllowedChannels?.join(',') ?? ''}
-              onChange={(e) =>
-                setCfg({
-                  ...cfg,
-                  discordAllowedChannels: e.target.value
-                    .split(',')
-                    .map((s) => s.trim())
-                    .filter(Boolean),
-                })
-              }
-            />
-          </label>
-          <label className="ui-field">
-            <span>Allowed guilds</span>
-            <input
-              value={cfg.discordAllowedGuilds?.join(',') ?? ''}
-              onChange={(e) =>
-                setCfg({
-                  ...cfg,
-                  discordAllowedGuilds: e.target.value
-                    .split(',')
-                    .map((s) => s.trim())
-                    .filter(Boolean),
-                })
-              }
-            />
-          </label>
-        </div>
-      </section>
-      ) : (
-      <section className="ui-section hero-card">
-        <h2>Discord</h2>
-        <p className="ui-muted ui-small">Credentials are configured under IM multi-instance.</p>
-      </section>
-      )}
-
-      {!hasImFor('feishu') ? (
-      <section className="ui-section hero-card">
-        <h2>Feishu / Lark</h2>
-        <div className="ui-grid">
-          <label className="ui-field">
-            <span>App ID</span>
-            <input value={cfg.feishuAppId ?? ''} onChange={(e) => setCfg({ ...cfg, feishuAppId: e.target.value || undefined })} />
-          </label>
-          <label className="ui-field">
-            <span>App secret</span>
-            <input
-              type="password"
-              value={cfg.feishuAppSecret ?? ''}
-              onChange={(e) => setCfg({ ...cfg, feishuAppSecret: e.target.value || undefined })}
-            />
-          </label>
-          <label className="ui-field">
-            <span>Domain</span>
-            <input
-              value={cfg.feishuDomain ?? ''}
-              onChange={(e) => setCfg({ ...cfg, feishuDomain: e.target.value || undefined })}
-            />
-          </label>
-          <label className="ui-field">
-            <span>Allowed users</span>
-            <input
-              value={cfg.feishuAllowedUsers?.join(',') ?? ''}
-              onChange={(e) =>
-                setCfg({
-                  ...cfg,
-                  feishuAllowedUsers: e.target.value
-                    .split(',')
-                    .map((s) => s.trim())
-                    .filter(Boolean),
-                })
-              }
-            />
-          </label>
-        </div>
-      </section>
-      ) : (
-      <section className="ui-section hero-card">
-        <h2>Feishu / Lark</h2>
-        <p className="ui-muted ui-small">Credentials are configured under IM multi-instance.</p>
-      </section>
-      )}
-
-      {!hasImFor('qq') ? (
-      <section className="ui-section hero-card">
-        <h2>QQ</h2>
-        <div className="ui-grid">
-          <label className="ui-field">
-            <span>App ID</span>
-            <input value={cfg.qqAppId ?? ''} onChange={(e) => setCfg({ ...cfg, qqAppId: e.target.value || undefined })} />
-          </label>
-          <label className="ui-field">
-            <span>App secret</span>
-            <input
-              type="password"
-              value={cfg.qqAppSecret ?? ''}
-              onChange={(e) => setCfg({ ...cfg, qqAppSecret: e.target.value || undefined })}
-            />
-          </label>
-          <label className="ui-field">
-            <span>Allowed users</span>
-            <input
-              value={cfg.qqAllowedUsers?.join(',') ?? ''}
-              onChange={(e) =>
-                setCfg({
-                  ...cfg,
-                  qqAllowedUsers: e.target.value
-                    .split(',')
-                    .map((s) => s.trim())
-                    .filter(Boolean),
-                })
-              }
-            />
-          </label>
-        </div>
-      </section>
-      ) : (
-      <section className="ui-section hero-card">
-        <h2>QQ</h2>
-        <p className="ui-muted ui-small">Credentials are configured under IM multi-instance.</p>
-      </section>
-      )}
-
-      <section className="ui-section hero-card">
-        <h2>Agent channel (single instance)</h2>
-        <div className="ui-grid">
-          <label className="ui-field">
-            <span>Redis URL</span>
-            <input
-              value={cfg.agentRedisUrl ?? ''}
-              onChange={(e) => setCfg({ ...cfg, agentRedisUrl: e.target.value || undefined })}
-            />
-          </label>
-          <label className="ui-field">
-            <span>OpenAI API key</span>
-            <input
-              type="password"
-              value={cfg.agentOpenAIApiKey ?? ''}
-              onChange={(e) => setCfg({ ...cfg, agentOpenAIApiKey: e.target.value || undefined })}
-            />
-          </label>
-          <label className="ui-field">
-            <span>Base URL</span>
-            <input
-              value={cfg.agentOpenAIBaseUrl ?? ''}
-              onChange={(e) => setCfg({ ...cfg, agentOpenAIBaseUrl: e.target.value || undefined })}
-            />
-          </label>
-          <label className="ui-field">
-            <span>Model</span>
-            <input
-              value={cfg.agentOpenAIModel ?? ''}
-              onChange={(e) => setCfg({ ...cfg, agentOpenAIModel: e.target.value || undefined })}
-            />
-          </label>
-          <label className="ui-field">
-            <span>First prompt</span>
-            <input
-              value={cfg.agentFirstPrompt ?? ''}
-              onChange={(e) => setCfg({ ...cfg, agentFirstPrompt: e.target.value || undefined })}
-            />
-          </label>
-          <label className="ui-field">
-            <span>Max turns</span>
-            <input
-              type="number"
-              value={cfg.agentMaxTurns ?? ''}
-              onChange={(e) =>
-                setCfg({
-                  ...cfg,
-                  agentMaxTurns: e.target.value ? Number(e.target.value) : undefined,
-                })
-              }
-            />
-          </label>
-        </div>
-      </section>
-
-      <section className="ui-section hero-card">
-        <div className="ui-section-title">
-          <h2>Agent multi-instance (CTI_AGENT_1_*, …)</h2>
-          <button type="button" className="ui-btn secondary" onClick={addAgentSlot}>
-            Add slot
-          </button>
-        </div>
-        {(cfg.agentEnvSlots ?? []).map((slot, index) => (
-          <div key={`${slot.slot}-${index}`} className="ui-slot">
-            <div className="ui-slot-head">
-              <strong>Slot {slot.slot}</strong>
-              <button type="button" className="ui-btn ghost" onClick={() => removeAgentSlot(index)}>
-                Remove
-              </button>
-            </div>
-            <div className="ui-grid">
-              <label className="ui-field">
-                <span>Slot number (1–10)</span>
-                <input
-                  type="number"
-                  min={1}
-                  max={10}
-                  value={slot.slot}
-                  onChange={(e) => updateSlot(index, { slot: Number(e.target.value) })}
-                />
-              </label>
-              <label className="ui-field">
-                <span>OpenAI API key</span>
-                <input
-                  type="password"
-                  value={slot.openaiApiKey ?? ''}
-                  onChange={(e) => updateSlot(index, { openaiApiKey: e.target.value || undefined })}
-                />
-              </label>
-              <label className="ui-field">
-                <span>Redis URL</span>
-                <input
-                  value={slot.redisUrl ?? ''}
-                  onChange={(e) => updateSlot(index, { redisUrl: e.target.value || undefined })}
-                />
-              </label>
-              <label className="ui-field">
-                <span>Model</span>
-                <input
-                  value={slot.openaiModel ?? ''}
-                  onChange={(e) => updateSlot(index, { openaiModel: e.target.value || undefined })}
-                />
-              </label>
-            </div>
-          </div>
-        ))}
-      </section>
-
-      <section className="ui-section hero-card">
-        <h2>Jira (platform agents)</h2>
-        <div className="ui-grid">
-          <label className="ui-field">
-            <span>Base URL</span>
-            <input
-              value={cfg.jiraBaseUrl ?? ''}
-              onChange={(e) => setCfg({ ...cfg, jiraBaseUrl: e.target.value || undefined })}
-            />
-          </label>
-          <label className="ui-field">
-            <span>Email</span>
-            <input value={cfg.jiraEmail ?? ''} onChange={(e) => setCfg({ ...cfg, jiraEmail: e.target.value || undefined })} />
-          </label>
-          <label className="ui-field">
-            <span>API token</span>
-            <input
-              type="password"
-              value={cfg.jiraApiToken ?? ''}
-              onChange={(e) => setCfg({ ...cfg, jiraApiToken: e.target.value || undefined })}
-            />
-          </label>
-          <label className="ui-field">
-            <span>Poll interval (ms)</span>
-            <input
-              type="number"
-              value={cfg.jiraPollIntervalMs ?? ''}
-              onChange={(e) =>
-                setCfg({
-                  ...cfg,
-                  jiraPollIntervalMs: e.target.value ? Number(e.target.value) : undefined,
-                })
-              }
-            />
-          </label>
-          <label className="ui-field">
-            <span>Bot account ID (optional)</span>
-            <input
-              value={cfg.jiraBotAccountId ?? ''}
-              onChange={(e) => setCfg({ ...cfg, jiraBotAccountId: e.target.value || undefined })}
-            />
-          </label>
-        </div>
-      </section>
-
-      <section className="ui-section hero-card ui-actions-bar">
-        <button type="button" className="ui-btn primary" disabled={saving} onClick={() => void saveConfig()}>
-          {saving ? 'Saving…' : 'Save config.env'}
-        </button>
-        <button type="button" className="ui-btn secondary" onClick={() => void bridgeAction('start')}>
-          Bridge start
-        </button>
-        <button type="button" className="ui-btn secondary" onClick={() => void bridgeAction('stop')}>
-          Bridge stop
-        </button>
-      </section>
-
-      <section className="ui-section hero-card">
-        <h2>Platform agent instances</h2>
-        <p className="ui-muted ui-small">
-          Creates a runner for an existing task session (same as workflow). Requires Jira env above.
+        <p className="ui-muted ui-small" style={{ marginTop: '1rem' }}>
+          写入配置中的 CTI_RUNTIME（当前生效值）：<code>{cfg.runtime}</code>
         </p>
-        <div className="ui-inline">
-          <select
-            value={newInstance.taskSessionId}
-            onChange={(e) => setNewInstance({ ...newInstance, taskSessionId: e.target.value })}
-          >
-            <option value="">Select task session…</option>
-            {taskOptions.map((o) => (
-              <option key={o.id} value={o.id}>
-                {o.label}
-              </option>
-            ))}
-          </select>
-          <select
-            value={newInstance.role}
-            onChange={(e) => setNewInstance({ ...newInstance, role: e.target.value as AgentRole })}
-          >
-            {ROLES.map((r) => (
-              <option key={r} value={r}>
-                {r}
-              </option>
-            ))}
-          </select>
-          <select
-            value={newInstance.runtimeProfileId}
-            onChange={(e) => setNewInstance({ ...newInstance, runtimeProfileId: e.target.value })}
-          >
-            <option value="">Runtime profile (optional)</option>
-            {(cfg.runtimeProfiles ?? []).map((p) => (
-              <option key={p.id} value={p.id}>
-                {p.id} → {p.runtime}
-              </option>
-            ))}
-          </select>
-          <button type="button" className="ui-btn primary" onClick={() => void createInstance()}>
-            Create / restart instance
+        </div>
+        )}
+        <div
+          className="ui-actions-bar"
+          style={{
+            marginTop: '1.25rem',
+            paddingTop: '1rem',
+            borderTop: '1px solid var(--ui-border, #333)',
+            display: 'flex',
+            flexWrap: 'wrap',
+            gap: '0.75rem',
+            alignItems: 'flex-end',
+          }}
+        >
+          {canSwitchBridges ? (
+            <label className="ui-field" style={{ minWidth: 'min(100%, 280px)' }}>
+              <span>当前桥接（数据目录名）</span>
+              <select
+                value={activeBotName}
+                disabled={switchingBridge || newBridging}
+                onChange={(e) => void switchBridge(e.target.value)}
+              >
+                {bridges.map((b) => (
+                  <option key={b} value={b}>
+                    {b}
+                  </option>
+                ))}
+              </select>
+            </label>
+          ) : (
+            <p className="ui-muted ui-small" style={{ margin: 0, flex: '1 1 200px' }}>
+              已设置 <code>CTI_HOME</code> 时由环境固定目录，无法在此切换；未设置时可通过下拉在{' '}
+              <code>$CTI_BASE/&lt;名称&gt;</code> 各桥接间切换。
+            </p>
+          )}
+          <button type="button" className="ui-btn primary" disabled={configLoading || saving || newBridging || switchingBridge} onClick={() => void saveConfig()}>
+            {saving ? '保存中…' : '保存 config.env'}
+          </button>
+          <button type="button" className="ui-btn secondary" disabled={startDisabled} onClick={() => void bridgeAction('start')}>
+            启动桥接
+          </button>
+          <button type="button" className="ui-btn secondary" disabled={stopDisabled} onClick={() => void bridgeAction('stop')}>
+            停止桥接
           </button>
         </div>
-
-        <table className="ui-table">
-          <thead>
-            <tr>
-              <th>ID</th>
-              <th>Role</th>
-              <th>Profile</th>
-              <th>Status</th>
-              <th>Task</th>
-              <th />
-            </tr>
-          </thead>
-          <tbody>
-            {instances.map((i) => (
-              <tr key={i.id}>
-                <td className="ui-mono">{i.id.slice(0, 8)}…</td>
-                <td>{i.role}</td>
-                <td className="ui-mono">{i.runtimeProfileId ?? '—'}</td>
-                <td>{i.status}</td>
-                <td className="ui-mono">{i.taskId}</td>
-                <td className="ui-actions">
-                  <button type="button" className="ui-btn ghost" onClick={() => void instanceAction(i.id, 'start')}>
-                    Start
-                  </button>
-                  <button type="button" className="ui-btn ghost" onClick={() => void instanceAction(i.id, 'stop')}>
-                    Stop
-                  </button>
-                  <button type="button" className="ui-btn danger" onClick={() => void instanceAction(i.id, 'delete')}>
-                    Delete
-                  </button>
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
       </section>
     </main>
   );

@@ -21,6 +21,12 @@ import { BaseChannelAdapter, registerAdapterFactory } from '../channel-adapter';
 import { getBridgeContext } from '../context';
 import { imScopedGet } from '../im-instance-settings';
 import {
+  isLocalAgentIntentEnabled,
+  readLocalAgentSettings,
+  RedisLocalTransport,
+  runRedisLocalInboundLoop,
+} from '../redis-local-transport';
+import {
   getAccessToken,
   getGatewayUrl,
   clearTokenCache,
@@ -47,6 +53,8 @@ export class QQAdapter extends BaseChannelAdapter {
   private maxReconnectAttempts = 10;
   private shouldReconnect = false;
 
+  private redisLocal: RedisLocalTransport | null = null;
+
   constructor(instanceId = 'default') {
     super('qq', instanceId);
   }
@@ -59,6 +67,30 @@ export class QQAdapter extends BaseChannelAdapter {
 
   async start(): Promise<void> {
     if (this._running) return;
+
+    const la = readLocalAgentSettings(getBridgeContext().store, 'qq', this.instanceId);
+    if (la) {
+      const configError = this.validateConfig();
+      if (configError) {
+        console.warn('[qq-adapter] Cannot start (local agent):', configError);
+        return;
+      }
+      this.redisLocal = new RedisLocalTransport('qq', this.instanceId, la);
+      try {
+        await this.redisLocal.connect();
+        await this.redisLocal.seedFirstPromptIfNeeded();
+      } catch (err) {
+        console.error('[qq-adapter] Local agent Redis failed:', err);
+        this.redisLocal = null;
+        return;
+      }
+      this._running = true;
+      this.redisLocalPollLoop().catch((err) => {
+        console.error('[qq-adapter] Redis poll loop error:', err);
+      });
+      console.log(`[qq-adapter] Local Agent mode (Redis-only), instance=${this.instanceId}`);
+      return;
+    }
 
     const configError = this.validateConfig();
     if (configError) {
@@ -87,6 +119,11 @@ export class QQAdapter extends BaseChannelAdapter {
     if (!this._running) return;
     this._running = false;
     this.shouldReconnect = false;
+
+    if (this.redisLocal) {
+      await this.redisLocal.disconnect();
+      this.redisLocal = null;
+    }
 
     this.stopHeartbeat();
 
@@ -134,9 +171,29 @@ export class QQAdapter extends BaseChannelAdapter {
     }
   }
 
+  private async redisLocalPollLoop(): Promise<void> {
+    const rt = this.redisLocal;
+    if (!rt) return;
+    await runRedisLocalInboundLoop(
+      rt,
+      this.channelType,
+      (msg) => this.enqueue(msg),
+      () => this._running,
+      async () => {
+        console.log(`[qq-adapter] Local agent max turns (${this.instanceId})`);
+        await this.stop();
+      },
+    );
+  }
+
   // ── Send ────────────────────────────────────────────────────
 
   async send(message: OutboundMessage): Promise<SendResult> {
+    if (this.redisLocal) {
+      const r = await this.redisLocal.deliverClaudeReply(message.text);
+      return r.ok ? { ok: true, messageId: crypto.randomUUID() } : { ok: false, error: r.error };
+    }
+
     if (!message.replyToMessageId) {
       return { ok: false, error: 'Missing replyToMessageId for QQ passive reply' };
     }
@@ -168,6 +225,16 @@ export class QQAdapter extends BaseChannelAdapter {
   // ── Config & Auth ───────────────────────────────────────────
 
   validateConfig(): string | null {
+    const store = getBridgeContext().store;
+    if (isLocalAgentIntentEnabled(store, 'qq', this.instanceId)) {
+      if (!readLocalAgentSettings(store, 'qq', this.instanceId)) {
+        return 'local agent enabled but bridge_qq_local_agent_redis_url is required';
+      }
+      const enabled = this.q('bridge_qq_enabled');
+      if (enabled !== 'true') return 'bridge_qq_enabled is not true';
+      return null;
+    }
+
     const appId = this.q('bridge_qq_app_id');
     if (!appId) return 'bridge_qq_app_id not configured';
 
@@ -178,6 +245,7 @@ export class QQAdapter extends BaseChannelAdapter {
   }
 
   isAuthorized(userId: string, _chatId: string): boolean {
+    if (this.redisLocal) return true;
     const allowedUsers = this.q('bridge_qq_allowed_users') || '';
     if (!allowedUsers) return true;
 

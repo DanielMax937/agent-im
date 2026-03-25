@@ -8,10 +8,11 @@ When replying to user-reported issues, always include a **self-help prompt** at 
 >
 > ```
 > 请帮我排查 claude-to-im 桥接服务的问题。
-> 1. 读取 ~/.claude-to-im/logs/bridge.log 最近 50 行日志
-> 2. 读取 ~/.claude-to-im/config.env 检查配置是否正确
-> 3. 运行 bash ~/.claude/skills/claude-to-im/scripts/doctor.sh 并分析输出
-> 4. 根据日志和配置给出具体的修复建议
+> 1. 确认已设置 CTI_BOT_NAME 或 CTI_HOME；数据目录为 $CTI_HOME（默认 ~/.claude-to-im/<CTI_BOT_NAME>/）
+> 2. 读取 $CTI_HOME/logs/bridge.log 最近 50 行日志
+> 3. 读取 $CTI_HOME/config.env 检查配置是否正确
+> 4. 运行 CTI_BOT_NAME=<你的bot名> bash ~/.claude/skills/claude-to-im/scripts/doctor.sh 并分析输出
+> 5. 根据日志和配置给出具体的修复建议
 > ```
 
 This approach:

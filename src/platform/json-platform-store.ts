@@ -2,7 +2,7 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 
-import { CTI_HOME } from '../config';
+import { getCtiHome } from '../config';
 import type {
   AgentInstanceRecord,
   PendingApprovalRecord,
@@ -13,7 +13,9 @@ import type {
   TaskSession,
 } from './types';
 
-const PLATFORM_DIR = path.join(CTI_HOME, 'data', 'platform');
+function platformDir(): string {
+  return path.join(getCtiHome(), 'data', 'platform');
+}
 
 function ensureDir(dirPath: string): void {
   fs.mkdirSync(dirPath, { recursive: true });
@@ -54,7 +56,7 @@ export class JsonPlatformStore {
   private queues = new Map<string, TaskQueueMessage[]>();
   private approvals = new Map<string, PendingApprovalRecord>();
 
-  constructor(private readonly baseDir = PLATFORM_DIR) {
+  constructor(private readonly baseDir = platformDir()) {
     ensureDir(this.baseDir);
     this.load();
   }

@@ -169,77 +169,149 @@ describe('configToSettings', () => {
     assert.equal(m.has('bridge_feishu_app_id'), false);
   });
 
-  it('maps imInstances to bridge_telegram_instances and token keys', () => {
+  it('maps imBot to bridge_telegram_instances and token keys', () => {
     const m = configToSettings({
       ...base,
       enabledChannels: ['telegram'],
-      imInstances: [
-        {
-          id: 'work',
-          channel: 'telegram',
-          tgBotToken: 'bot:secret',
-          tgAllowedUsers: ['1'],
-        },
+      imBot: {
+        id: 'work',
+        channel: 'telegram',
+        tgBotToken: 'bot:secret',
+        tgAllowedUsers: ['1'],
+        runners: [
+          { id: 'default', runtime: 'claude' },
+          { id: 'codex', runtime: 'codex' },
+        ],
+      },
+      runners: [
+        { id: 'default', runtime: 'claude' },
+        { id: 'codex', runtime: 'codex' },
       ],
     });
     assert.equal(m.get('bridge_telegram_instances'), 'work');
     assert.equal(m.get('telegram_work_bot_token'), 'bot:secret');
+    assert.equal(m.has('bridge_telegram_work_allowed_runner_ids'), false);
   });
 });
 
-// ── mergeConfigPatch / configForAdminResponse (imInstances) ──
+// ── mergeConfigPatch / configForAdminResponse (imBot) ──
 
-describe('mergeConfigPatch imInstances', () => {
+describe('mergeConfigPatch imBot', () => {
   const base: Config = {
     runtime: 'claude',
     enabledChannels: [],
     defaultWorkDir: '/tmp/test',
     defaultMode: 'code',
-    imInstances: [
-      {
-        id: 'a',
-        channel: 'telegram',
-        tgBotToken: 'old-token',
-      },
-    ],
+    imBot: {
+      id: 'a',
+      channel: 'telegram',
+      tgBotToken: 'old-token',
+    },
   };
 
-  it('clears imInstances when patch has empty array', () => {
-    const next = mergeConfigPatch(base, { imInstances: [] });
-    assert.equal(next.imInstances, undefined);
+  it('clears imBot when patch sends null', () => {
+    const next = mergeConfigPatch(base, {
+      imBot: null,
+    } as Parameters<typeof mergeConfigPatch>[1]);
+    assert.equal(next.imBot, undefined);
+  });
+
+  it('strips top-level bridge mirrors that matched removed imBot', () => {
+    const prev: Config = {
+      runtime: 'claude',
+      enabledChannels: ['telegram'],
+      defaultWorkDir: '/tmp/bot-wd',
+      defaultMode: 'plan',
+      proxy: 'http://proxy.example',
+      autoApprove: true,
+      defaultModel: 'opus',
+      defaultRunnerId: 'default',
+      runners: [{ id: 'default', runtime: 'claude' }],
+      imBot: {
+        id: 'a',
+        channel: 'telegram',
+        defaultWorkDir: '/tmp/bot-wd',
+        defaultMode: 'plan',
+        proxy: 'http://proxy.example',
+        autoApprove: true,
+        defaultModel: 'opus',
+        defaultRunnerId: 'default',
+        runners: [{ id: 'default', runtime: 'claude' }],
+      },
+    };
+    const next = mergeConfigPatch(prev, {
+      imBot: null,
+    } as Parameters<typeof mergeConfigPatch>[1]);
+    assert.equal(next.imBot, undefined);
+    assert.equal(next.proxy, undefined);
+    assert.equal(next.webBaseUrl, undefined);
+    assert.equal(next.defaultMode, 'code');
+    assert.equal(next.autoApprove, false);
+    assert.equal(next.defaultModel, undefined);
+    assert.equal(next.defaultRunnerId, undefined);
+    assert.equal(next.defaultWorkDir, process.cwd());
+    assert.equal(next.runners, undefined);
+  });
+
+  it('keeps top-level proxy when imBot did not set proxy', () => {
+    const prev: Config = {
+      runtime: 'claude',
+      enabledChannels: [],
+      defaultWorkDir: process.cwd(),
+      defaultMode: 'code',
+      proxy: 'http://legacy-only',
+      runners: [{ id: 'default', runtime: 'claude' }],
+      imBot: {
+        id: 'a',
+        channel: 'telegram',
+        runners: [{ id: 'default', runtime: 'claude' }],
+      },
+    };
+    const next = mergeConfigPatch(prev, {
+      imBot: null,
+    } as Parameters<typeof mergeConfigPatch>[1]);
+    assert.equal(next.proxy, 'http://legacy-only');
   });
 
   it('keeps previous token when masked placeholder is sent', () => {
     const next = mergeConfigPatch(base, {
-      imInstances: [{ id: 'a', channel: 'telegram', tgBotToken: '****5678' }],
+      imBot: { id: 'a', channel: 'telegram', tgBotToken: '****5678' },
     });
-    assert.equal(next.imInstances?.[0].tgBotToken, 'old-token');
+    assert.equal(next.imBot?.tgBotToken, 'old-token');
   });
 
   it('applies new token when explicitly changed', () => {
     const next = mergeConfigPatch(base, {
-      imInstances: [{ id: 'a', channel: 'telegram', tgBotToken: 'brand-new' }],
+      imBot: { id: 'a', channel: 'telegram', tgBotToken: 'brand-new' },
     });
-    assert.equal(next.imInstances?.[0].tgBotToken, 'brand-new');
+    assert.equal(next.imBot?.tgBotToken, 'brand-new');
+  });
+
+  it('fills per-bot runners from global CTI_RUNNERS when omitted', () => {
+    const next = mergeConfigPatch(
+      { ...base, runners: [{ id: 'default', runtime: 'claude' }] },
+      {
+        imBot: { id: 'a', channel: 'telegram', tgBotToken: 'old-token' },
+      },
+    );
+    assert.deepEqual(next.imBot?.runners, [{ id: 'default', runtime: 'claude' }]);
   });
 });
 
-describe('configForAdminResponse imInstances', () => {
-  it('masks per-instance secrets', () => {
+describe('configForAdminResponse imBot', () => {
+  it('masks per-bot secrets', () => {
     const { config: out } = configForAdminResponse({
       runtime: 'claude',
       enabledChannels: ['telegram'],
       defaultWorkDir: '/tmp',
       defaultMode: 'code',
-      imInstances: [
-        {
-          id: 'x',
-          channel: 'discord',
-          discordBotToken: 'discord-secret-token',
-        },
-      ],
+      imBot: {
+        id: 'x',
+        channel: 'discord',
+        discordBotToken: 'discord-secret-token',
+      },
     });
-    assert.equal(out.imInstances?.[0].discordBotToken, maskSecret('discord-secret-token'));
+    assert.equal(out.imBot?.discordBotToken, maskSecret('discord-secret-token'));
   });
 });
 
@@ -252,7 +324,7 @@ describe('loadConfig/saveConfig round-trip', () => {
   beforeEach(() => {
     tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cti-config-test-'));
     origHome = process.env.HOME || '';
-    // We can't easily override CTI_HOME since it's a const,
+    // loadConfig/saveConfig paths use getCtiHome() from env; round-trip uses configToSettings here.
     // so we test the parsing logic indirectly through configToSettings
   });
 

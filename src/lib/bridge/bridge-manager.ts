@@ -28,31 +28,49 @@ import {
   sanitizeInput,
   validateMode,
 } from './security/validators';
+import { startBridgeDaemonChild } from '../bridge-app-child';
 import {
   listInstanceIdsForChannel,
   isInstanceImEnabled,
+  resolveRunnerForChannelBinding,
   type ImBaseChannel,
 } from './im-instance-settings';
-import { getConfiguredAgentInstanceIds } from './adapters/agent-adapter';
-
 const GLOBAL_KEY = '__bridge_manager__';
 
-/** Runtime profiles for IM /runner (fallback when context omits `imRuntimeProfiles`). */
-function getImRuntimeProfileList(): Array<{ id: string; runtime: string; label?: string }> {
-  const { imRuntimeProfiles } = getBridgeContext();
-  if (imRuntimeProfiles && imRuntimeProfiles.length > 0) {
-    return [...imRuntimeProfiles];
+/** Runners for IM /runner for this adapter channel (per-bot list from config). */
+function getImRunnerList(channelType: string): Array<{ id: string; runtime: string; label?: string }> {
+  const { getRunnerConfigsForChannelType, imRunners } = getBridgeContext();
+  const fromCfg = getRunnerConfigsForChannelType?.(channelType);
+  if (fromCfg && fromCfg.length > 0) {
+    return fromCfg.map((p) => ({
+      id: p.id,
+      runtime: p.runtime,
+      label: p.label,
+    }));
+  }
+  if (imRunners && imRunners.length > 0) {
+    return [...imRunners];
   }
   return [{ id: 'default', runtime: 'claude' }];
 }
 
-/** Effective runner profile id for this chat (binding override or store default). */
+/** Effective runner profile id for this chat (binding override, per-bot default, store default). */
 function effectiveRunnerProfileId(binding: ChannelBinding, store: BridgeStore): string {
-  const fromBinding = binding.runnerProfileId?.trim();
-  if (fromBinding) return fromBinding;
-  return store.getSetting('bridge_default_runner_profile_id')?.trim()
-    || getImRuntimeProfileList()[0]?.id
-    || 'default';
+  const profiles = getImRunnerList(binding.channelType);
+  const allIds = profiles.map((p) => p.id);
+  const storeDefault = store.getSetting('bridge_default_runner_profile_id')?.trim() || undefined;
+  const globalDef =
+    getBridgeContext().getDefaultRunnerIdForChannelType?.(binding.channelType) ??
+    storeDefault ??
+    profiles[0]?.id ??
+    'default';
+  return resolveRunnerForChannelBinding(
+    store,
+    binding.channelType,
+    binding.runnerProfileId,
+    globalDef,
+    allIds,
+  );
 }
 
 // ── Streaming preview helpers ──────────────────────────────────
@@ -255,16 +273,11 @@ export async function start(): Promise<void> {
 
   // Iterate registered adapter factories — multiple instances per base channel (see CTI_IM_INSTANCES)
   for (const channelType of getRegisteredTypes()) {
-    const instanceIds =
-      channelType === 'agent'
-        ? getConfiguredAgentInstanceIds()
-        : listInstanceIdsForChannel(channelType, store);
+    const instanceIds = listInstanceIdsForChannel(channelType, store);
 
     for (const instanceId of instanceIds) {
-      if (channelType !== 'agent') {
-        if (!isInstanceImEnabled(store, channelType as ImBaseChannel, instanceId)) {
-          continue;
-        }
+      if (!isInstanceImEnabled(store, channelType as ImBaseChannel, instanceId)) {
+        continue;
       }
 
       const adapter = createAdapter(channelType, instanceId);
@@ -372,7 +385,7 @@ export function tryAutoStart(): void {
   const autoStart = store.getSetting('bridge_auto_start');
   if (autoStart !== 'true') return;
 
-  start().catch(err => {
+  startBridgeDaemonChild().catch((err: unknown) => {
     console.error('[bridge-manager] Auto-start failed:', err);
   });
 }
@@ -861,8 +874,8 @@ async function handleCommand(
 
     case '/runner':
     case '/runners': {
-      const profiles = getImRuntimeProfileList();
       const binding = router.resolve(msg.address);
+      const profiles = getImRunnerList(binding.channelType);
       const storeDefault = store.getSetting('bridge_default_runner_profile_id')?.trim() || undefined;
 
       const rawArg = args.split(/\s+/)[0]?.trim() ?? '';
@@ -886,8 +899,11 @@ async function handleCommand(
             ? 'This chat overrides the default.'
             : `Using store default${storeDefault ? ` (<code>${escapeHtml(storeDefault)}</code>)` : ''}.`,
           '',
-          '<b>Available:</b>',
+          '<b>Available for this bot:</b>',
         );
+        if (profiles.length === 0) {
+          lines.push('(none — 在管理页为该 bot 配置至少一个 Runner)');
+        }
         for (const p of profiles) {
           const mark =
             p.id === storeDefault ? ' (server default)' : p.id === eff && !binding.runnerProfileId ? ' (effective)' : '';
@@ -918,9 +934,9 @@ async function handleCommand(
       );
       if (!matched) {
         response = [
-          `Unknown profile <code>${escapeHtml(rawArg)}</code>.`,
+          `Unknown or not configured for this bot: <code>${escapeHtml(rawArg)}</code>.`,
           '',
-          'Use <code>/runner</code> to list profiles.',
+          'Use <code>/runner</code> to list runners for this bot.',
         ].join('\n');
         break;
       }
@@ -937,7 +953,7 @@ async function handleCommand(
 
     case '/status': {
       const binding = router.resolve(msg.address);
-      const profiles = getImRuntimeProfileList();
+      const profiles = getImRunnerList(binding.channelType);
       const eff = effectiveRunnerProfileId(binding, store);
       const effMeta = profiles.find((p) => p.id === eff);
       const runnerLine = effMeta

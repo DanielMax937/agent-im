@@ -1,6 +1,14 @@
 #!/usr/bin/env bash
 set -euo pipefail
-CTI_HOME="${CTI_HOME:-$HOME/.claude-to-im}"
+# Per-bot layout: ~/.claude-to-im/<CTI_BOT_NAME>/config.env — set CTI_BOT_NAME or CTI_HOME (full bot dir).
+CTI_BASE="${CTI_BASE:-$HOME/.claude-to-im}"
+if [ -z "${CTI_HOME:-}" ]; then
+  if [ -z "${CTI_BOT_NAME:-}" ]; then
+    echo "Set CTI_BOT_NAME (directory under \$CTI_BASE, default ~/.claude-to-im) or CTI_HOME (full bot data directory)." >&2
+    exit 1
+  fi
+  CTI_HOME="$CTI_BASE/$CTI_BOT_NAME"
+fi
 SKILL_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 PID_FILE="$CTI_HOME/runtime/bridge.pid"
 STATUS_FILE="$CTI_HOME/runtime/status.json"

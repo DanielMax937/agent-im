@@ -205,27 +205,30 @@ case "$RUNTIME" in
     ;;
 esac
 
-# ── Config hint ──
+# ── Config hint (per-bot: ~/.claude-to-im/<CTI_BOT_NAME>/config.env) ──
 
-CTI_HOME="$HOME/.claude-to-im"
-CONFIG_FILE="$CTI_HOME/config.env"
+CTI_BASE="${CTI_BASE:-$HOME/.claude-to-im}"
+if [ -z "${CTI_HOME:-}" ] && [ -n "${CTI_BOT_NAME:-}" ]; then
+  CTI_HOME="$CTI_BASE/$CTI_BOT_NAME"
+fi
+CONFIG_FILE="${CTI_HOME:+$CTI_HOME/config.env}"
 
 echo ""
 echo "=== Deployment complete ==="
 echo ""
 
-if [ -f "$CONFIG_FILE" ]; then
+if [ -n "${CONFIG_FILE:-}" ] && [ -f "$CONFIG_FILE" ]; then
   CURRENT_RUNTIME=$(grep "^CTI_RUNTIME=" "$CONFIG_FILE" 2>/dev/null | head -1 | cut -d= -f2- | sed 's/^["'"'"']//;s/["'"'"']$//' || true)
   if [ -n "$CURRENT_RUNTIME" ] && [ "$CURRENT_RUNTIME" != "$RUNTIME" ]; then
     echo "Note: config.env has CTI_RUNTIME=$CURRENT_RUNTIME but you deployed for $RUNTIME."
-    echo "  To switch runtime, update ~/.claude-to-im/config.env:"
+    echo "  To switch runtime, update your bot config.env (CTI_HOME or CTI_BOT_NAME + CTI_BASE):"
     echo "    CTI_RUNTIME=$RUNTIME"
     echo ""
   fi
 fi
 
 echo "Next steps:"
-if [ ! -f "$CONFIG_FILE" ]; then
+if [ -z "${CONFIG_FILE:-}" ] || [ ! -f "$CONFIG_FILE" ]; then
   case "$TARGET" in
     claude)
       echo "  1. Start a Claude Code session and run: /claude-to-im setup"

@@ -35,7 +35,7 @@ export abstract class BaseChannelAdapter {
     this.baseChannelType = baseType;
     this.instanceId = instanceId;
     // For routing: telegram:1, discord:main, agent:test, etc.
-    // Special case: "default" instance uses bare type for backward compatibility
+    // "default" instance uses bare base type (e.g. telegram) for routing keys
     this.channelType = instanceId === 'default' ? baseType : `${baseType}:${instanceId}`;
   }
 

@@ -20,10 +20,15 @@ import type {
   UpsertChannelBindingInput,
 } from './lib/bridge/host';
 import type { ChannelBinding, ChannelType } from './lib/bridge/types';
-import { CTI_HOME } from './config';
+import { getCtiHome } from './config';
 
-const DATA_DIR = path.join(CTI_HOME, 'data');
-const MESSAGES_DIR = path.join(DATA_DIR, 'messages');
+function dataDir(): string {
+  return path.join(getCtiHome(), 'data');
+}
+
+function messagesDir(): string {
+  return path.join(dataDir(), 'messages');
+}
 
 // ── Helpers ──
 
@@ -81,8 +86,8 @@ export class JsonFileStore implements BridgeStore {
 
   constructor(settingsMap: Map<string, string>) {
     this.settings = settingsMap;
-    ensureDir(DATA_DIR);
-    ensureDir(MESSAGES_DIR);
+    ensureDir(dataDir());
+    ensureDir(messagesDir());
     this.loadAll();
   }
 
@@ -91,7 +96,7 @@ export class JsonFileStore implements BridgeStore {
   private loadAll(): void {
     // Sessions
     const sessions = readJson<Record<string, BridgeSession>>(
-      path.join(DATA_DIR, 'sessions.json'),
+      path.join(dataDir(), 'sessions.json'),
       {},
     );
     for (const [id, s] of Object.entries(sessions)) {
@@ -100,7 +105,7 @@ export class JsonFileStore implements BridgeStore {
 
     // Bindings
     const bindings = readJson<Record<string, ChannelBinding>>(
-      path.join(DATA_DIR, 'bindings.json'),
+      path.join(dataDir(), 'bindings.json'),
       {},
     );
     for (const [key, b] of Object.entries(bindings)) {
@@ -109,7 +114,7 @@ export class JsonFileStore implements BridgeStore {
 
     // Permission links
     const perms = readJson<Record<string, PermissionLinkRecord>>(
-      path.join(DATA_DIR, 'permissions.json'),
+      path.join(dataDir(), 'permissions.json'),
       {},
     );
     for (const [id, p] of Object.entries(perms)) {
@@ -118,7 +123,7 @@ export class JsonFileStore implements BridgeStore {
 
     // Offsets
     const offsets = readJson<Record<string, string>>(
-      path.join(DATA_DIR, 'offsets.json'),
+      path.join(dataDir(), 'offsets.json'),
       {},
     );
     for (const [k, v] of Object.entries(offsets)) {
@@ -127,7 +132,7 @@ export class JsonFileStore implements BridgeStore {
 
     // Dedup
     const dedup = readJson<Record<string, number>>(
-      path.join(DATA_DIR, 'dedup.json'),
+      path.join(dataDir(), 'dedup.json'),
       {},
     );
     for (const [k, v] of Object.entries(dedup)) {
@@ -135,51 +140,51 @@ export class JsonFileStore implements BridgeStore {
     }
 
     // Audit
-    this.auditLog = readJson(path.join(DATA_DIR, 'audit.json'), []);
+    this.auditLog = readJson(path.join(dataDir(), 'audit.json'), []);
   }
 
   private persistSessions(): void {
     writeJson(
-      path.join(DATA_DIR, 'sessions.json'),
+      path.join(dataDir(), 'sessions.json'),
       Object.fromEntries(this.sessions),
     );
   }
 
   private persistBindings(): void {
     writeJson(
-      path.join(DATA_DIR, 'bindings.json'),
+      path.join(dataDir(), 'bindings.json'),
       Object.fromEntries(this.bindings),
     );
   }
 
   private persistPermissions(): void {
     writeJson(
-      path.join(DATA_DIR, 'permissions.json'),
+      path.join(dataDir(), 'permissions.json'),
       Object.fromEntries(this.permissionLinks),
     );
   }
 
   private persistOffsets(): void {
     writeJson(
-      path.join(DATA_DIR, 'offsets.json'),
+      path.join(dataDir(), 'offsets.json'),
       Object.fromEntries(this.offsets),
     );
   }
 
   private persistDedup(): void {
     writeJson(
-      path.join(DATA_DIR, 'dedup.json'),
+      path.join(dataDir(), 'dedup.json'),
       Object.fromEntries(this.dedupKeys),
     );
   }
 
   private persistAudit(): void {
-    writeJson(path.join(DATA_DIR, 'audit.json'), this.auditLog);
+    writeJson(path.join(dataDir(), 'audit.json'), this.auditLog);
   }
 
   private persistMessages(sessionId: string): void {
     const msgs = this.messages.get(sessionId) || [];
-    writeJson(path.join(MESSAGES_DIR, `${sessionId}.json`), msgs);
+    writeJson(path.join(messagesDir(), `${sessionId}.json`), msgs);
   }
 
   private loadMessages(sessionId: string): BridgeMessage[] {
@@ -187,7 +192,7 @@ export class JsonFileStore implements BridgeStore {
       return this.messages.get(sessionId)!;
     }
     const msgs = readJson<BridgeMessage[]>(
-      path.join(MESSAGES_DIR, `${sessionId}.json`),
+      path.join(messagesDir(), `${sessionId}.json`),
       [],
     );
     this.messages.set(sessionId, msgs);

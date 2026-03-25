@@ -2,5 +2,7 @@ node_modules/
 dist/
 *.tgz
 .env
+.env.local
+.env*.local
 config.env
 .next/

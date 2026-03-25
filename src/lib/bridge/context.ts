@@ -15,9 +15,10 @@ import type {
   LifecycleHooks,
 } from './host';
 import type { ChannelBinding } from './types';
+import type { RunnerConfig } from '../../config';
 
-/** Snapshot of `config.runtimeProfiles` for IM slash commands (e.g. /runner). */
-export interface BridgeImRuntimeProfile {
+/** Snapshot of one runner row for IM slash commands (e.g. /runner). */
+export interface BridgeImRunner {
   id: string;
   runtime: string;
   label?: string;
@@ -25,7 +26,7 @@ export interface BridgeImRuntimeProfile {
 
 export interface BridgeContext {
   store: BridgeStore;
-  /** Default LLM (used when `resolveLlmForBinding` is absent or as legacy fallback). */
+  /** Default LLM when `resolveLlmForBinding` is absent. */
   llm: LLMProvider;
   /**
    * IM bridge: pick LLM per chat binding (multi-runner under one bot).
@@ -33,10 +34,24 @@ export interface BridgeContext {
    */
   resolveLlmForBinding?: (binding: ChannelBinding) => LLMProvider;
   /**
-   * IM: selectable runtime profiles (same ids as `ChannelBinding.runnerProfileId`).
-   * Set from `normalizeRuntimeProfiles(config)` at startup.
+   * IM: runner list **for this adapter channel** (`telegram` or `telegram:slug`).
+   * Backed by `imBot.runners` in config (not global `CTI_RUNNERS` when absent on bot).
    */
-  imRuntimeProfiles?: ReadonlyArray<BridgeImRuntimeProfile>;
+  getRunnerConfigsForChannelType?: (channelType: string) => ReadonlyArray<RunnerConfig>;
+  /** Default runner id for `channelType` (per-bot `defaultRunnerId` or bridge default). */
+  getDefaultRunnerIdForChannelType?: (channelType: string) => string | undefined;
+  /**
+   * @deprecated Use {@link getRunnerConfigsForChannelType}; legacy flat config only.
+   */
+  imRunners?: ReadonlyArray<BridgeImRunner>;
+  /**
+   * @deprecated Use {@link getRunnerConfigsForChannelType}; legacy flat config only.
+   */
+  imRunnerConfigs?: ReadonlyArray<RunnerConfig>;
+  /**
+   * @deprecated Use {@link getDefaultRunnerIdForChannelType}; legacy flat config only.
+   */
+  defaultRunnerId?: string;
   permissions: PermissionGateway;
   lifecycle: LifecycleHooks;
 }

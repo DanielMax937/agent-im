@@ -27,8 +27,16 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
-# ── Paths ──
-$CtiHome    = if ($env:CTI_HOME) { $env:CTI_HOME } else { Join-Path $env:USERPROFILE '.claude-to-im' }
+# ── Paths (per-bot: ~/.claude-to-im/<CTI_BOT_NAME>/ — set CTI_BOT_NAME or CTI_HOME) ──
+$CtiBase = if ($env:CTI_BASE) { $env:CTI_BASE } else { Join-Path $env:USERPROFILE '.claude-to-im' }
+if ($env:CTI_HOME) {
+  $CtiHome = $env:CTI_HOME
+} elseif ($env:CTI_BOT_NAME) {
+  $CtiHome = Join-Path $CtiBase $env:CTI_BOT_NAME
+} else {
+  Write-Error "Set CTI_BOT_NAME (directory under CTI_BASE) or CTI_HOME (full bot data directory)."
+  exit 1
+}
 $SkillDir   = Split-Path -Parent (Split-Path -Parent $PSCommandPath)
 $RuntimeDir = Join-Path $CtiHome 'runtime'
 $PidFile    = Join-Path $RuntimeDir 'bridge.pid'

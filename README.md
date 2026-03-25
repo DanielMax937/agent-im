@@ -16,7 +16,7 @@ Agentic Auto Kanban / DevOps platform built on top of the original IM bridge.
 - **Agentic workflow orchestration** for `Todo -> In Progress -> Review -> Testing -> Closed`
 - **Jira comment adapter** so issue comments can drive agent execution
 - **Runtime abstraction** for Claude, Codex, and Cursor
-- **Legacy IM bridge compatibility** for Telegram / Discord / Feishu / QQ
+- **IM bridge** for Telegram / Discord / Feishu / QQ
 
 The result is a hybrid platform:
 
@@ -222,9 +222,9 @@ The platform supports **Jira comment as transport**:
 
 This allows a Jira issue to act as the task inbox for developer / reviewer / tester agents.
 
-## IM bridge compatibility
+## IM bridge
 
-The legacy bridge is still available and useful when you want direct chat-based access to the runtime:
+Use the bridge when you want direct chat-based access to the runtime:
 
 - Telegram
 - Discord
@@ -272,7 +272,7 @@ npm install
 npm run dev
 ```
 
-### Run legacy daemon entrypoint
+### Run standalone bridge daemon
 
 ```bash
 npm run dev:bridge
@@ -295,7 +295,7 @@ npm run typecheck
 
 | File | Role |
 |---|---|
-| `src/main.ts` | Legacy bridge daemon entrypoint |
+| `src/main.ts` | Standalone bridge daemon entrypoint |
 | `src/platform/container.ts` | Shared platform bootstrap |
 | `src/platform/workflow-service.ts` | Sprint/task state machine |
 | `src/platform/instance-manager.ts` | Runtime instance lifecycle |

@@ -13,4 +13,3 @@ import './telegram-adapter';
 import './feishu-adapter';
 import './discord-adapter';
 import './qq-adapter';
-import './agent-adapter';

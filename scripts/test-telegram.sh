@@ -4,7 +4,14 @@ set -euo pipefail
 # Quick smoke test: verify Telegram bot token and send a test message.
 # Usage: bash scripts/test-telegram.sh [message]
 
-CTI_HOME="${CTI_HOME:-$HOME/.claude-to-im}"
+CTI_BASE="${CTI_BASE:-$HOME/.claude-to-im}"
+if [ -z "${CTI_HOME:-}" ]; then
+  if [ -z "${CTI_BOT_NAME:-}" ]; then
+    echo "Set CTI_BOT_NAME or CTI_HOME" >&2
+    exit 1
+  fi
+  CTI_HOME="$CTI_BASE/$CTI_BOT_NAME"
+fi
 CONFIG_FILE="$CTI_HOME/config.env"
 
 if [ ! -f "$CONFIG_FILE" ]; then

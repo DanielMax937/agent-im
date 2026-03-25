@@ -1,6 +1,6 @@
-import type { Config } from './config';
+import type { Config, RunnerConfig } from './config';
 import type { LLMProvider } from './lib/bridge/host';
-import { SDKLLMProvider, preflightCheck, resolveClaudeCliPath } from './llm-provider';
+import { SDKLLMProvider, preflightCheck, resolveClaudeCliPathFromRunner } from './llm-provider';
 import { PendingPermissions } from './permission-gateway';
 
 export interface ResolveProviderOptions {
@@ -8,6 +8,17 @@ export interface ResolveProviderOptions {
   pendingPermissions: PendingPermissions;
   runtimeOverride?: Config['runtime'];
   autoApproveOverride?: boolean;
+  runner?: RunnerConfig;
+}
+
+function resolveAutoApprove(
+  config: Pick<Config, 'autoApprove'>,
+  autoApproveOverride: boolean | undefined,
+  runner: RunnerConfig | undefined,
+): boolean {
+  if (runner?.autoApprove !== undefined) return runner.autoApprove;
+  if (autoApproveOverride !== undefined) return autoApproveOverride;
+  return config.autoApprove ?? false;
 }
 
 export async function resolveProvider({
@@ -15,28 +26,41 @@ export async function resolveProvider({
   pendingPermissions,
   runtimeOverride,
   autoApproveOverride,
+  runner,
 }: ResolveProviderOptions): Promise<LLMProvider> {
   const runtime = runtimeOverride ?? config.runtime;
-  const autoApprove = autoApproveOverride ?? config.autoApprove;
+  const autoApprove = resolveAutoApprove(config, autoApproveOverride, runner);
+  const passModelToCli = runner?.passModelToCli ?? false;
 
   if (runtime === 'codex') {
     const { CodexProvider, DEFAULT_CODEX_CONFIG } = await import('./codex-provider');
-    const wrapperPath = process.env.CTI_CODEX_EXECUTABLE || DEFAULT_CODEX_CONFIG.wrapperPath;
-    return new CodexProvider(pendingPermissions, { ...DEFAULT_CODEX_CONFIG, wrapperPath });
+    const wrapperPath =
+      runner?.codexExecutable?.trim() ||
+      process.env.CTI_CODEX_EXECUTABLE ||
+      DEFAULT_CODEX_CONFIG.wrapperPath;
+    return new CodexProvider(pendingPermissions, {
+      ...DEFAULT_CODEX_CONFIG,
+      wrapperPath,
+      useLogin: runner?.codexUseLogin,
+      passModel: runner?.codexPassModel,
+    });
   }
 
   if (runtime === 'cursor') {
     const { CursorProvider } = await import('./cursor-provider');
-    return new CursorProvider();
+    return new CursorProvider(undefined, {
+      agentPath: runner?.cursorExecutable,
+      defaultModel: runner?.cursorDefaultModel,
+    });
   }
 
   if (runtime === 'auto') {
-    const cliPath = resolveClaudeCliPath();
+    const cliPath = resolveClaudeCliPathFromRunner(runner);
     if (cliPath) {
       const check = preflightCheck(cliPath);
       if (check.ok) {
         console.log(`[claude-to-im] Auto: using Claude CLI at ${cliPath} (${check.version})`);
-        return new SDKLLMProvider(pendingPermissions, cliPath, autoApprove);
+        return new SDKLLMProvider(pendingPermissions, cliPath, autoApprove, passModelToCli);
       }
       console.warn(
         `[claude-to-im] Auto: Claude CLI at ${cliPath} failed preflight: ${check.error}\n` +
@@ -47,11 +71,19 @@ export async function resolveProvider({
     }
 
     const { CodexProvider, DEFAULT_CODEX_CONFIG } = await import('./codex-provider');
-    const wrapperPath = process.env.CTI_CODEX_EXECUTABLE || DEFAULT_CODEX_CONFIG.wrapperPath;
-    return new CodexProvider(pendingPermissions, { ...DEFAULT_CODEX_CONFIG, wrapperPath });
+    const wrapperPath =
+      runner?.codexExecutable?.trim() ||
+      process.env.CTI_CODEX_EXECUTABLE ||
+      DEFAULT_CODEX_CONFIG.wrapperPath;
+    return new CodexProvider(pendingPermissions, {
+      ...DEFAULT_CODEX_CONFIG,
+      wrapperPath,
+      useLogin: runner?.codexUseLogin,
+      passModel: runner?.codexPassModel,
+    });
   }
 
-  const cliPath = resolveClaudeCliPath();
+  const cliPath = resolveClaudeCliPathFromRunner(runner);
   if (!cliPath) {
     throw new Error(
       'Cannot find the `claude` CLI executable. ' +
@@ -68,5 +100,5 @@ export async function resolveProvider({
   }
 
   console.log(`[claude-to-im] CLI preflight OK: ${cliPath} (${check.version})`);
-  return new SDKLLMProvider(pendingPermissions, cliPath, autoApprove);
+  return new SDKLLMProvider(pendingPermissions, cliPath, autoApprove, passModelToCli);
 }

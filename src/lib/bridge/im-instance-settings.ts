@@ -8,8 +8,8 @@ import type { BridgeStore } from './host';
 export type ImBaseChannel = 'telegram' | 'discord' | 'feishu' | 'qq';
 
 /**
- * Map a legacy default store key to the per-instance key.
- * `default` instance keeps legacy keys unchanged.
+ * Map a default store key to the per-instance key.
+ * `default` instance keeps unscoped keys unchanged.
  */
 export function imScopedStoreKey(
   baseChannel: ImBaseChannel,
@@ -40,7 +40,7 @@ export function imScopedGet(
 }
 
 /**
- * List instance ids for a base channel from store (comma list), or `["default"]` when legacy single-instance is enabled.
+ * List instance ids for a base channel from store (comma list), or `["default"]` when only flat `bridge_*_enabled` is set.
  */
 export function listInstanceIdsForChannel(baseType: string, store: BridgeStore): string[] {
   const csv = store.getSetting(`bridge_${baseType}_instances`)?.trim();
@@ -71,4 +71,56 @@ export function isInstanceImEnabled(
   }
   if (instanceId !== 'default') return false;
   return store.getSetting(`bridge_${baseChannel}_enabled`) === 'true';
+}
+
+/**
+ * Parse adapter `channelType` (`telegram` or `telegram:instanceId`) into base + instance id.
+ */
+export function parseImBaseAndInstanceId(channelType: string): { base: ImBaseChannel; instanceId: string } | null {
+  const idx = channelType.indexOf(':');
+  if (idx === -1) {
+    if (
+      channelType === 'telegram' ||
+      channelType === 'discord' ||
+      channelType === 'feishu' ||
+      channelType === 'qq'
+    ) {
+      return { base: channelType, instanceId: 'default' };
+    }
+    return null;
+  }
+  const base = channelType.slice(0, idx);
+  if (base !== 'telegram' && base !== 'discord' && base !== 'feishu' && base !== 'qq') return null;
+  const instanceId = channelType.slice(idx + 1).trim() || 'default';
+  return { base, instanceId };
+}
+
+/**
+ * Resolve effective runner id for an IM chat. `allRunnerIds` is the **per-bot** list from config
+ * (`imBot.runners`), not a global pool.
+ */
+export function resolveRunnerForChannelBinding(
+  _store: BridgeStore,
+  _channelType: string,
+  bindingRunnerId: string | undefined,
+  globalDefaultRunnerId: string | undefined,
+  allRunnerIds: string[],
+): string {
+  if (allRunnerIds.length === 0) {
+    return bindingRunnerId?.trim() || globalDefaultRunnerId?.trim() || 'default';
+  }
+
+  const pick = (id: string | undefined): string | undefined => {
+    if (!id) return undefined;
+    const t = id.trim();
+    if (!allRunnerIds.includes(t)) return undefined;
+    return t;
+  };
+
+  return (
+    pick(bindingRunnerId) ??
+    pick(globalDefaultRunnerId) ??
+    allRunnerIds[0] ??
+    'default'
+  );
 }

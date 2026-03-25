@@ -65,7 +65,7 @@ export interface TaskSession {
   title: string;
   workflowState: TaskWorkflowState;
   runtime: AgentRuntime;
-  /** When set, resolves runtime from `config.runtimeProfiles` (overrides `runtime` for execution). */
+  /** When set, resolves runtime from `config.runners` (overrides `runtime` for execution). */
   runtimeProfileId?: string;
   role: AgentRole;
   sessionId: string;
@@ -157,7 +157,7 @@ export interface AssignTaskInput {
   issueId: string;
   title: string;
   runtime: AgentRuntime;
-  /** Use a named profile from `CTI_RUNTIME_PROFILES` (preferred over bare `runtime` when both set). */
+  /** Use a named runner id from `CTI_RUNNERS` (preferred over bare `runtime` when both set). */
   runtimeProfileId?: string;
   role?: AgentRole;
 }

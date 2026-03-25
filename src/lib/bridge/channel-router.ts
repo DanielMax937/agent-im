@@ -7,6 +7,7 @@
 
 import type { ChannelAddress, ChannelBinding, ChannelType } from './types';
 import { getBridgeContext } from './context';
+import { resolveRunnerForChannelBinding } from './im-instance-settings';
 
 /**
  * Resolve an inbound address to a ChannelBinding.
@@ -32,7 +33,15 @@ export function createBinding(
   address: ChannelAddress,
   workingDirectory?: string,
 ): ChannelBinding {
-  const { store } = getBridgeContext();
+  const {
+    store,
+    imRunners,
+    getRunnerConfigsForChannelType,
+    getDefaultRunnerIdForChannelType,
+    defaultRunnerId: ctxDefaultRunner,
+  } = getBridgeContext();
+  const row = getRunnerConfigsForChannelType?.(address.channelType) ?? imRunners;
+  const allIds = (row ?? []).map((r) => r.id);
   const defaultCwd = workingDirectory
     || store.getSetting('bridge_default_work_dir')
     || process.env.HOME
@@ -53,8 +62,19 @@ export function createBinding(
     store.updateSessionProviderId(session.id, defaultProviderId);
   }
 
-  const defaultRunnerProfile =
-    store.getSetting('bridge_default_runner_profile_id')?.trim() || undefined;
+  const storeDefault = store.getSetting('bridge_default_runner_profile_id')?.trim() || undefined;
+  const globalDef =
+    getDefaultRunnerIdForChannelType?.(address.channelType) ??
+    ctxDefaultRunner ??
+    storeDefault ??
+    allIds[0];
+  const runnerProfileId = resolveRunnerForChannelBinding(
+    store,
+    address.channelType,
+    undefined,
+    globalDef,
+    allIds,
+  );
 
   return store.upsertChannelBinding({
     channelType: address.channelType,
@@ -62,7 +82,7 @@ export function createBinding(
     codepilotSessionId: session.id,
     workingDirectory: defaultCwd,
     model: defaultModel,
-    runnerProfileId: defaultRunnerProfile,
+    runnerProfileId,
   });
 }
 
@@ -73,12 +93,31 @@ export function bindToSession(
   address: ChannelAddress,
   codepilotSessionId: string,
 ): ChannelBinding | null {
-  const { store } = getBridgeContext();
+  const {
+    store,
+    imRunners,
+    getRunnerConfigsForChannelType,
+    getDefaultRunnerIdForChannelType,
+    defaultRunnerId: ctxDefaultRunner,
+  } = getBridgeContext();
   const session = store.getSession(codepilotSessionId);
   if (!session) return null;
 
-  const defaultRunnerProfile =
-    store.getSetting('bridge_default_runner_profile_id')?.trim() || undefined;
+  const row = getRunnerConfigsForChannelType?.(address.channelType) ?? imRunners;
+  const allIds = (row ?? []).map((r) => r.id);
+  const storeDefault = store.getSetting('bridge_default_runner_profile_id')?.trim() || undefined;
+  const globalDef =
+    getDefaultRunnerIdForChannelType?.(address.channelType) ??
+    ctxDefaultRunner ??
+    storeDefault ??
+    allIds[0];
+  const runnerProfileId = resolveRunnerForChannelBinding(
+    store,
+    address.channelType,
+    undefined,
+    globalDef,
+    allIds,
+  );
 
   return store.upsertChannelBinding({
     channelType: address.channelType,
@@ -86,7 +125,7 @@ export function bindToSession(
     codepilotSessionId,
     workingDirectory: session.working_directory,
     model: session.model,
-    runnerProfileId: defaultRunnerProfile,
+    runnerProfileId,
   });
 }
 

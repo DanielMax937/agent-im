@@ -344,6 +344,21 @@ export function resolveClaudeCliPath(): string | undefined {
   return firstUnverifiable;
 }
 
+/**
+ * Prefer per-runner `claudeExecutable`, then global resolution.
+ */
+export function resolveClaudeCliPathFromRunner(runner?: { claudeExecutable?: string }): string | undefined {
+  const explicit = runner?.claudeExecutable?.trim();
+  if (explicit) {
+    try {
+      if (fs.existsSync(explicit)) return explicit;
+    } catch {
+      /* noop */
+    }
+  }
+  return resolveClaudeCliPath();
+}
+
 // ── Multi-modal prompt builder ──
 
 type ImageMediaType = 'image/png' | 'image/jpeg' | 'image/gif' | 'image/webp';
@@ -422,16 +437,24 @@ export interface StreamState {
 export class SDKLLMProvider implements LLMProvider {
   private cliPath: string | undefined;
   private autoApprove: boolean;
+  private passModelToCli: boolean;
 
-  constructor(private pendingPerms: PendingPermissions, cliPath?: string, autoApprove = false) {
+  constructor(
+    private pendingPerms: PendingPermissions,
+    cliPath?: string,
+    autoApprove = false,
+    passModelToCli = false,
+  ) {
     this.cliPath = cliPath;
     this.autoApprove = autoApprove;
+    this.passModelToCli = passModelToCli;
   }
 
   streamChat(params: StreamChatParams): ReadableStream<string> {
     const pendingPerms = this.pendingPerms;
     const cliPath = this.cliPath;
     const autoApprove = this.autoApprove;
+    const passModelToCli = this.passModelToCli;
 
     return new ReadableStream({
       start(controller) {
@@ -452,10 +475,11 @@ export class SDKLLMProvider implements LLMProvider {
               model = undefined;
             }
 
-            // Only pass model to CLI if explicitly configured via CTI_DEFAULT_MODEL.
+            // Only pass model to CLI if explicitly configured via CTI_DEFAULT_MODEL
+            // or per-runner passModelToCli.
             // Letting the CLI choose its own default avoids exit-code-1 failures
             // when a stored model is inaccessible on the current machine/plan.
-            const passModel = !!process.env.CTI_DEFAULT_MODEL;
+            const passModel = passModelToCli || !!process.env.CTI_DEFAULT_MODEL;
             if (model && !passModel) {
               console.log(`[llm-provider] Skipping model "${model}", using CLI default (set CTI_DEFAULT_MODEL to override)`);
               model = undefined;

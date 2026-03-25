@@ -1,221 +1,383 @@
+import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
-import { imScopedStoreKey, type ImBaseChannel } from "./lib/bridge/im-instance-settings";
+import {
+  imScopedStoreKey,
+  parseImBaseAndInstanceId,
+  type ImBaseChannel,
+} from "./lib/bridge/im-instance-settings";
 
-/** Single selectable backend for bridge or platform (matches `CTI_RUNTIME` values). */
-export type RuntimeKind = 'claude' | 'codex' | 'cursor' | 'auto';
+import type {
+  AgentEnvSlot,
+  Config,
+  ImInstanceChannel,
+  ImInstanceSpec,
+  RunnerConfig,
+  RuntimeKind,
+} from "./config-shared";
+import { normalizeRunners } from "./config-shared";
 
-/**
- * Named runtime profile — “多实例” here means multiple configured runtimes; pick one per bridge default or per task.
- */
-export interface RuntimeProfile {
-  id: string;
-  runtime: RuntimeKind;
-  label?: string;
-}
+export type {
+  AgentEnvSlot,
+  Config,
+  ImInstanceChannel,
+  ImInstanceSpec,
+  RunnerConfig,
+  RuntimeKind,
+} from "./config-shared";
+export { normalizeRunners } from "./config-shared";
 
-export interface Config {
-  runtime: RuntimeKind;
-  enabledChannels: string[];
-  defaultWorkDir: string;
-  defaultModel?: string;
-  defaultMode: string;
-  // Telegram
-  tgBotToken?: string;
-  tgChatId?: string;
-  tgAllowedUsers?: string[];
-  // Feishu
-  feishuAppId?: string;
-  feishuAppSecret?: string;
-  feishuDomain?: string;
-  feishuAllowedUsers?: string[];
-  // Discord
-  discordBotToken?: string;
-  discordAllowedUsers?: string[];
-  discordAllowedChannels?: string[];
-  discordAllowedGuilds?: string[];
-  // QQ
-  qqAppId?: string;
-  qqAppSecret?: string;
-  qqAllowedUsers?: string[];
-  qqImageEnabled?: boolean;
-  qqMaxImageSize?: number;
-  // Agent
-  agentRedisUrl?: string;
-  agentFirstPrompt?: string;
-  agentOpenAIBaseUrl?: string;
-  agentOpenAIModel?: string;
-  agentOpenAIApiKey?: string;
-  agentMaxTurns?: number;
-  // HTTP(S) proxy URL for outbound API calls (Telegram, Feishu, etc.)
-  proxy?: string;
-  // Auto-approve all tool permission requests without user confirmation
-  autoApprove?: boolean;
-  // Jira (platform agents; also exposed to process via config.env)
-  jiraBaseUrl?: string;
-  jiraEmail?: string;
-  jiraApiToken?: string;
-  jiraPollIntervalMs?: number;
-  jiraBotAccountId?: string;
-  /** Base URL for approval links (e.g. http://127.0.0.1:3000) */
-  webBaseUrl?: string;
-  /**
-   * Numbered Agent bridge instances (CTI_AGENT_1_*, …). Written to config.env;
-   * use with `syncConfigFileToProcessEnv()` so the agent adapter sees them.
-   */
-  agentEnvSlots?: AgentEnvSlot[];
-  /**
-   * Multiple runtime profiles (JSON array in `CTI_RUNTIME_PROFILES`).
-   * If empty, a single implicit profile `{ id: default, runtime: CTI_RUNTIME }` is used.
-   */
-  runtimeProfiles?: RuntimeProfile[];
-  /** Which profile the IM bridge uses (`CTI_DEFAULT_RUNTIME_PROFILE`). Defaults to first profile. */
-  defaultRuntimeProfileId?: string;
-  /**
-   * Multiple IM bots in one bridge (`CTI_IM_INSTANCES` JSON array).
-   * When non-empty for a channel, that channel uses per-instance store keys instead of legacy single-token fields.
-   */
-  imInstances?: ImInstanceSpec[];
-}
-
-/** One IM connection (bot) inside the bridge; see docs/IM_BRIDGE_MULTI_INSTANCE.md */
-export interface ImInstanceSpec {
-  id: string;
-  channel: ImInstanceChannel;
-  enabled?: boolean;
-  tgBotToken?: string;
-  tgAllowedUsers?: string[];
-  tgChatId?: string;
-  discordBotToken?: string;
-  discordAllowedUsers?: string[];
-  discordAllowedChannels?: string[];
-  discordAllowedGuilds?: string[];
-  feishuAppId?: string;
-  feishuAppSecret?: string;
-  feishuDomain?: string;
-  feishuAllowedUsers?: string[];
-  qqAppId?: string;
-  qqAppSecret?: string;
-  qqAllowedUsers?: string[];
-  qqImageEnabled?: boolean;
-  qqMaxImageSize?: number;
-}
-
-export type ImInstanceChannel = "telegram" | "discord" | "feishu" | "qq";
-
-/** Redis + OpenAI profile for `CTI_AGENT_{slot}_*` multi-instance bridge configs. */
-export interface AgentEnvSlot {
-  slot: number;
-  openaiApiKey?: string;
-  redisUrl?: string;
-  firstPrompt?: string;
-  openaiBaseUrl?: string;
-  openaiModel?: string;
-  maxTurns?: number;
-}
-
-export const CTI_HOME = process.env.CTI_HOME || path.join(os.homedir(), ".claude-to-im");
-export const CONFIG_PATH = path.join(CTI_HOME, "config.env");
+/** Base directory for per-bot homes: `~/.claude-to-im` unless `CTI_BASE` is set. */
+export const CTI_BASE_DIR =
+  process.env.CTI_BASE?.trim() || path.join(os.homedir(), ".claude-to-im");
 
 const IM_INSTANCE_ID_RE = /^[a-zA-Z0-9_-]+$/;
-const IM_INSTANCE_CHANNELS: ImInstanceChannel[] = ["telegram", "discord", "feishu", "qq"];
+const ACTIVE_BRIDGE_FILENAME = ".active_bridge";
 
-function parseImInstances(raw: string | undefined): ImInstanceSpec[] | undefined {
-  if (!raw?.trim()) return undefined;
-  try {
-    const arr = JSON.parse(raw) as unknown;
-    if (!Array.isArray(arr)) return undefined;
-    const byKey = new Map<string, ImInstanceSpec>();
-    for (const row of arr) {
-      if (!row || typeof row !== "object") continue;
-      const o = row as Record<string, unknown>;
-      const id = o.id;
-      const channel = o.channel;
-      if (typeof id !== "string" || !IM_INSTANCE_ID_RE.test(id)) continue;
-      if (
-        typeof channel !== "string" ||
-        !IM_INSTANCE_CHANNELS.includes(channel as ImInstanceChannel)
-      ) {
-        continue;
-      }
-      const ch = channel as ImInstanceChannel;
-      const spec: ImInstanceSpec = {
-        id,
-        channel: ch,
-        enabled: o.enabled === undefined ? undefined : Boolean(o.enabled),
-        tgBotToken: typeof o.tgBotToken === "string" ? o.tgBotToken : undefined,
-        tgAllowedUsers: Array.isArray(o.tgAllowedUsers)
-          ? o.tgAllowedUsers.map(String)
-          : undefined,
-        tgChatId: typeof o.tgChatId === "string" ? o.tgChatId : undefined,
-        discordBotToken:
-          typeof o.discordBotToken === "string" ? o.discordBotToken : undefined,
-        discordAllowedUsers: Array.isArray(o.discordAllowedUsers)
-          ? o.discordAllowedUsers.map(String)
-          : undefined,
-        discordAllowedChannels: Array.isArray(o.discordAllowedChannels)
-          ? o.discordAllowedChannels.map(String)
-          : undefined,
-        discordAllowedGuilds: Array.isArray(o.discordAllowedGuilds)
-          ? o.discordAllowedGuilds.map(String)
-          : undefined,
-        feishuAppId: typeof o.feishuAppId === "string" ? o.feishuAppId : undefined,
-        feishuAppSecret:
-          typeof o.feishuAppSecret === "string" ? o.feishuAppSecret : undefined,
-        feishuDomain: typeof o.feishuDomain === "string" ? o.feishuDomain : undefined,
-        feishuAllowedUsers: Array.isArray(o.feishuAllowedUsers)
-          ? o.feishuAllowedUsers.map(String)
-          : undefined,
-        qqAppId: typeof o.qqAppId === "string" ? o.qqAppId : undefined,
-        qqAppSecret: typeof o.qqAppSecret === "string" ? o.qqAppSecret : undefined,
-        qqAllowedUsers: Array.isArray(o.qqAllowedUsers)
-          ? o.qqAllowedUsers.map(String)
-          : undefined,
-        qqImageEnabled:
-          typeof o.qqImageEnabled === "boolean" ? o.qqImageEnabled : undefined,
-        qqMaxImageSize:
-          typeof o.qqMaxImageSize === "number" ? o.qqMaxImageSize : undefined,
-      };
-      byKey.set(`${ch}:${id}`, spec);
-    }
-    const out = Array.from(byKey.values());
-    return out.length ? out : undefined;
-  } catch {
-    return undefined;
-  }
+let bridgePathsCache: string | null = null;
+
+export function invalidateBridgePathsCache(): void {
+  bridgePathsCache = null;
 }
 
-function applyImInstancesToSettings(m: Map<string, string>, config: Config): void {
-  const specs = config.imInstances ?? [];
-  if (specs.length === 0) return;
+function activeBridgeFilePath(): string {
+  return path.join(CTI_BASE_DIR, ACTIVE_BRIDGE_FILENAME);
+}
 
-  const by = new Map<ImInstanceChannel, ImInstanceSpec[]>();
-  for (const s of specs) {
-    const list = by.get(s.channel) ?? [];
-    list.push(s);
-    by.set(s.channel, list);
+function generateBridgeSlug(): string {
+  return `bridge-${Date.now().toString(36)}-${crypto.randomBytes(4).toString("hex")}`;
+}
+
+/**
+ * When neither `CTI_HOME` nor `CTI_BOT_NAME` is set, read or create `CTI_BASE_DIR/.active_bridge`
+ * (single-line slug) and set `process.env.CTI_BOT_NAME` so the data directory is stable for this machine.
+ */
+function readOrCreateActiveBridgeSlug(): string {
+  fs.mkdirSync(CTI_BASE_DIR, { recursive: true });
+  const filePath = activeBridgeFilePath();
+  try {
+    const raw = fs.readFileSync(filePath, "utf-8").trim();
+    if (raw && IM_INSTANCE_ID_RE.test(raw)) {
+      process.env.CTI_BOT_NAME = raw;
+      return raw;
+    }
+  } catch {
+    /* missing file */
   }
+  const slug = generateBridgeSlug();
+  fs.writeFileSync(filePath, `${slug}\n`, { mode: 0o600 });
+  process.env.CTI_BOT_NAME = slug;
+  return slug;
+}
 
-  for (const [ch, list] of by) {
-    const base = ch as ImBaseChannel;
-    m.set(
-      `bridge_${base}_instances`,
-      list.map((x) => x.id).join(","),
-    );
-    const anyOn = list.some((x) => x.enabled !== false);
-    m.set(`bridge_${base}_enabled`, anyOn ? "true" : "false");
-
-    for (const spec of list) {
-      const id = spec.id;
-      const en = spec.enabled !== false;
-      m.set(
-        imScopedStoreKey(base, id, `bridge_${base}_enabled`),
-        en ? "true" : "false",
+/**
+ * Resolve the bot data directory (contains `config.env`, `data/`, `logs/`, `runtime/`).
+ * - If `CTI_HOME` is set → use it (absolute path).
+ * - Else if `CTI_BOT_NAME` is set → `CTI_BASE_DIR/CTI_BOT_NAME`.
+ * - Else → slug from `.active_bridge` (created on first use).
+ */
+function resolveCtiHomeDisk(): string {
+  const raw = process.env.CTI_HOME?.trim();
+  if (raw) {
+    return path.resolve(raw);
+  }
+  const bot = process.env.CTI_BOT_NAME?.trim();
+  if (bot) {
+    if (!IM_INSTANCE_ID_RE.test(bot)) {
+      throw new Error(
+        `CTI_BOT_NAME must match ${IM_INSTANCE_ID_RE.source} (letters, digits, _, -).`,
       );
+    }
+    return path.join(CTI_BASE_DIR, bot);
+  }
+  const slug = readOrCreateActiveBridgeSlug();
+  return path.join(CTI_BASE_DIR, slug);
+}
 
-      if (ch === "telegram") {
+/** Lazily resolved; safe to import before env is fully set (e.g. Next.js without `.env.local`). */
+export function getCtiHome(): string {
+  if (bridgePathsCache) return bridgePathsCache;
+  bridgePathsCache = resolveCtiHomeDisk();
+  return bridgePathsCache;
+}
+
+export function getConfigPath(): string {
+  return path.join(getCtiHome(), "config.env");
+}
+
+/**
+ * Create a new bridge directory: writes `.active_bridge`, sets `CTI_BOT_NAME`, clears path cache.
+ * Not available when `CTI_HOME` is set (explicit home wins).
+ */
+export function createNewBridge(): { ctiHome: string; configPath: string; botName: string } {
+  if (process.env.CTI_HOME?.trim()) {
+    throw new Error(
+      "已设置 CTI_HOME 时无法使用「新建桥接」：请移除 CTI_HOME，改用 CTI_BOT_NAME / .active_bridge，或手动新建目录。",
+    );
+  }
+  const slug = generateBridgeSlug();
+  fs.mkdirSync(CTI_BASE_DIR, { recursive: true });
+  fs.writeFileSync(activeBridgeFilePath(), `${slug}\n`, { mode: 0o600 });
+  process.env.CTI_BOT_NAME = slug;
+  invalidateBridgePathsCache();
+  const home = getCtiHome();
+  fs.mkdirSync(home, { recursive: true });
+  return { ctiHome: home, configPath: getConfigPath(), botName: slug };
+}
+
+/** True when per-bot dirs under CTI_BASE + `.active_bridge` apply (no explicit CTI_HOME). */
+export function canSwitchBridgesViaRegistry(): boolean {
+  return !process.env.CTI_HOME?.trim();
+}
+
+/**
+ * Subdirectories of `CTI_BASE_DIR` whose names match the bot slug pattern (existing bridge homes).
+ */
+export function listBridgeSlugs(): string[] {
+  fs.mkdirSync(CTI_BASE_DIR, { recursive: true });
+  let entries: fs.Dirent[];
+  try {
+    entries = fs.readdirSync(CTI_BASE_DIR, { withFileTypes: true });
+  } catch {
+    return [];
+  }
+  const names: string[] = [];
+  for (const e of entries) {
+    if (!e.isDirectory()) continue;
+    const name = e.name;
+    if (name.startsWith(".")) continue;
+    if (!IM_INSTANCE_ID_RE.test(name)) continue;
+    names.push(name);
+  }
+  return names.sort((a, b) => a.localeCompare(b));
+}
+
+/**
+ * Point `.active_bridge` at an existing directory under CTI_BASE_DIR. Same constraints as `createNewBridge`.
+ */
+export function switchActiveBridge(slug: string): { ctiHome: string; configPath: string; botName: string } {
+  if (process.env.CTI_HOME?.trim()) {
+    throw new Error("已设置 CTI_HOME 时无法切换桥接目录。");
+  }
+  const t = slug.trim();
+  if (!t || !IM_INSTANCE_ID_RE.test(t)) {
+    throw new Error("无效的桥接标识。");
+  }
+  const home = path.join(CTI_BASE_DIR, t);
+  let st: ReturnType<typeof fs.statSync>;
+  try {
+    st = fs.statSync(home);
+  } catch {
+    throw new Error(`未找到桥接目录：${t}`);
+  }
+  if (!st.isDirectory()) {
+    throw new Error(`不是目录：${t}`);
+  }
+  fs.mkdirSync(CTI_BASE_DIR, { recursive: true });
+  fs.writeFileSync(activeBridgeFilePath(), `${t}\n`, { mode: 0o600 });
+  process.env.CTI_BOT_NAME = t;
+  invalidateBridgePathsCache();
+  return { ctiHome: getCtiHome(), configPath: getConfigPath(), botName: t };
+}
+
+/** Display label: explicit CTI_BOT_NAME, or basename of resolved home. */
+export function getCtiBotDisplayName(): string {
+  const fromEnv = process.env.CTI_BOT_NAME?.trim();
+  if (fromEnv) return fromEnv;
+  return path.basename(getCtiHome());
+}
+const IM_INSTANCE_CHANNELS: ImInstanceChannel[] = ["telegram", "discord", "feishu", "qq"];
+const IM_BASE_CHANNEL_SET = new Set<string>(IM_INSTANCE_CHANNELS);
+
+/**
+ * When `imBot` is set, IM platform flags in `CTI_ENABLED_CHANNELS` are derived from that bot.
+ * Non-IM entries (e.g. legacy `agent`) are preserved from `config.enabledChannels`.
+ */
+export function effectiveEnabledChannels(config: Config): string[] {
+  const bot = config.imBot;
+  if (!bot) {
+    return [...config.enabledChannels];
+  }
+  const fromBots = new Set<string>();
+  if (bot.enabled !== false) {
+    fromBots.add(bot.channel);
+  }
+  const legacyNonIm = config.enabledChannels.filter((c) => !IM_BASE_CHANNEL_SET.has(c));
+  return Array.from(new Set([...fromBots, ...legacyNonIm])).sort();
+}
+
+function pickRunnerBoolRow(o: Record<string, unknown>, key: string): boolean | undefined {
+  if (!(key in o)) return undefined;
+  const v = o[key];
+  if (typeof v === "boolean") return v;
+  if (v === "true") return true;
+  if (v === "false") return false;
+  return undefined;
+}
+
+function pickRunnerStrRow(o: Record<string, unknown>, key: string): string | undefined {
+  const v = o[key];
+  return typeof v === "string" && v.trim() ? v : undefined;
+}
+
+function pickRunnerModeRow(o: Record<string, unknown>): "code" | "plan" | "ask" | undefined {
+  const v = o.defaultMode;
+  if (v === "code" || v === "plan" || v === "ask") return v;
+  return undefined;
+}
+
+/** Parse one runner object from JSON (shared by `CTI_RUNNERS` and `imBot.runners`). */
+export function runnerFromRow(o: Record<string, unknown>): RunnerConfig | null {
+  const id = o.id;
+  const rt = o.runtime;
+  if (typeof id !== "string" || typeof rt !== "string") return null;
+  if (!["claude", "codex", "cursor", "auto"].includes(rt)) return null;
+  return {
+    id,
+    runtime: rt as RuntimeKind,
+    label: pickRunnerStrRow(o, "label"),
+    defaultModel: pickRunnerStrRow(o, "defaultModel"),
+    defaultMode: pickRunnerModeRow(o),
+    autoApprove: pickRunnerBoolRow(o, "autoApprove"),
+    claudeExecutable: pickRunnerStrRow(o, "claudeExecutable"),
+    passModelToCli: pickRunnerBoolRow(o, "passModelToCli"),
+    codexUseLogin: pickRunnerBoolRow(o, "codexUseLogin"),
+    codexPassModel: pickRunnerBoolRow(o, "codexPassModel"),
+    codexExecutable: pickRunnerStrRow(o, "codexExecutable"),
+    cursorExecutable: pickRunnerStrRow(o, "cursorExecutable"),
+    cursorDefaultModel: pickRunnerStrRow(o, "cursorDefaultModel"),
+  };
+}
+
+function parseRunnersField(raw: unknown): RunnerConfig[] | undefined {
+  if (!Array.isArray(raw)) return undefined;
+  const out: RunnerConfig[] = [];
+  for (const item of raw) {
+    if (!item || typeof item !== "object") continue;
+    const r = runnerFromRow(item as Record<string, unknown>);
+    if (r) out.push(r);
+  }
+  return out.length ? out : undefined;
+}
+
+function imInstanceSpecFromRow(o: Record<string, unknown>): ImInstanceSpec | null {
+  const id = o.id;
+  const channel = o.channel;
+  if (typeof id !== "string" || !IM_INSTANCE_ID_RE.test(id)) return null;
+  if (
+    typeof channel !== "string" ||
+    !IM_INSTANCE_CHANNELS.includes(channel as ImInstanceChannel)
+  ) {
+    return null;
+  }
+  const ch = channel as ImInstanceChannel;
+  return {
+    id,
+    channel: ch,
+    enabled: o.enabled === undefined ? undefined : Boolean(o.enabled),
+    tgBotToken: typeof o.tgBotToken === "string" ? o.tgBotToken : undefined,
+    tgAllowedUsers: Array.isArray(o.tgAllowedUsers)
+      ? o.tgAllowedUsers.map(String)
+      : undefined,
+    tgChatId: typeof o.tgChatId === "string" ? o.tgChatId : undefined,
+    discordBotToken:
+      typeof o.discordBotToken === "string" ? o.discordBotToken : undefined,
+    discordAllowedUsers: Array.isArray(o.discordAllowedUsers)
+      ? o.discordAllowedUsers.map(String)
+      : undefined,
+    discordAllowedChannels: Array.isArray(o.discordAllowedChannels)
+      ? o.discordAllowedChannels.map(String)
+      : undefined,
+    discordAllowedGuilds: Array.isArray(o.discordAllowedGuilds)
+      ? o.discordAllowedGuilds.map(String)
+      : undefined,
+    feishuAppId: typeof o.feishuAppId === "string" ? o.feishuAppId : undefined,
+    feishuAppSecret:
+      typeof o.feishuAppSecret === "string" ? o.feishuAppSecret : undefined,
+    feishuDomain: typeof o.feishuDomain === "string" ? o.feishuDomain : undefined,
+    feishuAllowedUsers: Array.isArray(o.feishuAllowedUsers)
+      ? o.feishuAllowedUsers.map(String)
+      : undefined,
+    qqAppId: typeof o.qqAppId === "string" ? o.qqAppId : undefined,
+    qqAppSecret: typeof o.qqAppSecret === "string" ? o.qqAppSecret : undefined,
+    qqAllowedUsers: Array.isArray(o.qqAllowedUsers)
+      ? o.qqAllowedUsers.map(String)
+      : undefined,
+    qqImageEnabled:
+      typeof o.qqImageEnabled === "boolean" ? o.qqImageEnabled : undefined,
+    qqMaxImageSize:
+      typeof o.qqMaxImageSize === "number" ? o.qqMaxImageSize : undefined,
+    localAgentEnabled:
+      typeof o.localAgentEnabled === "boolean" ? o.localAgentEnabled : undefined,
+    localAgentRedisUrl:
+      typeof o.localAgentRedisUrl === "string" ? o.localAgentRedisUrl : undefined,
+    localAgentFirstPrompt:
+      typeof o.localAgentFirstPrompt === "string" ? o.localAgentFirstPrompt : undefined,
+    localAgentMaxTurns:
+      typeof o.localAgentMaxTurns === "number" ? o.localAgentMaxTurns : undefined,
+    localAgentPeerInstanceId:
+      typeof o.localAgentPeerInstanceId === "string"
+        ? o.localAgentPeerInstanceId
+        : undefined,
+    runners: parseRunnersField(o.runners),
+    defaultRunnerId:
+      typeof o.defaultRunnerId === "string" && o.defaultRunnerId.trim()
+        ? o.defaultRunnerId.trim()
+        : undefined,
+    defaultWorkDir:
+      typeof o.defaultWorkDir === "string" ? o.defaultWorkDir : undefined,
+    proxy: typeof o.proxy === "string" ? o.proxy : undefined,
+    webBaseUrl: typeof o.webBaseUrl === "string" ? o.webBaseUrl : undefined,
+    autoApprove: o.autoApprove === undefined ? undefined : Boolean(o.autoApprove),
+    defaultModel: typeof o.defaultModel === "string" ? o.defaultModel : undefined,
+    defaultMode: typeof o.defaultMode === "string" ? o.defaultMode : undefined,
+  };
+}
+
+function parseImBot(env: Map<string, string>): ImInstanceSpec | undefined {
+  const botJson = env.get("CTI_IM_BOT")?.trim();
+  if (botJson) {
+    try {
+      const o = JSON.parse(botJson) as unknown;
+      if (o && typeof o === "object" && !Array.isArray(o)) {
+        const spec = imInstanceSpecFromRow(o as Record<string, unknown>);
+        if (spec) return spec;
+      }
+    } catch {
+      /* ignore */
+    }
+  }
+  const legacy = env.get("CTI_IM_INSTANCES")?.trim();
+  if (legacy) {
+    try {
+      const arr = JSON.parse(legacy) as unknown;
+      if (Array.isArray(arr) && arr.length > 0) {
+        const row = arr[0];
+        if (row && typeof row === "object") {
+          return imInstanceSpecFromRow(row as Record<string, unknown>) ?? undefined;
+        }
+      }
+    } catch {
+      /* ignore */
+    }
+  }
+  return undefined;
+}
+
+function applyImBotToSettings(m: Map<string, string>, config: Config): void {
+  const spec = config.imBot;
+  if (!spec) return;
+  const ch = spec.channel;
+  const base = ch as ImBaseChannel;
+  m.set(`bridge_${base}_instances`, spec.id);
+  m.set(`bridge_${base}_enabled`, spec.enabled !== false ? "true" : "false");
+  const id = spec.id;
+  const en = spec.enabled !== false;
+  m.set(imScopedStoreKey(base, id, `bridge_${base}_enabled`), en ? "true" : "false");
+
+  if (ch === "telegram") {
         if (spec.tgBotToken) {
           m.set(imScopedStoreKey(base, id, "telegram_bot_token"), spec.tgBotToken);
         }
@@ -297,8 +459,37 @@ function applyImInstancesToSettings(m: Map<string, string>, config: Config): voi
             String(spec.qqMaxImageSize),
           );
         }
-      }
-    }
+  }
+
+  if (spec.localAgentEnabled !== undefined) {
+    m.set(
+      imScopedStoreKey(base, id, `bridge_${base}_local_agent_enabled`),
+      spec.localAgentEnabled ? "true" : "false",
+    );
+  }
+  if (spec.localAgentRedisUrl) {
+    m.set(
+      imScopedStoreKey(base, id, `bridge_${base}_local_agent_redis_url`),
+      spec.localAgentRedisUrl,
+    );
+  }
+  if (spec.localAgentFirstPrompt) {
+    m.set(
+      imScopedStoreKey(base, id, `bridge_${base}_local_agent_first_prompt`),
+      spec.localAgentFirstPrompt,
+    );
+  }
+  if (spec.localAgentMaxTurns !== undefined) {
+    m.set(
+      imScopedStoreKey(base, id, `bridge_${base}_local_agent_max_turns`),
+      String(spec.localAgentMaxTurns),
+    );
+  }
+  if (spec.localAgentPeerInstanceId) {
+    m.set(
+      imScopedStoreKey(base, id, `bridge_${base}_local_agent_peer_instance_id`),
+      spec.localAgentPeerInstanceId,
+    );
   }
 }
 
@@ -324,12 +515,12 @@ function parseEnvFile(content: string): Map<string, string> {
 }
 
 /**
- * Loads `~/.claude-to-im/config.env` entries into `process.env` so modules that
+ * Loads `$CTI_HOME/config.env` entries into `process.env` so modules that
  * only read `process.env` (e.g. agent-adapter `CTI_AGENT_1_*`) see the file.
  */
 export function syncConfigFileToProcessEnv(): void {
   try {
-    const content = fs.readFileSync(CONFIG_PATH, "utf-8");
+    const content = fs.readFileSync(getConfigPath(), "utf-8");
     const env = parseEnvFile(content);
     for (const [key, value] of env) {
       if (value !== undefined) process.env[key] = value;
@@ -364,25 +555,16 @@ function parseAgentSlotsFromEnv(env: Map<string, string>): AgentEnvSlot[] {
   return slots;
 }
 
-function parseRuntimeProfiles(env: Map<string, string>): RuntimeProfile[] | undefined {
-  const raw = env.get("CTI_RUNTIME_PROFILES");
-  if (!raw) return undefined;
+function parseRunnerJsonArray(raw: string | undefined): RunnerConfig[] | undefined {
+  if (!raw?.trim()) return undefined;
   try {
     const parsed = JSON.parse(raw) as unknown;
     if (!Array.isArray(parsed)) return undefined;
-    const out: RuntimeProfile[] = [];
+    const out: RunnerConfig[] = [];
     for (const item of parsed) {
       if (!item || typeof item !== "object") continue;
-      const id = (item as { id?: unknown }).id;
-      const rt = (item as { runtime?: unknown }).runtime;
-      if (typeof id !== "string" || typeof rt !== "string") continue;
-      if (!["claude", "codex", "cursor", "auto"].includes(rt)) continue;
-      const label = (item as { label?: unknown }).label;
-      out.push({
-        id,
-        runtime: rt as RuntimeKind,
-        label: typeof label === "string" ? label : undefined,
-      });
+      const r = runnerFromRow(item as Record<string, unknown>);
+      if (r) out.push(r);
     }
     return out.length ? out : undefined;
   } catch {
@@ -390,29 +572,101 @@ function parseRuntimeProfiles(env: Map<string, string>): RuntimeProfile[] | unde
   }
 }
 
-/** Ensures at least one profile exists (derived from legacy `runtime` when unset). */
-export function normalizeRuntimeProfiles(config: Config): RuntimeProfile[] {
-  if (config.runtimeProfiles && config.runtimeProfiles.length > 0) {
-    return config.runtimeProfiles;
-  }
-  return [{ id: "default", runtime: config.runtime, label: "Default" }];
+export function findImInstanceSpec(
+  config: Config,
+  base: ImInstanceChannel,
+  instanceId: string,
+): ImInstanceSpec | undefined {
+  const bot = config.imBot;
+  if (!bot || bot.channel !== base || bot.id !== instanceId) return undefined;
+  return bot;
 }
 
-/** Runtime used by the IM bridge (default profile, or first profile). */
+/** Runners for one IM bot: embedded list, or bridge-level `CTI_RUNNERS` fallback. */
+export function normalizeRunnersForInstance(spec: ImInstanceSpec, config: Config): RunnerConfig[] {
+  if (spec.runners && spec.runners.length > 0) {
+    return spec.runners;
+  }
+  return normalizeRunners(config);
+}
+
+/** Runners visible on a given adapter `channelType` (`telegram` or `telegram:slug`). */
+export function normalizeRunnersForChannelType(config: Config, channelType: string): RunnerConfig[] {
+  const parsed = parseImBaseAndInstanceId(channelType);
+  if (!parsed) return normalizeRunners(config);
+  const spec = findImInstanceSpec(config, parsed.base, parsed.instanceId);
+  if (spec) return normalizeRunnersForInstance(spec, config);
+  return normalizeRunners(config);
+}
+
+export function defaultRunnerIdForChannelType(config: Config, channelType: string): string | undefined {
+  const runners = normalizeRunnersForChannelType(config, channelType);
+  const first = runners[0]?.id;
+  const parsed = parseImBaseAndInstanceId(channelType);
+  if (parsed) {
+    const spec = findImInstanceSpec(config, parsed.base, parsed.instanceId);
+    if (spec?.defaultRunnerId) return spec.defaultRunnerId;
+  }
+  return config.defaultRunnerId ?? first;
+}
+
+/**
+ * Prefix for IM LLM map keys: `__legacy__` when no `imBot`, else `base:instanceId`
+ * (matches {@link collectImLlmBuildEntries}).
+ */
+export function imLlmKeyPrefix(config: Config, channelType: string): string {
+  if (!config.imBot) return "__legacy__";
+  const p = parseImBaseAndInstanceId(channelType);
+  if (!p) return "__legacy__";
+  return `${p.base}:${p.instanceId}`;
+}
+
+/** One provider per `(keyPrefix, runner.id)` — one bridge process hosts one bot (`imBot`). */
+export function collectImLlmBuildEntries(
+  config: Config,
+): Array<{ keyPrefix: string; runner: RunnerConfig }> {
+  const out: Array<{ keyPrefix: string; runner: RunnerConfig }> = [];
+  if (!config.imBot) {
+    for (const r of normalizeRunners(config)) {
+      out.push({ keyPrefix: "__legacy__", runner: r });
+    }
+    return out;
+  }
+  const spec = config.imBot;
+  const keyPrefix = `${spec.channel}:${spec.id}`;
+  for (const r of normalizeRunnersForInstance(spec, config)) {
+    out.push({ keyPrefix, runner: r });
+  }
+  return out;
+}
+
+export function defaultImLlmCompositeKey(config: Config): string {
+  const runners = normalizeRunners(config);
+  const id = config.defaultRunnerId ?? runners[0]?.id ?? "default";
+  if (!config.imBot) {
+    return `__legacy__\0${id}`;
+  }
+  const spec = config.imBot;
+  const ct = `${spec.channel}:${spec.id}`;
+  const eff = defaultRunnerIdForChannelType(config, ct) ?? id;
+  return `${ct}\0${eff}`;
+}
+
+/** Runtime used by the IM bridge (default runner, or first runner). */
 export function resolveEffectiveRuntime(config: Config): RuntimeKind {
-  const profiles = normalizeRuntimeProfiles(config);
-  const id = config.defaultRuntimeProfileId ?? profiles[0]?.id;
-  const p = profiles.find((x) => x.id === id) ?? profiles[0];
+  const runners = normalizeRunners(config);
+  const id = config.defaultRunnerId ?? runners[0]?.id;
+  const p = runners.find((x) => x.id === id) ?? runners[0];
   return p?.runtime ?? config.runtime;
 }
 
-/** Effective runtime for a platform agent instance (profile overrides stored `runtime`). */
+/** Effective runtime for a platform agent instance (runner id overrides stored `runtime`). */
 export function resolveRuntimeForPlatformInstance(
   config: Config,
   instance: { runtime: string; runtimeProfileId?: string },
 ): RuntimeKind {
   if (instance.runtimeProfileId) {
-    const p = normalizeRuntimeProfiles(config).find((x) => x.id === instance.runtimeProfileId);
+    const p = normalizeRunners(config).find((x) => x.id === instance.runtimeProfileId);
     if (p) return p.runtime;
   }
   const r = instance.runtime as RuntimeKind;
@@ -427,10 +681,67 @@ function splitCsv(value: string | undefined): string[] | undefined {
     .filter(Boolean);
 }
 
+/** Merge `imBot` bridge fields into top-level `Config` for code paths that read `config.proxy`, etc. */
+function applyImBotToFlatConfig(c: Config): void {
+  const b = c.imBot;
+  if (!b) return;
+  if (b.defaultWorkDir !== undefined && b.defaultWorkDir !== "") {
+    c.defaultWorkDir = b.defaultWorkDir;
+  }
+  if (b.proxy !== undefined) c.proxy = b.proxy;
+  if (b.webBaseUrl !== undefined) c.webBaseUrl = b.webBaseUrl;
+  if (b.autoApprove !== undefined) c.autoApprove = b.autoApprove;
+  if (b.defaultModel !== undefined) c.defaultModel = b.defaultModel;
+  if (b.defaultMode !== undefined) c.defaultMode = b.defaultMode;
+  c.runners = normalizeRunners(c).map((x) => ({ ...x }));
+  if (b.defaultRunnerId) c.defaultRunnerId = b.defaultRunnerId;
+}
+
+/**
+ * After removing `imBot`, clear top-level `CTI_*` mirrors that still matched the old bot so
+ * `saveConfig` does not leave stale duplicates. Only strips when the removed bot had an
+ * explicit value for that field (or runners matched the effective bot list).
+ */
+function stripFlatFieldsMirroredFromRemovedImBot(prev: Config, next: Config): void {
+  const b = prev.imBot;
+  if (!b) return;
+
+  const prevNorm = normalizeRunners(prev).map((r) => ({ ...r }));
+  const botNormRaw = b.runners?.length
+    ? b.runners
+    : normalizeRunners({ ...prev, imBot: undefined });
+  const botNorm = botNormRaw.map((r) => ({ ...r }));
+  if (JSON.stringify(prevNorm) === JSON.stringify(botNorm)) {
+    next.runners = undefined;
+  }
+
+  if (b.defaultWorkDir !== undefined && b.defaultWorkDir !== "" && next.defaultWorkDir === b.defaultWorkDir) {
+    next.defaultWorkDir = process.cwd();
+  }
+  if (b.proxy !== undefined && next.proxy === b.proxy) {
+    next.proxy = undefined;
+  }
+  if (b.webBaseUrl !== undefined && next.webBaseUrl === b.webBaseUrl) {
+    next.webBaseUrl = undefined;
+  }
+  if (b.autoApprove !== undefined && next.autoApprove === b.autoApprove) {
+    next.autoApprove = false;
+  }
+  if (b.defaultModel !== undefined && next.defaultModel === b.defaultModel) {
+    next.defaultModel = undefined;
+  }
+  if (b.defaultMode !== undefined && next.defaultMode === b.defaultMode) {
+    next.defaultMode = "code";
+  }
+  if (b.defaultRunnerId !== undefined && next.defaultRunnerId === b.defaultRunnerId) {
+    next.defaultRunnerId = undefined;
+  }
+}
+
 export function loadConfig(): Config {
   let env = new Map<string, string>();
   try {
-    const content = fs.readFileSync(CONFIG_PATH, "utf-8");
+    const content = fs.readFileSync(getConfigPath(), "utf-8");
     env = parseEnvFile(content);
   } catch {
     // Config file doesn't exist yet — use defaults
@@ -439,8 +750,8 @@ export function loadConfig(): Config {
   const rawRuntime = env.get("CTI_RUNTIME") || "claude";
   const runtime = (["claude", "codex", "cursor", "auto"].includes(rawRuntime) ? rawRuntime : "claude") as Config["runtime"];
 
-  const runtimeProfiles = parseRuntimeProfiles(env);
-  const defaultRuntimeProfileId = env.get("CTI_DEFAULT_RUNTIME_PROFILE") || undefined;
+  const runners = parseRunnerJsonArray(env.get("CTI_RUNNERS"));
+  const defaultRunnerId = env.get("CTI_DEFAULT_RUNNER")?.trim() || undefined;
 
   const base: Config = {
     runtime,
@@ -490,15 +801,24 @@ export function loadConfig(): Config {
     jiraBotAccountId: env.get("CTI_JIRA_BOT_ACCOUNT_ID") || undefined,
     webBaseUrl: env.get("CTI_WEB_BASE_URL") || undefined,
     agentEnvSlots: parseAgentSlotsFromEnv(env),
-    runtimeProfiles,
-    defaultRuntimeProfileId,
-    imInstances: parseImInstances(env.get("CTI_IM_INSTANCES")),
+    runners,
+    defaultRunnerId,
+    imBot: parseImBot(env),
   };
 
-  if (runtimeProfiles && runtimeProfiles.length > 0) {
+  if (runners && runners.length > 0) {
     base.runtime = resolveEffectiveRuntime(base);
   }
 
+  if (base.imBot) {
+    const fallback = normalizeRunners({ ...base, imBot: undefined });
+    if (!base.imBot.runners?.length) {
+      base.imBot.runners = fallback.map((r) => ({ ...r }));
+    }
+  }
+
+  applyImBotToFlatConfig(base);
+  base.enabledChannels = effectiveEnabledChannels(base);
   return base;
 }
 
@@ -509,13 +829,13 @@ function formatEnvLine(key: string, value: string | undefined): string {
 
 export function saveConfig(config: Config): void {
   let out = "";
-  const profiles = normalizeRuntimeProfiles(config);
-  out += formatEnvLine("CTI_RUNTIME_PROFILES", JSON.stringify(profiles));
-  out += formatEnvLine("CTI_DEFAULT_RUNTIME_PROFILE", config.defaultRuntimeProfileId);
+  const runnerList = normalizeRunners(config);
+  out += formatEnvLine("CTI_RUNNERS", JSON.stringify(runnerList));
+  out += formatEnvLine("CTI_DEFAULT_RUNNER", config.defaultRunnerId);
   out += formatEnvLine("CTI_RUNTIME", resolveEffectiveRuntime(config));
   out += formatEnvLine(
     "CTI_ENABLED_CHANNELS",
-    config.enabledChannels.join(",")
+    effectiveEnabledChannels(config).join(",")
   );
   out += formatEnvLine("CTI_DEFAULT_WORKDIR", config.defaultWorkDir);
   if (config.defaultModel) out += formatEnvLine("CTI_DEFAULT_MODEL", config.defaultModel);
@@ -576,8 +896,8 @@ export function saveConfig(config: Config): void {
   if (config.agentMaxTurns !== undefined)
     out += formatEnvLine("CTI_AGENT_MAX_TURNS", String(config.agentMaxTurns));
 
-  if (config.imInstances?.length) {
-    out += formatEnvLine("CTI_IM_INSTANCES", JSON.stringify(config.imInstances));
+  if (config.imBot) {
+    out += formatEnvLine("CTI_IM_BOT", JSON.stringify(config.imBot));
   }
 
   const slots = config.agentEnvSlots ?? [];
@@ -593,10 +913,11 @@ export function saveConfig(config: Config): void {
       out += formatEnvLine(`${p}MAX_TURNS`, String(slot.maxTurns));
   }
 
-  fs.mkdirSync(CTI_HOME, { recursive: true });
-  const tmpPath = CONFIG_PATH + ".tmp";
+  fs.mkdirSync(getCtiHome(), { recursive: true });
+  const cfgPath = getConfigPath();
+  const tmpPath = cfgPath + ".tmp";
   fs.writeFileSync(tmpPath, out, { mode: 0o600 });
-  fs.renameSync(tmpPath, CONFIG_PATH);
+  fs.renameSync(tmpPath, cfgPath);
 }
 
 export function maskSecret(value: string): string {
@@ -630,7 +951,10 @@ function mergeImSecret(
 }
 
 /** Merge a PATCH body into the previous config; masked secrets and empty strings keep prior values. */
-export function mergeConfigPatch(prev: Config, patch: Partial<Config>): Config {
+export function mergeConfigPatch(
+  prev: Config,
+  patch: Partial<Config> & { imBot?: ImInstanceSpec | null },
+): Config {
   const next: Config = { ...prev, ...patch };
   for (const key of CONFIG_SECRET_KEYS) {
     const incoming = patch[key];
@@ -650,23 +974,38 @@ export function mergeConfigPatch(prev: Config, patch: Partial<Config>): Config {
       })
       .filter((s) => !!s.openaiApiKey?.trim());
   }
-  if (patch.imInstances !== undefined) {
-    if (patch.imInstances.length === 0) {
-      next.imInstances = undefined;
+  if (patch.imBot !== undefined) {
+    if (patch.imBot === null) {
+      next.imBot = undefined;
+      stripFlatFieldsMirroredFromRemovedImBot(prev, next);
     } else {
-      const prevSpecs = prev.imInstances ?? [];
-      next.imInstances = patch.imInstances.map((spec) => {
-        const prevSpec = prevSpecs.find((p) => p.id === spec.id && p.channel === spec.channel);
-        return {
-          ...spec,
-          tgBotToken: mergeImSecret(spec.tgBotToken, prevSpec?.tgBotToken),
-          discordBotToken: mergeImSecret(spec.discordBotToken, prevSpec?.discordBotToken),
-          feishuAppSecret: mergeImSecret(spec.feishuAppSecret, prevSpec?.feishuAppSecret),
-          qqAppSecret: mergeImSecret(spec.qqAppSecret, prevSpec?.qqAppSecret),
-        };
-      });
+      const prevSpec = prev.imBot;
+      const spec = patch.imBot;
+      const fallback = normalizeRunners({ ...next, imBot: undefined });
+      const runners = spec.runners?.length
+        ? spec.runners
+        : prevSpec?.runners?.length
+          ? prevSpec.runners
+          : [...fallback];
+      if (!runners.length) {
+        throw new Error(
+          `IM bot (${spec.channel}): 至少配置一个 Runner（runners 不能为空）`,
+        );
+      }
+      next.imBot = {
+        ...prevSpec,
+        ...spec,
+        runners,
+        defaultRunnerId: spec.defaultRunnerId ?? prevSpec?.defaultRunnerId,
+        tgBotToken: mergeImSecret(spec.tgBotToken, prevSpec?.tgBotToken),
+        discordBotToken: mergeImSecret(spec.discordBotToken, prevSpec?.discordBotToken),
+        feishuAppSecret: mergeImSecret(spec.feishuAppSecret, prevSpec?.feishuAppSecret),
+        qqAppSecret: mergeImSecret(spec.qqAppSecret, prevSpec?.qqAppSecret),
+      };
     }
   }
+  applyImBotToFlatConfig(next);
+  next.enabledChannels = effectiveEnabledChannels(next);
   return next;
 }
 
@@ -693,15 +1032,19 @@ export function configForAdminResponse(config: Config): {
       openaiApiKey: s.openaiApiKey ? maskSecret(s.openaiApiKey) : undefined,
     }));
   }
-  if (clone.imInstances?.length) {
-    clone.imInstances = clone.imInstances.map((spec) => ({
+  if (clone.imBot) {
+    const fallback = normalizeRunners(clone).map((r) => ({ ...r }));
+    const spec = clone.imBot;
+    clone.imBot = {
       ...spec,
+      runners: spec.runners?.length ? spec.runners : [...fallback],
       tgBotToken: spec.tgBotToken ? maskSecret(spec.tgBotToken) : undefined,
       discordBotToken: spec.discordBotToken ? maskSecret(spec.discordBotToken) : undefined,
       feishuAppSecret: spec.feishuAppSecret ? maskSecret(spec.feishuAppSecret) : undefined,
       qqAppSecret: spec.qqAppSecret ? maskSecret(spec.qqAppSecret) : undefined,
-    }));
+    };
   }
+  clone.enabledChannels = effectiveEnabledChannels(clone);
   return { config: clone, secretFields };
 }
 
@@ -709,21 +1052,22 @@ export function configToSettings(config: Config): Map<string, string> {
   const m = new Map<string, string>();
   m.set("remote_bridge_enabled", "true");
 
-  const im = config.imInstances ?? [];
-  const hasTelegramIm = im.some((i) => i.channel === "telegram");
-  const hasDiscordIm = im.some((i) => i.channel === "discord");
-  const hasFeishuIm = im.some((i) => i.channel === "feishu");
-  const hasQqIm = im.some((i) => i.channel === "qq");
+  const imBot = config.imBot;
+  const enabledCh = effectiveEnabledChannels(config);
+  const hasTelegramIm = imBot?.channel === "telegram";
+  const hasDiscordIm = imBot?.channel === "discord";
+  const hasFeishuIm = imBot?.channel === "feishu";
+  const hasQqIm = imBot?.channel === "qq";
 
-  if (im.length > 0) {
-    applyImInstancesToSettings(m, config);
+  if (imBot) {
+    applyImBotToSettings(m, config);
   }
 
-  // ── Telegram (legacy single-token when no CTI_IM_INSTANCES for telegram) ──
+  // ── Telegram (flat CTI_* when no imBot for this channel) ──
   if (!hasTelegramIm) {
     m.set(
       "bridge_telegram_enabled",
-      config.enabledChannels.includes("telegram") ? "true" : "false",
+      enabledCh.includes("telegram") ? "true" : "false",
     );
     if (config.tgBotToken) m.set("telegram_bot_token", config.tgBotToken);
     if (config.tgAllowedUsers)
@@ -731,11 +1075,11 @@ export function configToSettings(config: Config): Map<string, string> {
     if (config.tgChatId) m.set("telegram_chat_id", config.tgChatId);
   }
 
-  // ── Discord (legacy) ──
+  // ── Discord ──
   if (!hasDiscordIm) {
     m.set(
       "bridge_discord_enabled",
-      config.enabledChannels.includes("discord") ? "true" : "false",
+      enabledCh.includes("discord") ? "true" : "false",
     );
     if (config.discordBotToken)
       m.set("bridge_discord_bot_token", config.discordBotToken);
@@ -753,11 +1097,11 @@ export function configToSettings(config: Config): Map<string, string> {
       );
   }
 
-  // ── Feishu (legacy) ──
+  // ── Feishu ──
   if (!hasFeishuIm) {
     m.set(
       "bridge_feishu_enabled",
-      config.enabledChannels.includes("feishu") ? "true" : "false",
+      enabledCh.includes("feishu") ? "true" : "false",
     );
     if (config.feishuAppId) m.set("bridge_feishu_app_id", config.feishuAppId);
     if (config.feishuAppSecret)
@@ -767,11 +1111,11 @@ export function configToSettings(config: Config): Map<string, string> {
       m.set("bridge_feishu_allowed_users", config.feishuAllowedUsers.join(","));
   }
 
-  // ── QQ (legacy) ──
+  // ── QQ ──
   if (!hasQqIm) {
     m.set(
       "bridge_qq_enabled",
-      config.enabledChannels.includes("qq") ? "true" : "false",
+      enabledCh.includes("qq") ? "true" : "false",
     );
     if (config.qqAppId) m.set("bridge_qq_app_id", config.qqAppId);
     if (config.qqAppSecret) m.set("bridge_qq_app_secret", config.qqAppSecret);
@@ -784,11 +1128,9 @@ export function configToSettings(config: Config): Map<string, string> {
   }
 
   // ── Agent ──
-  // For backward compatibility, set single instance settings
-  // The adapter will parse all agent_* settings directly from store
   m.set(
     "bridge_agent_enabled",
-    config.enabledChannels.includes("agent") ? "true" : "false"
+    enabledCh.includes("agent") ? "true" : "false"
   );
   if (config.agentRedisUrl) m.set("bridge_agent_redis_url", config.agentRedisUrl);
   if (config.agentFirstPrompt) m.set("bridge_agent_first_prompt", config.agentFirstPrompt);
@@ -809,8 +1151,8 @@ export function configToSettings(config: Config): Map<string, string> {
     m.set("default_model", config.defaultModel);
   }
   m.set("bridge_default_mode", config.defaultMode);
-  if (config.defaultRuntimeProfileId) {
-    m.set("bridge_default_runner_profile_id", config.defaultRuntimeProfileId);
+  if (config.defaultRunnerId) {
+    m.set("bridge_default_runner_profile_id", config.defaultRunnerId);
   }
 
   return m;

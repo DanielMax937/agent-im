@@ -6,13 +6,13 @@
   "scripts": {
     "build:daemon": "node scripts/build.js",
     "build:web": "next build",
-    "build": "npm run build:daemon && npm run build:web",
+    "build": "CTI_BOT_NAME=__npm_build__ npm run build:daemon && CTI_BOT_NAME=__npm_build__ npm run build:web",
     "typecheck": "tsc --noEmit",
     "dev": "next dev",
     "dev:bridge": "tsx src/main.ts",
     "dev:web": "next dev",
     "start": "next start",
-    "test": "CTI_HOME=$(mktemp -d) node --test --import tsx --test-timeout=15000 src/__tests__/*.test.ts"
+    "test": "CTI_HOME=$(mktemp -d) node --test --test-concurrency=1 --import tsx --test-timeout=15000 src/__tests__/*.test.ts"
   },
   "dependencies": {
     "@anthropic-ai/claude-agent-sdk": "^0.2.62",

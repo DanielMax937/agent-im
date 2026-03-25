@@ -17,6 +17,12 @@ import type { FileAttachment } from '../types';
 import { BaseChannelAdapter, registerAdapterFactory } from '../channel-adapter';
 import { getBridgeContext } from '../context';
 import { imScopedGet } from '../im-instance-settings';
+import {
+  isLocalAgentIntentEnabled,
+  readLocalAgentSettings,
+  RedisLocalTransport,
+  runRedisLocalInboundLoop,
+} from '../redis-local-transport';
 import { callTelegramApi, sendMessageDraft } from './telegram-utils';
 import {
   isImageEnabled,
@@ -88,6 +94,9 @@ export class TelegramAdapter extends BaseChannelAdapter {
   /** Stable bot user ID from Telegram's getMe, used for offset key identity. */
   private botUserId: string | null = null;
 
+  /** Redis-only mode: no Telegram API; Runner ↔ Redis (see ImInstanceSpec.localAgent*). */
+  private redisLocal: RedisLocalTransport | null = null;
+
   constructor(instanceId = 'default') {
     super('telegram', instanceId);
   }
@@ -102,6 +111,31 @@ export class TelegramAdapter extends BaseChannelAdapter {
 
   async start(): Promise<void> {
     if (this.running) return;
+
+    const la = readLocalAgentSettings(getBridgeContext().store, 'telegram', this.instanceId);
+    if (la) {
+      const configError = this.validateConfig();
+      if (configError) {
+        console.warn('[telegram-adapter] Cannot start (local agent):', configError);
+        return;
+      }
+      this.redisLocal = new RedisLocalTransport('telegram', this.instanceId, la);
+      try {
+        await this.redisLocal.connect();
+        await this.redisLocal.seedFirstPromptIfNeeded();
+      } catch (err) {
+        console.error('[telegram-adapter] Local agent Redis connect failed:', err);
+        this.redisLocal = null;
+        return;
+      }
+      this.running = true;
+      this.abortController = new AbortController();
+      this.redisLocalPollLoop().catch((err) => {
+        console.error('[telegram-adapter] Redis poll loop error:', err);
+      });
+      console.log(`[telegram-adapter] Local Agent mode (Redis-only), instance=${this.instanceId}`);
+      return;
+    }
 
     const configError = this.validateConfig();
     if (configError) {
@@ -132,6 +166,11 @@ export class TelegramAdapter extends BaseChannelAdapter {
     this.running = false;
     this.abortController?.abort();
     this.abortController = null;
+
+    if (this.redisLocal) {
+      await this.redisLocal.disconnect();
+      this.redisLocal = null;
+    }
 
     // Persist committed offset before shutdown
     this.persistCommittedOffset();
@@ -179,6 +218,11 @@ export class TelegramAdapter extends BaseChannelAdapter {
   }
 
   async send(message: OutboundMessage): Promise<SendResult> {
+    if (this.redisLocal) {
+      const r = await this.redisLocal.deliverClaudeReply(message.text);
+      return r.ok ? { ok: true, messageId: crypto.randomUUID() } : { ok: false, error: r.error };
+    }
+
     const token = this.botToken;
     if (!token) return { ok: false, error: 'No bot token configured' };
 
@@ -214,6 +258,7 @@ export class TelegramAdapter extends BaseChannelAdapter {
   }
 
   async answerCallback(callbackQueryId: string, text?: string): Promise<void> {
+    if (this.redisLocal) return;
     const token = this.botToken;
     if (!token) return;
 
@@ -224,6 +269,16 @@ export class TelegramAdapter extends BaseChannelAdapter {
   }
 
   validateConfig(): string | null {
+    const store = getBridgeContext().store;
+    if (isLocalAgentIntentEnabled(store, 'telegram', this.instanceId)) {
+      if (!readLocalAgentSettings(store, 'telegram', this.instanceId)) {
+        return 'local agent enabled but bridge_telegram_local_agent_redis_url is required';
+      }
+      const bridgeEnabled = this.imGet('bridge_telegram_enabled');
+      if (bridgeEnabled !== 'true') return 'bridge_telegram_enabled is not true';
+      return null;
+    }
+
     const token = this.imGet('telegram_bot_token');
     if (!token) return 'telegram_bot_token not configured';
 
@@ -234,6 +289,7 @@ export class TelegramAdapter extends BaseChannelAdapter {
   }
 
   isAuthorized(userId: string, chatId: string): boolean {
+    if (this.redisLocal) return true;
     // Check bridge-specific allowed users first
     const allowedUsers = this.imGet('telegram_bridge_allowed_users') || '';
     if (allowedUsers) {
@@ -257,6 +313,7 @@ export class TelegramAdapter extends BaseChannelAdapter {
    * Start a typing indicator that fires every 5 seconds.
    */
   startTyping(chatId: string): void {
+    if (this.redisLocal) return;
     this.stopTyping(chatId); // Clear any existing
     const token = this.botToken;
     if (!token) return;
@@ -295,6 +352,7 @@ export class TelegramAdapter extends BaseChannelAdapter {
   // ── Streaming preview ────────────────────────────────────────
 
   getPreviewCapabilities(chatId: string): PreviewCapabilities | null {
+    if (readLocalAgentSettings(getBridgeContext().store, 'telegram', this.instanceId)) return null;
     // Global kill switch
     if (this.imGet('bridge_telegram_stream_enabled') === 'false') return null;
 
@@ -309,6 +367,7 @@ export class TelegramAdapter extends BaseChannelAdapter {
   }
 
   async sendPreview(chatId: string, text: string, draftId: number): Promise<'sent' | 'skip' | 'degrade'> {
+    if (this.redisLocal) return 'skip';
     const token = this.botToken;
     if (!token) return 'skip';
 
@@ -371,6 +430,22 @@ export class TelegramAdapter extends BaseChannelAdapter {
     } else {
       this.queue.push(msg);
     }
+  }
+
+  /** Redis inbound loop for Local Agent mode (no Telegram polling). */
+  private async redisLocalPollLoop(): Promise<void> {
+    const rt = this.redisLocal;
+    if (!rt) return;
+    await runRedisLocalInboundLoop(
+      rt,
+      this.channelType,
+      (msg) => this.enqueue(msg),
+      () => this.running,
+      async () => {
+        console.log(`[telegram-adapter] Local agent max turns (${this.instanceId})`);
+        await this.stop();
+      },
+    );
   }
 
   /**
