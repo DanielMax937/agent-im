@@ -29,6 +29,7 @@ import {
   validateMode,
 } from './security/validators';
 import { startBridgeDaemonChild } from '../bridge-app-child';
+import { getLogger } from '../../logger';
 import {
   listInstanceIdsForChannel,
   isInstanceImEnabled,
@@ -497,6 +498,25 @@ async function handleMessage(
   meta.lastMessageAt = new Date().toISOString();
   adapterState.adapterMeta.set(adapter.channelType, meta);
 
+  const previewLen = 200;
+  const raw = msg.text;
+  const preview =
+    raw.length > previewLen ? `${raw.slice(0, previewLen)}…` : raw;
+  getLogger().info(
+    {
+      event: 'inbound',
+      channel: adapter.channelType,
+      chatId: msg.address.chatId,
+      messageId: msg.messageId,
+      updateId: msg.updateId,
+      hasCallback: Boolean(msg.callbackData),
+      textLen: raw.length,
+      attachmentCount: msg.attachments?.length ?? 0,
+      preview,
+    },
+    '[bridge] inbound message',
+  );
+
   // Acknowledge the update offset after processing completes (or fails).
   // This ensures the adapter only advances its committed offset once the
   // message has been fully handled, preventing message loss on crash.
@@ -920,12 +940,19 @@ async function handleCommand(
       }
 
       if (argLc === 'default' || argLc === 'reset') {
+        const effBefore = effectiveRunnerProfileId(binding, store);
         router.updateBinding(binding.id, { runnerProfileId: undefined });
-        const eff = effectiveRunnerProfileId(
-          { ...binding, runnerProfileId: undefined },
-          store,
-        );
-        response = `Runner reset to server default (effective profile: <code>${escapeHtml(eff)}</code>).`;
+        const updated = router.resolve(msg.address);
+        const effAfter = effectiveRunnerProfileId(updated, store);
+        if (effBefore !== effAfter) {
+          router.recreateBindingSession(updated);
+        }
+        response = [
+          `Runner reset to server default (effective profile: <code>${escapeHtml(effAfter)}</code>).`,
+          effBefore !== effAfter
+            ? '\n\n<b>New conversation started</b> for this runner (previous CLI session cleared).'
+            : '',
+        ].join('');
         break;
       }
 
@@ -941,12 +968,21 @@ async function handleCommand(
         break;
       }
 
+      const effBefore = effectiveRunnerProfileId(binding, store);
       router.updateBinding(binding.id, { runnerProfileId: matched.id });
+      const updatedRunner = router.resolve(msg.address);
+      const effAfter = effectiveRunnerProfileId(updatedRunner, store);
+      if (effBefore !== effAfter) {
+        router.recreateBindingSession(updatedRunner);
+      }
       response = [
         '<b>Runner updated</b>',
         '',
         `Profile: <code>${escapeHtml(matched.id)}</code>`,
         `Backend: <b>${escapeHtml(matched.runtime)}</b>${matched.label ? ` (${escapeHtml(matched.label)})` : ''}`,
+        effBefore !== effAfter
+          ? '\n\n<b>New conversation started</b> for this runner (previous CLI session cleared).'
+          : '',
       ].join('\n');
       break;
     }

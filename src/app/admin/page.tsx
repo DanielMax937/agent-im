@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 
 import {
   normalizeRunners,
@@ -11,7 +11,7 @@ import {
 } from '../../config-shared';
 
 const IM_INSTANCE_CHANNELS: ImInstanceChannel[] = ['telegram', 'discord', 'feishu', 'qq'];
-const RUNTIMES = ['claude', 'codex', 'cursor', 'auto'] as const;
+const RUNTIMES = ['claude', 'codex', 'cursor'] as const;
 const RUNNER_MODES = ['code', 'plan', 'ask'] as const;
 
 async function readJsonFromResponse(res: Response): Promise<unknown> {
@@ -77,6 +77,14 @@ function asConfig(c: AdminConfig): Config {
   return { ...c, imBot: c.imBot ?? undefined };
 }
 
+function cloneAdminConfig(c: AdminConfig): AdminConfig {
+  return JSON.parse(JSON.stringify(c)) as AdminConfig;
+}
+
+function adminConfigsEqual(a: AdminConfig, b: AdminConfig): boolean {
+  return JSON.stringify(a) === JSON.stringify(b);
+}
+
 export default function AdminPage() {
   const [cfg, setCfg] = useState<AdminConfig>(defaultConfig);
   const [configPath, setConfigPath] = useState('');
@@ -86,6 +94,7 @@ export default function AdminPage() {
   const [statusReady, setStatusReady] = useState(false);
   const [saving, setSaving] = useState(false);
   const [newBridging, setNewBridging] = useState(false);
+  const [deletingBridge, setDeletingBridge] = useState(false);
   const [switchingBridge, setSwitchingBridge] = useState(false);
   const [bridges, setBridges] = useState<string[]>([]);
   const [activeBotName, setActiveBotName] = useState('');
@@ -93,6 +102,8 @@ export default function AdminPage() {
   const [daemonStatus, setDaemonStatus] = useState<DaemonDiskStatus | null>(null);
   const [embeddedStatus, setEmbeddedStatus] = useState<EmbeddedBridgeStatus | null>(null);
   const [message, setMessage] = useState<string | null>(null);
+  /** Snapshot after last successful load/save — used to enable Save only when dirty. */
+  const [baselineCfg, setBaselineCfg] = useState<AdminConfig | null>(null);
 
   /** 按当前服务端解析的桥接目录（botName / CTI_HOME）查询独立进程 + Next 内嵌状态。 */
   const pollBridgeStatus = useCallback(async () => {
@@ -153,6 +164,7 @@ export default function AdminPage() {
           merged.runners = [{ id: 'default', runtime: merged.runtime, label: '默认' }];
         }
         setCfg(merged);
+        setBaselineCfg(cloneAdminConfig(merged));
       }
       if (cJson.configPath) setConfigPath(cJson.configPath);
       if (Array.isArray(cJson.bridges)) setBridges(cJson.bridges);
@@ -190,19 +202,15 @@ export default function AdminPage() {
       if (!template.length) {
         template.push({ id: 'default', runtime: prev.runtime, label: '默认' });
       }
+      const bridgeId = activeBotName.trim() || 'im';
       const spec: ImInstanceSpec = {
-        id: 'im1',
+        id: bridgeId,
         channel: 'telegram',
-        enabled: true,
         runners: template,
         defaultRunnerId: template[0]?.id,
       };
       return { ...prev, imBot: spec };
     });
-  };
-
-  const removeImBot = () => {
-    setCfg((prev) => ({ ...prev, imBot: null }));
   };
 
   const updateImRunner = (runnerIdx: number, patch: Partial<RunnerConfig>) => {
@@ -330,6 +338,73 @@ export default function AdminPage() {
     }
   };
 
+  const configDirty = useMemo(() => {
+    if (baselineCfg === null) return false;
+    return !adminConfigsEqual(cfg, baselineCfg);
+  }, [cfg, baselineCfg]);
+
+  const bridgeList = useMemo(() => {
+    if (bridges.length > 0) return bridges;
+    return activeBotName ? [activeBotName] : [];
+  }, [bridges, activeBotName]);
+
+  /** When CTI_HOME is fixed, only show the active bridge row (no switching). */
+  const displayBridgeList = useMemo(() => {
+    if (canSwitchBridges) return bridgeList;
+    return activeBotName ? [activeBotName] : bridgeList;
+  }, [canSwitchBridges, bridgeList, activeBotName]);
+
+  const handleSelectBridge = (slug: string) => {
+    if (slug === activeBotName) return;
+    if (configDirty) {
+      if (
+        !window.confirm(
+          '当前有未保存的修改，确定切换到其他桥接？未保存的更改将丢失。',
+        )
+      ) {
+        return;
+      }
+    }
+    void switchBridge(slug);
+  };
+
+  const removeBridgeDirectory = async () => {
+    if (!activeBotName) return;
+    if (
+      !window.confirm(
+        `确定删除桥接「${activeBotName}」及其目录下全部数据？此操作不可撤销。若删除当前桥接，将切换到其余桥接或新建空目录。`,
+      )
+    ) {
+      return;
+    }
+    setDeletingBridge(true);
+    setMessage(null);
+    try {
+      const res = await fetch('/api/local-config', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ deleteBridge: activeBotName }),
+      });
+      const j = (await readJsonFromResponse(res)) as {
+        ok?: boolean;
+        error?: string;
+        configPath?: string;
+        botName?: string;
+      };
+      if (!res.ok || j.ok === false) throw new Error(j.error || res.statusText);
+      if (j.configPath) setConfigPath(j.configPath);
+      if (j.botName) setActiveBotName(j.botName);
+      setStatusReady(false);
+      await load({ silent: true });
+      await pollBridgeStatus();
+      setMessage(`已删除桥接目录。当前桥接：${j.botName ?? '—'}，配置：${j.configPath ?? ''}。`);
+    } catch (e) {
+      setMessage(e instanceof Error ? e.message : String(e));
+    } finally {
+      setDeletingBridge(false);
+    }
+  };
+
   /** 磁盘或 API 任一方认为在跑，则视为运行中（用于与「启动」互斥）。 */
   const anyBridgeRunning =
     embeddedStatus?.running === true || daemonStatus?.effectiveRunning === true;
@@ -338,7 +413,7 @@ export default function AdminPage() {
     embeddedStatus?.running === true && embeddedStatus?.managedByApp === true;
 
   const bridgeActionsLocked =
-    !statusReady || saving || newBridging || switchingBridge;
+    !statusReady || saving || newBridging || deletingBridge || switchingBridge;
 
   const startDisabled = bridgeActionsLocked || configLoading || anyBridgeRunning;
   const stopDisabled = bridgeActionsLocked || configLoading || !canStopManagedBridge;
@@ -393,14 +468,16 @@ export default function AdminPage() {
           </nav>
         </div>
         <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: '0.35rem' }}>
-          <button
-            type="button"
-            className="ui-btn secondary"
-            disabled={saving || newBridging || switchingBridge}
-            onClick={() => void createNewBridge()}
-          >
-            {newBridging ? '正在新建…' : '新建桥接'}
-          </button>
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.5rem', justifyContent: 'flex-end' }}>
+            <button
+              type="button"
+              className="ui-btn secondary"
+              disabled={saving || newBridging || deletingBridge || switchingBridge}
+              onClick={() => void createNewBridge()}
+            >
+              {newBridging ? '正在新建…' : '新建桥接'}
+            </button>
+          </div>
         </div>
       </header>
 
@@ -428,25 +505,67 @@ export default function AdminPage() {
             {childLine}
           </p>
         </div>
-        <p className="ui-muted ui-small">
-          未勾「启用」的 bot 不会计入该通道。保存后如需生效请重启桥接。
-        </p>
-
         {configLoading ? (
           <p className="ui-muted">正在加载配置表单…</p>
         ) : (
         <div className="ui-bridge-subsection">
+        <h3 style={{ marginTop: 0, marginBottom: '0.75rem', fontSize: '1.1rem' }}>桥接目录</h3>
+        {displayBridgeList.length === 0 ? (
+          <p className="ui-muted ui-small">暂无桥接目录。</p>
+        ) : (
+          <div className="ui-bridge-accordion" role="list">
+            {displayBridgeList.map((b) => {
+              const showAccordionSwitch = canSwitchBridges && displayBridgeList.length > 1;
+              return (
+              <div
+                key={b}
+                className={`ui-bridge-accordion-item${activeBotName === b ? ' is-active' : ''}`}
+                role="listitem"
+              >
+                {showAccordionSwitch ? (
+                  <button
+                    type="button"
+                    className="ui-bridge-accordion-trigger"
+                    aria-expanded={activeBotName === b}
+                    aria-controls={`admin-bridge-panel-${b}`}
+                    id={`admin-bridge-head-${b}`}
+                    disabled={switchingBridge || newBridging || deletingBridge}
+                    onClick={() => handleSelectBridge(b)}
+                  >
+                    <span className="ui-bridge-accordion-chevron" aria-hidden>
+                      {activeBotName === b ? '▼' : '▶'}
+                    </span>
+                    <code>{b}</code>
+                    {activeBotName === b ? (
+                      <span className="ui-bridge-accordion-badge">当前</span>
+                    ) : null}
+                  </button>
+                ) : (
+                  <div
+                    className="ui-bridge-accordion-trigger ui-bridge-accordion-trigger-static"
+                    id={`admin-bridge-head-${b}`}
+                  >
+                    <span className="ui-bridge-accordion-chevron" aria-hidden>
+                      ▼
+                    </span>
+                    <code>{b}</code>
+                    <span className="ui-bridge-accordion-badge">当前</span>
+                  </div>
+                )}
+                {activeBotName === b ? (
+                  <div
+                    className="ui-bridge-accordion-panel"
+                    id={`admin-bridge-panel-${b}`}
+                    role="region"
+                    aria-labelledby={`admin-bridge-head-${b}`}
+                  >
         <div className="ui-section-title">
           <h3>IM 机器人（CTI_IM_BOT）</h3>
           {!cfg.imBot ? (
             <button type="button" className="ui-btn secondary" onClick={addImBot}>
               添加机器人
             </button>
-          ) : (
-            <button type="button" className="ui-btn secondary" onClick={removeImBot}>
-              移除机器人
-            </button>
-          )}
+          ) : null}
         </div>
         <p className="ui-muted ui-small">
           会话绑定里的 channelType 形如 <code>telegram:你的-id</code>。未使用 <code>CTI_IM_BOT</code> 时仍可依赖顶格{' '}
@@ -461,14 +580,13 @@ export default function AdminPage() {
               return (
               <div key="im-bot" className="ui-card" style={{ padding: '1rem', border: '1px solid var(--ui-border, #333)' }}>
                 <div className="ui-grid" style={{ alignItems: 'flex-end' }}>
-                  <label className="ui-field">
-                    <span>机器人标识（slug，用于路由）</span>
-                    <input
-                      value={spec.id}
-                      onChange={(e) => updateImBot({ id: e.target.value.trim() })}
-                      placeholder="work"
-                    />
-                  </label>
+                  <div className="ui-field">
+                    <span>桥接实例标识（路由与存储）</span>
+                    <p className="ui-muted ui-small" style={{ margin: '0.35rem 0 0' }}>
+                      与当前桥接目录名一致，保存时由服务端写入 <code>CTI_IM_BOT.id</code>：
+                      <code>{activeBotName || '—'}</code>
+                    </p>
+                  </div>
                   <label className="ui-field">
                     <span>平台</span>
                     <select
@@ -484,15 +602,192 @@ export default function AdminPage() {
                       ))}
                     </select>
                   </label>
-                  <label className="ui-field ui-check">
-                    <input
-                      type="checkbox"
-                      checked={spec.enabled !== false}
-                      onChange={(e) => updateImBot({ enabled: e.target.checked })}
-                    />
-                    <span>启用</span>
-                  </label>
                 </div>
+                {spec.channel === 'telegram' ? (
+                  <div className="ui-grid" style={{ marginTop: '0.75rem' }}>
+                    <label className="ui-field">
+                      <span>tgBotToken</span>
+                      <input
+                        type="password"
+                        autoComplete="off"
+                        value={spec.tgBotToken ?? ''}
+                        onChange={(e) => updateImBot({ tgBotToken: e.target.value || undefined })}
+                      />
+                    </label>
+                    <label className="ui-field">
+                      <span>tgChatId</span>
+                      <input
+                        value={spec.tgChatId ?? ''}
+                        onChange={(e) => updateImBot({ tgChatId: e.target.value || undefined })}
+                      />
+                    </label>
+                    <label className="ui-field">
+                      <span>tgAllowedUsers（逗号分隔）</span>
+                      <input
+                        value={spec.tgAllowedUsers?.join(',') ?? ''}
+                        onChange={(e) =>
+                          updateImBot({
+                            tgAllowedUsers: e.target.value
+                              .split(',')
+                              .map((s) => s.trim())
+                              .filter(Boolean),
+                          })
+                        }
+                      />
+                    </label>
+                  </div>
+                ) : null}
+                {spec.channel === 'discord' ? (
+                  <div className="ui-grid" style={{ marginTop: '0.75rem' }}>
+                    <label className="ui-field">
+                      <span>discordBotToken</span>
+                      <input
+                        type="password"
+                        value={spec.discordBotToken ?? ''}
+                        onChange={(e) =>
+                          updateImBot({ discordBotToken: e.target.value || undefined })
+                        }
+                      />
+                    </label>
+                    <label className="ui-field">
+                      <span>允许的用户 ID（逗号）</span>
+                      <input
+                        value={spec.discordAllowedUsers?.join(',') ?? ''}
+                        onChange={(e) =>
+                          updateImBot({
+                            discordAllowedUsers: e.target.value
+                              .split(',')
+                              .map((s) => s.trim())
+                              .filter(Boolean),
+                          })
+                        }
+                      />
+                    </label>
+                    <label className="ui-field">
+                      <span>允许的频道（逗号）</span>
+                      <input
+                        value={spec.discordAllowedChannels?.join(',') ?? ''}
+                        onChange={(e) =>
+                          updateImBot({
+                            discordAllowedChannels: e.target.value
+                              .split(',')
+                              .map((s) => s.trim())
+                              .filter(Boolean),
+                          })
+                        }
+                      />
+                    </label>
+                    <label className="ui-field">
+                      <span>允许的服务器（逗号）</span>
+                      <input
+                        value={spec.discordAllowedGuilds?.join(',') ?? ''}
+                        onChange={(e) =>
+                          updateImBot({
+                            discordAllowedGuilds: e.target.value
+                              .split(',')
+                              .map((s) => s.trim())
+                              .filter(Boolean),
+                          })
+                        }
+                      />
+                    </label>
+                  </div>
+                ) : null}
+                {spec.channel === 'feishu' ? (
+                  <div className="ui-grid" style={{ marginTop: '0.75rem' }}>
+                    <label className="ui-field">
+                      <span>feishuAppId</span>
+                      <input
+                        value={spec.feishuAppId ?? ''}
+                        onChange={(e) => updateImBot({ feishuAppId: e.target.value || undefined })}
+                      />
+                    </label>
+                    <label className="ui-field">
+                      <span>feishuAppSecret</span>
+                      <input
+                        type="password"
+                        value={spec.feishuAppSecret ?? ''}
+                        onChange={(e) =>
+                          updateImBot({ feishuAppSecret: e.target.value || undefined })
+                        }
+                      />
+                    </label>
+                    <label className="ui-field">
+                      <span>feishuDomain</span>
+                      <input
+                        value={spec.feishuDomain ?? ''}
+                        onChange={(e) => updateImBot({ feishuDomain: e.target.value || undefined })}
+                      />
+                    </label>
+                    <label className="ui-field">
+                      <span>允许的用户（逗号）</span>
+                      <input
+                        value={spec.feishuAllowedUsers?.join(',') ?? ''}
+                        onChange={(e) =>
+                          updateImBot({
+                            feishuAllowedUsers: e.target.value
+                              .split(',')
+                              .map((s) => s.trim())
+                              .filter(Boolean),
+                          })
+                        }
+                      />
+                    </label>
+                  </div>
+                ) : null}
+                {spec.channel === 'qq' ? (
+                  <div className="ui-grid" style={{ marginTop: '0.75rem' }}>
+                    <label className="ui-field">
+                      <span>qqAppId</span>
+                      <input
+                        value={spec.qqAppId ?? ''}
+                        onChange={(e) => updateImBot({ qqAppId: e.target.value || undefined })}
+                      />
+                    </label>
+                    <label className="ui-field">
+                      <span>qqAppSecret</span>
+                      <input
+                        type="password"
+                        value={spec.qqAppSecret ?? ''}
+                        onChange={(e) => updateImBot({ qqAppSecret: e.target.value || undefined })}
+                      />
+                    </label>
+                    <label className="ui-field">
+                      <span>允许的用户（逗号）</span>
+                      <input
+                        value={spec.qqAllowedUsers?.join(',') ?? ''}
+                        onChange={(e) =>
+                          updateImBot({
+                            qqAllowedUsers: e.target.value
+                              .split(',')
+                              .map((s) => s.trim())
+                              .filter(Boolean),
+                          })
+                        }
+                      />
+                    </label>
+                    <label className="ui-field ui-check">
+                      <input
+                        type="checkbox"
+                        checked={spec.qqImageEnabled !== false}
+                        onChange={(e) => updateImBot({ qqImageEnabled: e.target.checked })}
+                      />
+                      <span>qqImageEnabled</span>
+                    </label>
+                    <label className="ui-field">
+                      <span>qqMaxImageSize</span>
+                      <input
+                        type="number"
+                        value={spec.qqMaxImageSize ?? ''}
+                        onChange={(e) =>
+                          updateImBot({
+                            qqMaxImageSize: e.target.value ? Number(e.target.value) : undefined,
+                          })
+                        }
+                      />
+                    </label>
+                  </div>
+                ) : null}
                 <h4
                   style={{
                     marginTop: '1rem',
@@ -519,14 +814,6 @@ export default function AdminPage() {
                       onChange={(e) => updateImBot({ proxy: e.target.value || undefined })}
                     />
                   </label>
-                  <label className="ui-field">
-                    <span>Web 基址（CTI_WEB_BASE_URL）</span>
-                    <input
-                      value={spec.webBaseUrl ?? ''}
-                      onChange={(e) => updateImBot({ webBaseUrl: e.target.value || undefined })}
-                      placeholder="http://127.0.0.1:3000"
-                    />
-                  </label>
                   <label className="ui-field ui-check">
                     <input
                       type="checkbox"
@@ -535,21 +822,10 @@ export default function AdminPage() {
                     />
                     <span>自动批准工具（CTI_AUTO_APPROVE）</span>
                   </label>
-                  <label className="ui-field">
-                    <span>默认模型（CTI_DEFAULT_MODEL）</span>
-                    <input
-                      value={spec.defaultModel ?? ''}
-                      onChange={(e) => updateImBot({ defaultModel: e.target.value || undefined })}
-                    />
-                  </label>
-                  <label className="ui-field">
-                    <span>默认模式（CTI_DEFAULT_MODE）</span>
-                    <input
-                      value={spec.defaultMode ?? cfg.defaultMode ?? 'code'}
-                      onChange={(e) => updateImBot({ defaultMode: e.target.value })}
-                    />
-                  </label>
                 </div>
+                <p className="ui-muted ui-small" style={{ marginTop: '0.5rem' }}>
+                  默认模型与模式（code / plan / ask）由各 Runner 单独配置；不再使用桥接级 CTI_DEFAULT_MODEL / CTI_DEFAULT_MODE。
+                </p>
                 <div
                   style={{
                     marginTop: '0.75rem',
@@ -656,8 +932,11 @@ export default function AdminPage() {
                           </select>
                         </label>
                       </div>
-                      {(prof.runtime === 'claude' || prof.runtime === 'auto') && (
-                        <div className="ui-grid">
+                      {prof.runtime === 'claude' && (
+                        <div
+                          className="ui-grid"
+                          style={{ marginTop: '0.75rem', marginBottom: '0.75rem' }}
+                        >
                           <label className="ui-field">
                             <span>Claude CLI 路径</span>
                             <input
@@ -667,20 +946,13 @@ export default function AdminPage() {
                               }
                             />
                           </label>
-                          <label className="ui-field ui-check">
-                            <input
-                              type="checkbox"
-                              checked={prof.passModelToCli === true}
-                              onChange={(e) =>
-                                updateImRunner(ridx, { passModelToCli: e.target.checked ? true : undefined })
-                              }
-                            />
-                            <span>向 Claude CLI 传递模型</span>
-                          </label>
                         </div>
                       )}
-                      {(prof.runtime === 'codex' || prof.runtime === 'auto') && (
-                        <div className="ui-grid">
+                      {prof.runtime === 'codex' && (
+                        <div
+                          className="ui-grid"
+                          style={{ marginTop: '0.75rem', marginBottom: '0.75rem' }}
+                        >
                           <label className="ui-field">
                             <span>Codex wrapper 路径</span>
                             <input
@@ -700,35 +972,19 @@ export default function AdminPage() {
                             />
                             <span>Codex 使用 CLI login</span>
                           </label>
-                          <label className="ui-field ui-check">
-                            <input
-                              type="checkbox"
-                              checked={prof.codexPassModel === true}
-                              onChange={(e) =>
-                                updateImRunner(ridx, { codexPassModel: e.target.checked ? true : undefined })
-                              }
-                            />
-                            <span>Codex 向线程传递模型</span>
-                          </label>
                         </div>
                       )}
                       {prof.runtime === 'cursor' && (
-                        <div className="ui-grid">
+                        <div
+                          className="ui-grid"
+                          style={{ marginTop: '0.75rem', marginBottom: '0.75rem' }}
+                        >
                           <label className="ui-field">
                             <span>Cursor agent 路径</span>
                             <input
                               value={prof.cursorExecutable ?? ''}
                               onChange={(e) =>
                                 updateImRunner(ridx, { cursorExecutable: e.target.value || undefined })
-                              }
-                            />
-                          </label>
-                          <label className="ui-field">
-                            <span>默认模型</span>
-                            <input
-                              value={prof.cursorDefaultModel ?? ''}
-                              onChange={(e) =>
-                                updateImRunner(ridx, { cursorDefaultModel: e.target.value || undefined })
                               }
                             />
                           </label>
@@ -740,191 +996,6 @@ export default function AdminPage() {
                     添加 Runner
                   </button>
                 </div>
-                {spec.channel === 'telegram' ? (
-                  <div className="ui-grid">
-                    <label className="ui-field">
-                      <span>tgBotToken</span>
-                      <input
-                        type="password"
-                        autoComplete="off"
-                        value={spec.tgBotToken ?? ''}
-                        onChange={(e) => updateImBot({ tgBotToken: e.target.value || undefined })}
-                      />
-                    </label>
-                    <label className="ui-field">
-                      <span>tgChatId</span>
-                      <input
-                        value={spec.tgChatId ?? ''}
-                        onChange={(e) => updateImBot({ tgChatId: e.target.value || undefined })}
-                      />
-                    </label>
-                    <label className="ui-field">
-                      <span>tgAllowedUsers（逗号分隔）</span>
-                      <input
-                        value={spec.tgAllowedUsers?.join(',') ?? ''}
-                        onChange={(e) =>
-                          updateImBot({
-                            tgAllowedUsers: e.target.value
-                              .split(',')
-                              .map((s) => s.trim())
-                              .filter(Boolean),
-                          })
-                        }
-                      />
-                    </label>
-                  </div>
-                ) : null}
-                {spec.channel === 'discord' ? (
-                  <div className="ui-grid">
-                    <label className="ui-field">
-                      <span>discordBotToken</span>
-                      <input
-                        type="password"
-                        value={spec.discordBotToken ?? ''}
-                        onChange={(e) =>
-                          updateImBot({ discordBotToken: e.target.value || undefined })
-                        }
-                      />
-                    </label>
-                    <label className="ui-field">
-                      <span>允许的用户 ID（逗号）</span>
-                      <input
-                        value={spec.discordAllowedUsers?.join(',') ?? ''}
-                        onChange={(e) =>
-                          updateImBot({
-                            discordAllowedUsers: e.target.value
-                              .split(',')
-                              .map((s) => s.trim())
-                              .filter(Boolean),
-                          })
-                        }
-                      />
-                    </label>
-                    <label className="ui-field">
-                      <span>允许的频道（逗号）</span>
-                      <input
-                        value={spec.discordAllowedChannels?.join(',') ?? ''}
-                        onChange={(e) =>
-                          updateImBot({
-                            discordAllowedChannels: e.target.value
-                              .split(',')
-                              .map((s) => s.trim())
-                              .filter(Boolean),
-                          })
-                        }
-                      />
-                    </label>
-                    <label className="ui-field">
-                      <span>允许的服务器（逗号）</span>
-                      <input
-                        value={spec.discordAllowedGuilds?.join(',') ?? ''}
-                        onChange={(e) =>
-                          updateImBot({
-                            discordAllowedGuilds: e.target.value
-                              .split(',')
-                              .map((s) => s.trim())
-                              .filter(Boolean),
-                          })
-                        }
-                      />
-                    </label>
-                  </div>
-                ) : null}
-                {spec.channel === 'feishu' ? (
-                  <div className="ui-grid">
-                    <label className="ui-field">
-                      <span>feishuAppId</span>
-                      <input
-                        value={spec.feishuAppId ?? ''}
-                        onChange={(e) => updateImBot({ feishuAppId: e.target.value || undefined })}
-                      />
-                    </label>
-                    <label className="ui-field">
-                      <span>feishuAppSecret</span>
-                      <input
-                        type="password"
-                        value={spec.feishuAppSecret ?? ''}
-                        onChange={(e) =>
-                          updateImBot({ feishuAppSecret: e.target.value || undefined })
-                        }
-                      />
-                    </label>
-                    <label className="ui-field">
-                      <span>feishuDomain</span>
-                      <input
-                        value={spec.feishuDomain ?? ''}
-                        onChange={(e) => updateImBot({ feishuDomain: e.target.value || undefined })}
-                      />
-                    </label>
-                    <label className="ui-field">
-                      <span>允许的用户（逗号）</span>
-                      <input
-                        value={spec.feishuAllowedUsers?.join(',') ?? ''}
-                        onChange={(e) =>
-                          updateImBot({
-                            feishuAllowedUsers: e.target.value
-                              .split(',')
-                              .map((s) => s.trim())
-                              .filter(Boolean),
-                          })
-                        }
-                      />
-                    </label>
-                  </div>
-                ) : null}
-                {spec.channel === 'qq' ? (
-                  <div className="ui-grid">
-                    <label className="ui-field">
-                      <span>qqAppId</span>
-                      <input
-                        value={spec.qqAppId ?? ''}
-                        onChange={(e) => updateImBot({ qqAppId: e.target.value || undefined })}
-                      />
-                    </label>
-                    <label className="ui-field">
-                      <span>qqAppSecret</span>
-                      <input
-                        type="password"
-                        value={spec.qqAppSecret ?? ''}
-                        onChange={(e) => updateImBot({ qqAppSecret: e.target.value || undefined })}
-                      />
-                    </label>
-                    <label className="ui-field">
-                      <span>允许的用户（逗号）</span>
-                      <input
-                        value={spec.qqAllowedUsers?.join(',') ?? ''}
-                        onChange={(e) =>
-                          updateImBot({
-                            qqAllowedUsers: e.target.value
-                              .split(',')
-                              .map((s) => s.trim())
-                              .filter(Boolean),
-                          })
-                        }
-                      />
-                    </label>
-                    <label className="ui-field ui-check">
-                      <input
-                        type="checkbox"
-                        checked={spec.qqImageEnabled !== false}
-                        onChange={(e) => updateImBot({ qqImageEnabled: e.target.checked })}
-                      />
-                      <span>qqImageEnabled</span>
-                    </label>
-                    <label className="ui-field">
-                      <span>qqMaxImageSize</span>
-                      <input
-                        type="number"
-                        value={spec.qqMaxImageSize ?? ''}
-                        onChange={(e) =>
-                          updateImBot({
-                            qqMaxImageSize: e.target.value ? Number(e.target.value) : undefined,
-                          })
-                        }
-                      />
-                    </label>
-                  </div>
-                ) : null}
                 <div
                   style={{
                     marginTop: '1rem',
@@ -1007,10 +1078,8 @@ export default function AdminPage() {
         <p className="ui-muted ui-small" style={{ marginTop: '1rem' }}>
           写入配置中的 CTI_RUNTIME（当前生效值）：<code>{cfg.runtime}</code>
         </p>
-        </div>
-        )}
         <div
-          className="ui-actions-bar"
+          className="ui-actions-bar ui-bridge-panel-actions"
           style={{
             marginTop: '1.25rem',
             paddingTop: '1rem',
@@ -1021,28 +1090,29 @@ export default function AdminPage() {
             alignItems: 'flex-end',
           }}
         >
-          {canSwitchBridges ? (
-            <label className="ui-field" style={{ minWidth: 'min(100%, 280px)' }}>
-              <span>当前桥接（数据目录名）</span>
-              <select
-                value={activeBotName}
-                disabled={switchingBridge || newBridging}
-                onChange={(e) => void switchBridge(e.target.value)}
-              >
-                {bridges.map((b) => (
-                  <option key={b} value={b}>
-                    {b}
-                  </option>
-                ))}
-              </select>
-            </label>
+          {!canSwitchBridges ? (
+            <p className="ui-muted ui-small" style={{ margin: 0, flex: '1 1 200px' }}>
+              已设置 <code>CTI_HOME</code> 时由环境固定目录，无法在此切换多个桥接；未设置时可在上方折叠行切换。
+            </p>
           ) : (
             <p className="ui-muted ui-small" style={{ margin: 0, flex: '1 1 200px' }}>
-              已设置 <code>CTI_HOME</code> 时由环境固定目录，无法在此切换；未设置时可通过下拉在{' '}
-              <code>$CTI_BASE/&lt;名称&gt;</code> 各桥接间切换。
+              切换其他桥接前若有未保存修改将提示确认。
             </p>
           )}
-          <button type="button" className="ui-btn primary" disabled={configLoading || saving || newBridging || switchingBridge} onClick={() => void saveConfig()}>
+          <button
+            type="button"
+            className="ui-btn primary"
+            disabled={
+              !configDirty ||
+              configLoading ||
+              saving ||
+              newBridging ||
+              deletingBridge ||
+              switchingBridge
+            }
+            onClick={() => void saveConfig()}
+            title={!configDirty ? '没有变更' : undefined}
+          >
             {saving ? '保存中…' : '保存 config.env'}
           </button>
           <button type="button" className="ui-btn secondary" disabled={startDisabled} onClick={() => void bridgeAction('start')}>
@@ -1051,7 +1121,28 @@ export default function AdminPage() {
           <button type="button" className="ui-btn secondary" disabled={stopDisabled} onClick={() => void bridgeAction('stop')}>
             停止桥接
           </button>
+          {canSwitchBridges ? (
+            <button
+              type="button"
+              className="ui-btn secondary"
+              disabled={
+                saving || newBridging || deletingBridge || switchingBridge || !activeBotName
+              }
+              onClick={() => void removeBridgeDirectory()}
+            >
+              {deletingBridge ? '正在删除…' : '删除桥接'}
+            </button>
+          ) : null}
         </div>
+                  </div>
+                ) : null}
+              </div>
+            );
+            })}
+          </div>
+        )}
+        </div>
+        )}
       </section>
     </main>
   );

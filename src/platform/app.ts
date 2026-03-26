@@ -2,6 +2,13 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 
 import * as bridgeManager from '../lib/bridge/bridge-manager';
 import {
+  BRIDGE_LOG_APP_BASENAME,
+  BRIDGE_LOG_DAEMON_BASENAME,
+  BRIDGE_LOG_LINES_DEFAULT,
+  BRIDGE_LOG_LINES_MAX,
+  readBridgeLogTail,
+} from '../lib/bridge/bridge-log-file';
+import {
   getBridgeStatusForApi,
   startBridgeDaemonChild,
   stopBridgeDaemonChild,
@@ -174,7 +181,11 @@ export function createPlatformApp(options: CreatePlatformAppOptions): PlatformAp
 
   async function handle(request: Request): Promise<Response> {
     const url = new URL(request.url);
-    const { pathname, searchParams } = url;
+    const searchParams = url.searchParams;
+    let pathname = url.pathname;
+    if (pathname.length > 1 && pathname.endsWith('/')) {
+      pathname = pathname.slice(0, -1);
+    }
     const requestLogger = logger.child({
       method: request.method,
       pathname,
@@ -186,6 +197,26 @@ export function createPlatformApp(options: CreatePlatformAppOptions): PlatformAp
           ok: true,
           bridge: getBridgeStatusForApi(),
           runningInstances: options.instanceManager.listRunningInstanceIds(),
+        });
+      }
+
+      if (request.method === 'GET' && pathname === '/api/bridge/logs') {
+        const raw = parseInt(searchParams.get('lines') || '', 10);
+        const lines =
+          Number.isFinite(raw) && raw > 0
+            ? Math.min(raw, BRIDGE_LOG_LINES_MAX)
+            : BRIDGE_LOG_LINES_DEFAULT;
+        const source = searchParams.get('source')?.trim() ?? 'daemon';
+        const fileBasename =
+          source === 'app' ? BRIDGE_LOG_APP_BASENAME : BRIDGE_LOG_DAEMON_BASENAME;
+        const { text, logPath, missing } = await readBridgeLogTail(lines, fileBasename);
+        return jsonResponse({
+          ok: true,
+          text,
+          logPath,
+          missing,
+          lines,
+          source: source === 'app' ? 'app' : 'daemon',
         });
       }
 

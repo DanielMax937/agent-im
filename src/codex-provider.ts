@@ -53,21 +53,16 @@ export interface CodexProviderConfig {
   apiKeyEnvVars: string[];
   /** Env var name for base URL override. */
   baseUrlEnvVar: string;
-  /** Env var name for the "pass model" flag. */
-  passModelEnvVar: string;
   /** Prefix for log messages (e.g. 'codex-provider'). */
   logPrefix: string;
   /** When set, overrides `CTI_CODEX_USE_LOGIN` for this provider instance. */
   useLogin?: boolean;
-  /** When set, overrides the pass-model env var for this provider instance. */
-  passModel?: boolean;
 }
 
 export const DEFAULT_CODEX_CONFIG: CodexProviderConfig = {
   wrapperPath: CODEX_WRAPPER,
   apiKeyEnvVars: ['CTI_CODEX_API_KEY', 'CODEX_API_KEY', 'OPENAI_API_KEY'],
   baseUrlEnvVar: 'CTI_CODEX_BASE_URL',
-  passModelEnvVar: 'CTI_CODEX_PASS_MODEL',
   logPrefix: 'codex-provider',
 };
 
@@ -179,13 +174,12 @@ export class CodexProvider implements LLMProvider {
             }
 
             const approvalPolicy = toApprovalPolicy(params.permissionMode);
-            const passModel =
-              self.cfg.passModel !== undefined
-                ? self.cfg.passModel
-                : process.env[self.cfg.passModelEnvVar] === 'true';
+            // Always pass resolved model to the SDK; omit Claude-shaped names (migration / stale sessions).
+            const threadModel =
+              params.model && !looksLikeClaudeModel(params.model) ? params.model : undefined;
 
             const threadOptions: Record<string, unknown> = {
-              ...(passModel && params.model ? { model: params.model } : {}),
+              ...(threadModel ? { model: threadModel } : {}),
               ...(params.workingDirectory ? { workingDirectory: params.workingDirectory } : {}),
               skipGitRepoCheck: true,
               approvalPolicy,
@@ -230,6 +224,8 @@ export class CodexProvider implements LLMProvider {
               }
 
               let sawAnyEvent = false;
+              /** Last JSON `error` / `turn.failed` message from Codex stdout (real cause). */
+              let lastCodexStreamError: string | undefined;
               try {
                 const { events } = await thread.runStreamed(input);
 
@@ -273,12 +269,14 @@ export class CodexProvider implements LLMProvider {
 
                     case 'turn.failed': {
                       const error = (event as { message?: string }).message;
+                      if (error) lastCodexStreamError = error;
                       controller.enqueue(sseEvent('error', error || 'Turn failed'));
                       break;
                     }
 
                     case 'error': {
                       const error = (event as { message?: string }).message;
+                      if (error) lastCodexStreamError = error;
                       controller.enqueue(sseEvent('error', error || 'Thread error'));
                       break;
                     }
@@ -294,6 +292,11 @@ export class CodexProvider implements LLMProvider {
                   savedThreadId = undefined;
                   retryFresh = true;
                   continue;
+                }
+                // SDK throws on non-zero exit using stderr only; stderr often shows
+                // "Reading prompt from stdin..." while real failures are JSON on stdout.
+                if (message.includes('Codex Exec exited') && lastCodexStreamError) {
+                  throw new Error(`${message}\n\nCodex reported: ${lastCodexStreamError}`);
                 }
                 throw err;
               }

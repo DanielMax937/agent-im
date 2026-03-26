@@ -41,7 +41,7 @@ $SkillDir   = Split-Path -Parent (Split-Path -Parent $PSCommandPath)
 $RuntimeDir = Join-Path $CtiHome 'runtime'
 $PidFile    = Join-Path $RuntimeDir 'bridge.pid'
 $StatusFile = Join-Path $RuntimeDir 'status.json'
-$LogFile    = Join-Path $CtiHome 'logs' 'bridge.log'
+$LogFile    = Join-Path $CtiHome 'logs' 'bridge-daemon.log'
 $DaemonMjs  = Join-Path $SkillDir 'dist' 'daemon.mjs'
 
 $ServiceName = 'ClaudeToIMBridge'

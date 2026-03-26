@@ -24,6 +24,8 @@ import {
   defaultRunnerIdForChannelType,
 } from './config';
 import { buildImBridgeLlmStack } from './lib/bridge/llm-registry';
+import { BRIDGE_LOG_DAEMON_BASENAME } from './lib/bridge/bridge-log-file';
+import { notifyBridgeClosing } from './lib/bridge/shutdown-notify';
 import { JsonFileStore } from './store';
 import { PendingPermissions } from './permission-gateway';
 import { setupLogger } from './logger';
@@ -62,7 +64,7 @@ function writeStatus(info: StatusInfo): void {
 async function main(): Promise<void> {
   const config = loadConfig();
   syncConfigFileToProcessEnv();
-  setupLogger();
+  setupLogger({ logFileName: BRIDGE_LOG_DAEMON_BASENAME });
 
   const runId = crypto.randomUUID();
   console.log(`[claude-to-im] Starting bridge (run_id: ${runId})`);
@@ -141,6 +143,7 @@ async function main(): Promise<void> {
     const reason = signal ? `signal: ${signal}` : 'shutdown requested';
     console.log(`[claude-to-im] Shutting down (${reason})...`);
     pendingPerms.denyAll();
+    await notifyBridgeClosing(reason);
     await bridgeManager.stop();
     writeStatus({ running: false, lastExitReason: reason });
     process.exit(0);

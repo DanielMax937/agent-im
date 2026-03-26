@@ -12,7 +12,7 @@ fi
 SKILL_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 PID_FILE="$CTI_HOME/runtime/bridge.pid"
 STATUS_FILE="$CTI_HOME/runtime/status.json"
-LOG_FILE="$CTI_HOME/logs/bridge.log"
+LOG_FILE="$CTI_HOME/logs/bridge-daemon.log"
 
 # ── Common helpers ──
 

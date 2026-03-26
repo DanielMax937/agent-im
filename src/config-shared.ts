@@ -4,7 +4,22 @@
  */
 
 /** Single selectable backend for bridge or platform (matches `CTI_RUNTIME` values). */
-export type RuntimeKind = "claude" | "codex" | "cursor" | "auto";
+export type RuntimeKind = "claude" | "codex" | "cursor";
+
+/**
+ * Parse runtime from config JSON / env. Legacy `auto` is treated as `claude`.
+ * Unknown values return null (caller should fall back).
+ */
+export function parseRunnerRuntimeKind(raw: unknown): RuntimeKind | null {
+  if (typeof raw !== "string") return null;
+  if (raw === "codex" || raw === "cursor") return raw;
+  if (raw === "claude" || raw === "auto") return "claude";
+  return null;
+}
+
+export function normalizeRuntimeKind(raw: string | undefined): RuntimeKind {
+  return parseRunnerRuntimeKind(raw) ?? "claude";
+}
 
 /**
  * One **runner** under a single bridge/bot: which CLI/backend handles turns for a chat or task.
@@ -23,12 +38,8 @@ export interface RunnerConfig {
   autoApprove?: boolean;
   /** Claude Code CLI path (overrides CTI_CLAUDE_CODE_EXECUTABLE for this runner). */
   claudeExecutable?: string;
-  /** When true, pass model into Claude SDK (same idea as setting CTI_DEFAULT_MODEL globally). */
-  passModelToCli?: boolean;
   /** Codex: use `codex login` token instead of API keys. */
   codexUseLogin?: boolean;
-  /** Codex: pass model into thread options. */
-  codexPassModel?: boolean;
   /** Codex wrapper path (overrides CTI_CODEX_EXECUTABLE for this runner). */
   codexExecutable?: string;
   /** Cursor `agent` binary path. */
@@ -80,8 +91,6 @@ export interface Config {
   jiraApiToken?: string;
   jiraPollIntervalMs?: number;
   jiraBotAccountId?: string;
-  /** Base URL for approval links (e.g. http://127.0.0.1:3000) */
-  webBaseUrl?: string;
   /**
    * Numbered Agent bridge instances (CTI_AGENT_1_*, …). Written to config.env;
    * use with `syncConfigFileToProcessEnv()` so the agent adapter sees them.
@@ -103,6 +112,10 @@ export interface Config {
 
 /** One IM connection (bot) inside the bridge; see docs/IM_BRIDGE_MULTI_INSTANCE.md */
 export interface ImInstanceSpec {
+  /**
+   * Same as the bridge directory name (`CTI_BOT_NAME` / basename of `CTI_HOME`).
+   * Set automatically on load/save; not user-editable separately from the bridge.
+   */
   id: string;
   channel: ImInstanceChannel;
   enabled?: boolean;
@@ -143,8 +156,6 @@ export interface ImInstanceSpec {
   defaultWorkDir?: string;
   /** Bridge: HTTP proxy (`CTI_PROXY`). */
   proxy?: string;
-  /** Bridge: approval links base (`CTI_WEB_BASE_URL`). */
-  webBaseUrl?: string;
   /** Bridge: default auto-approve tools (`CTI_AUTO_APPROVE`) when set on bot. */
   autoApprove?: boolean;
   /** Bridge: default model (`CTI_DEFAULT_MODEL`). */
@@ -174,5 +185,5 @@ export function normalizeRunners(config: Config): RunnerConfig[] {
   if (config.runners && config.runners.length > 0) {
     return config.runners;
   }
-  return [{ id: "default", runtime: config.runtime, label: "Default" }];
+  return [{ id: "default", runtime: normalizeRuntimeKind(config.runtime), label: "Default" }];
 }

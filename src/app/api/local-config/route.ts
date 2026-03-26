@@ -12,6 +12,7 @@ import {
   configForAdminResponse,
   syncConfigFileToProcessEnv,
   switchActiveBridge,
+  deleteBridge,
   type Config,
 } from '../../../config';
 import { readBridgeDaemonDiskStatus } from '../../../lib/bridge-daemon-status';
@@ -58,7 +59,13 @@ export async function POST(request: Request): Promise<Response> {
     const body = (await request.json().catch(() => ({}))) as {
       newBridge?: boolean;
       switchBridge?: string;
+      deleteBridge?: string;
     };
+    if (typeof body.deleteBridge === 'string' && body.deleteBridge.trim()) {
+      const result = deleteBridge(body.deleteBridge.trim());
+      resetLoggerInstance();
+      return Response.json({ ok: true, ...result });
+    }
     if (typeof body.switchBridge === 'string' && body.switchBridge.trim()) {
       const result = switchActiveBridge(body.switchBridge.trim());
       resetLoggerInstance();
@@ -70,7 +77,11 @@ export async function POST(request: Request): Promise<Response> {
       return Response.json({ ok: true, ...result });
     }
     return Response.json(
-      { ok: false, error: 'Unsupported body; use { "newBridge": true } or { "switchBridge": "<slug>" }' },
+      {
+        ok: false,
+        error:
+          'Unsupported body; use { "newBridge": true }, { "switchBridge": "<slug>" }, or { "deleteBridge": "<slug>" }',
+      },
       { status: 400 },
     );
   } catch (error) {

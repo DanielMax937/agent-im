@@ -10,7 +10,7 @@ if [ -z "${CTI_HOME:-}" ]; then
 fi
 CONFIG_FILE="$CTI_HOME/config.env"
 PID_FILE="$CTI_HOME/runtime/bridge.pid"
-LOG_FILE="$CTI_HOME/logs/bridge.log"
+LOG_FILE="$CTI_HOME/logs/bridge-daemon.log"
 
 PASS=0
 FAIL=0

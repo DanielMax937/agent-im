@@ -170,27 +170,32 @@ describe('configToSettings', () => {
   });
 
   it('maps imBot to bridge_telegram_instances and token keys', () => {
-    const m = configToSettings({
-      ...base,
-      enabledChannels: ['telegram'],
-      imBot: {
-        id: 'work',
-        channel: 'telegram',
-        tgBotToken: 'bot:secret',
-        tgAllowedUsers: ['1'],
+    process.env.CTI_BOT_NAME = 'work';
+    try {
+      const m = configToSettings({
+        ...base,
+        enabledChannels: ['telegram'],
+        imBot: {
+          id: 'work',
+          channel: 'telegram',
+          tgBotToken: 'bot:secret',
+          tgAllowedUsers: ['1'],
+          runners: [
+            { id: 'default', runtime: 'claude' },
+            { id: 'codex', runtime: 'codex' },
+          ],
+        },
         runners: [
           { id: 'default', runtime: 'claude' },
           { id: 'codex', runtime: 'codex' },
         ],
-      },
-      runners: [
-        { id: 'default', runtime: 'claude' },
-        { id: 'codex', runtime: 'codex' },
-      ],
-    });
-    assert.equal(m.get('bridge_telegram_instances'), 'work');
-    assert.equal(m.get('telegram_work_bot_token'), 'bot:secret');
-    assert.equal(m.has('bridge_telegram_work_allowed_runner_ids'), false);
+      });
+      assert.equal(m.get('bridge_telegram_instances'), 'work');
+      assert.equal(m.get('telegram_work_bot_token'), 'bot:secret');
+      assert.equal(m.has('bridge_telegram_work_allowed_runner_ids'), false);
+    } finally {
+      delete process.env.CTI_BOT_NAME;
+    }
   });
 });
 
@@ -208,6 +213,14 @@ describe('mergeConfigPatch imBot', () => {
       tgBotToken: 'old-token',
     },
   };
+
+  beforeEach(() => {
+    process.env.CTI_BOT_NAME = 'test-bridge';
+  });
+
+  afterEach(() => {
+    delete process.env.CTI_BOT_NAME;
+  });
 
   it('clears imBot when patch sends null', () => {
     const next = mergeConfigPatch(base, {
@@ -244,7 +257,6 @@ describe('mergeConfigPatch imBot', () => {
     } as Parameters<typeof mergeConfigPatch>[1]);
     assert.equal(next.imBot, undefined);
     assert.equal(next.proxy, undefined);
-    assert.equal(next.webBaseUrl, undefined);
     assert.equal(next.defaultMode, 'code');
     assert.equal(next.autoApprove, false);
     assert.equal(next.defaultModel, undefined);
@@ -285,6 +297,7 @@ describe('mergeConfigPatch imBot', () => {
       imBot: { id: 'a', channel: 'telegram', tgBotToken: 'brand-new' },
     });
     assert.equal(next.imBot?.tgBotToken, 'brand-new');
+    assert.equal(next.imBot?.id, 'test-bridge');
   });
 
   it('fills per-bot runners from global CTI_RUNNERS when omitted', () => {

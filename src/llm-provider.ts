@@ -112,7 +112,7 @@ export function buildSubprocessEnv(): NodeJS.ProcessEnv {
       // Pass through CTI_* so skill config is available
       if (k.startsWith('CTI_')) { out[k] = v; continue; }
     }
-    // Always pass through ANTHROPIC_* in claude/auto runtime —
+    // Always pass through ANTHROPIC_* in claude runtime —
     // third-party API providers need these to reach the CLI subprocess.
     const runtime = process.env.CTI_RUNTIME || 'claude';
     if (runtime === 'claude' || runtime === 'auto') {
@@ -121,7 +121,7 @@ export function buildSubprocessEnv(): NodeJS.ProcessEnv {
       }
     }
 
-    // In codex/auto mode, pass through OPENAI_* / CODEX_* env vars
+    // In codex/cursor mode, pass through OPENAI_* / CODEX_* env vars
     if (runtime === 'codex' || runtime === 'cursor' || runtime === 'auto') {
       for (const [k, v] of Object.entries(process.env)) {
         if (v !== undefined && (k.startsWith('OPENAI_') || k.startsWith('CODEX_') || k.startsWith('CURSOR_'))) out[k] = v;
@@ -437,24 +437,20 @@ export interface StreamState {
 export class SDKLLMProvider implements LLMProvider {
   private cliPath: string | undefined;
   private autoApprove: boolean;
-  private passModelToCli: boolean;
 
   constructor(
     private pendingPerms: PendingPermissions,
     cliPath?: string,
     autoApprove = false,
-    passModelToCli = false,
   ) {
     this.cliPath = cliPath;
     this.autoApprove = autoApprove;
-    this.passModelToCli = passModelToCli;
   }
 
   streamChat(params: StreamChatParams): ReadableStream<string> {
     const pendingPerms = this.pendingPerms;
     const cliPath = this.cliPath;
     const autoApprove = this.autoApprove;
-    const passModelToCli = this.passModelToCli;
 
     return new ReadableStream({
       start(controller) {
@@ -472,16 +468,6 @@ export class SDKLLMProvider implements LLMProvider {
             let model = params.model;
             if (isNonClaudeModel(model)) {
               console.warn(`[llm-provider] Ignoring non-Claude model "${model}", using CLI default`);
-              model = undefined;
-            }
-
-            // Only pass model to CLI if explicitly configured via CTI_DEFAULT_MODEL
-            // or per-runner passModelToCli.
-            // Letting the CLI choose its own default avoids exit-code-1 failures
-            // when a stored model is inaccessible on the current machine/plan.
-            const passModel = passModelToCli || !!process.env.CTI_DEFAULT_MODEL;
-            if (model && !passModel) {
-              console.log(`[llm-provider] Skipping model "${model}", using CLI default (set CTI_DEFAULT_MODEL to override)`);
               model = undefined;
             }
 
@@ -549,20 +535,27 @@ export class SDKLLMProvider implements LLMProvider {
             controller.close();
           } catch (err) {
             const message = err instanceof Error ? err.message : String(err);
-            console.error('[llm-provider] SDK query error:', err instanceof Error ? err.stack || err.message : err);
-            if (stderrBuf) {
-              console.error('[llm-provider] stderr from CLI:', stderrBuf.trim());
-            }
-
             const isTransportExit = message.includes('process exited with code');
 
             // ── Case 1: Result already received ──
-            // The SDK delivered a proper result (success or structured error).
-            // A trailing "process exited with code 1" is transport teardown noise.
+            // The SDK throws when the CLI exits non-zero (see ProcessTransport
+            // getProcessExitError in claude-agent-sdk). The child often exits
+            // with code 1 after stdin closes even though JSON stream already
+            // delivered a `result` — not a failed turn. Avoid level-50 noise.
             if (state.hasReceivedResult && isTransportExit) {
-              console.log('[llm-provider] Suppressing transport error — result already received');
+              const stderrNote = stderrBuf.trim()
+                ? ` CLI stderr (tail): ${stderrBuf.trim().slice(-500)}`
+                : '';
+              console.log(
+                `[llm-provider] Claude CLI exited after successful result (non-zero exit is normal teardown here; turn already completed).${stderrNote}`,
+              );
               controller.close();
               return;
+            }
+
+            console.error('[llm-provider] SDK query error:', err instanceof Error ? err.stack || err.message : err);
+            if (stderrBuf) {
+              console.error('[llm-provider] stderr from CLI:', stderrBuf.trim());
             }
 
             // ── Case 2: Recognised business error in assistant text ──

@@ -121,7 +121,6 @@ describe('InstanceManager', () => {
     const manager = InstanceManager.getInstance({
       store,
       jiraClientFactory: () => jiraClient,
-      approvalBaseUrl: 'http://localhost:8787',
       providerFactory: async (_instance, pendingPermissions) => ({
         streamChat() {
           return new ReadableStream<string>({

@@ -17,7 +17,11 @@ import type {
   RunnerConfig,
   RuntimeKind,
 } from "./config-shared";
-import { normalizeRunners } from "./config-shared";
+import {
+  normalizeRunners,
+  normalizeRuntimeKind,
+  parseRunnerRuntimeKind,
+} from "./config-shared";
 
 export type {
   AgentEnvSlot,
@@ -27,7 +31,11 @@ export type {
   RunnerConfig,
   RuntimeKind,
 } from "./config-shared";
-export { normalizeRunners } from "./config-shared";
+export {
+  normalizeRunners,
+  normalizeRuntimeKind,
+  parseRunnerRuntimeKind,
+} from "./config-shared";
 
 /** Base directory for per-bot homes: `~/.claude-to-im` unless `CTI_BASE` is set. */
 export const CTI_BASE_DIR =
@@ -132,6 +140,9 @@ export function canSwitchBridgesViaRegistry(): boolean {
   return !process.env.CTI_HOME?.trim();
 }
 
+/** Known internal subdirectory names that should never be treated as bridge homes. */
+const BRIDGE_INTERNAL_SUBDIRS = new Set(['data', 'logs', 'runtime', 'store']);
+
 /**
  * Subdirectories of `CTI_BASE_DIR` whose names match the bot slug pattern (existing bridge homes).
  */
@@ -149,6 +160,7 @@ export function listBridgeSlugs(): string[] {
     const name = e.name;
     if (name.startsWith(".")) continue;
     if (!IM_INSTANCE_ID_RE.test(name)) continue;
+    if (BRIDGE_INTERNAL_SUBDIRS.has(name)) continue;
     names.push(name);
   }
   return names.sort((a, b) => a.localeCompare(b));
@@ -182,11 +194,65 @@ export function switchActiveBridge(slug: string): { ctiHome: string; configPath:
   return { ctiHome: getCtiHome(), configPath: getConfigPath(), botName: t };
 }
 
+/**
+ * Remove a bridge home under `CTI_BASE_DIR/<slug>`. If the active bridge is removed,
+ * switches to another existing slug or creates a new empty bridge.
+ * Not available when `CTI_HOME` is set.
+ */
+export function deleteBridge(slug: string): { ctiHome: string; configPath: string; botName: string } {
+  if (process.env.CTI_HOME?.trim()) {
+    throw new Error(
+      "已设置 CTI_HOME 时无法使用「删除桥接」：请移除 CTI_HOME 或手动删除目录。",
+    );
+  }
+  const t = slug.trim();
+  if (!t || !IM_INSTANCE_ID_RE.test(t)) {
+    throw new Error("无效的桥接标识。");
+  }
+  if (BRIDGE_INTERNAL_SUBDIRS.has(t)) {
+    throw new Error("无效的桥接标识。");
+  }
+  const home = path.join(CTI_BASE_DIR, t);
+  let st: ReturnType<typeof fs.statSync>;
+  try {
+    st = fs.statSync(home);
+  } catch {
+    throw new Error(`未找到桥接目录：${t}`);
+  }
+  if (!st.isDirectory()) {
+    throw new Error(`不是目录：${t}`);
+  }
+
+  const active = process.env.CTI_BOT_NAME?.trim();
+  const wasActive = active === t;
+
+  fs.rmSync(home, { recursive: true, force: true });
+
+  if (!wasActive) {
+    return {
+      ctiHome: getCtiHome(),
+      configPath: getConfigPath(),
+      botName: getCtiBotDisplayName(),
+    };
+  }
+
+  const remaining = listBridgeSlugs();
+  if (remaining.length > 0) {
+    return switchActiveBridge(remaining[0]);
+  }
+  return createNewBridge();
+}
+
 /** Display label: explicit CTI_BOT_NAME, or basename of resolved home. */
 export function getCtiBotDisplayName(): string {
   const fromEnv = process.env.CTI_BOT_NAME?.trim();
   if (fromEnv) return fromEnv;
   return path.basename(getCtiHome());
+}
+
+/** IM routing / store instance id — always the active bridge name (same as {@link getCtiBotDisplayName}). */
+export function getImBotInstanceId(): string {
+  return getCtiBotDisplayName();
 }
 const IM_INSTANCE_CHANNELS: ImInstanceChannel[] = ["telegram", "discord", "feishu", "qq"];
 const IM_BASE_CHANNEL_SET = new Set<string>(IM_INSTANCE_CHANNELS);
@@ -232,19 +298,18 @@ function pickRunnerModeRow(o: Record<string, unknown>): "code" | "plan" | "ask" 
 export function runnerFromRow(o: Record<string, unknown>): RunnerConfig | null {
   const id = o.id;
   const rt = o.runtime;
-  if (typeof id !== "string" || typeof rt !== "string") return null;
-  if (!["claude", "codex", "cursor", "auto"].includes(rt)) return null;
+  if (typeof id !== "string") return null;
+  const runtime = parseRunnerRuntimeKind(rt);
+  if (runtime === null) return null;
   return {
     id,
-    runtime: rt as RuntimeKind,
+    runtime,
     label: pickRunnerStrRow(o, "label"),
     defaultModel: pickRunnerStrRow(o, "defaultModel"),
     defaultMode: pickRunnerModeRow(o),
     autoApprove: pickRunnerBoolRow(o, "autoApprove"),
     claudeExecutable: pickRunnerStrRow(o, "claudeExecutable"),
-    passModelToCli: pickRunnerBoolRow(o, "passModelToCli"),
     codexUseLogin: pickRunnerBoolRow(o, "codexUseLogin"),
-    codexPassModel: pickRunnerBoolRow(o, "codexPassModel"),
     codexExecutable: pickRunnerStrRow(o, "codexExecutable"),
     cursorExecutable: pickRunnerStrRow(o, "cursorExecutable"),
     cursorDefaultModel: pickRunnerStrRow(o, "cursorDefaultModel"),
@@ -263,9 +328,7 @@ function parseRunnersField(raw: unknown): RunnerConfig[] | undefined {
 }
 
 function imInstanceSpecFromRow(o: Record<string, unknown>): ImInstanceSpec | null {
-  const id = o.id;
   const channel = o.channel;
-  if (typeof id !== "string" || !IM_INSTANCE_ID_RE.test(id)) return null;
   if (
     typeof channel !== "string" ||
     !IM_INSTANCE_CHANNELS.includes(channel as ImInstanceChannel)
@@ -273,6 +336,12 @@ function imInstanceSpecFromRow(o: Record<string, unknown>): ImInstanceSpec | nul
     return null;
   }
   const ch = channel as ImInstanceChannel;
+  const rawId = o.id;
+  const id =
+    typeof rawId === "string" && IM_INSTANCE_ID_RE.test(rawId.trim())
+      ? rawId.trim()
+      : getCtiBotDisplayName();
+  if (!IM_INSTANCE_ID_RE.test(id)) return null;
   return {
     id,
     channel: ch,
@@ -329,7 +398,6 @@ function imInstanceSpecFromRow(o: Record<string, unknown>): ImInstanceSpec | nul
     defaultWorkDir:
       typeof o.defaultWorkDir === "string" ? o.defaultWorkDir : undefined,
     proxy: typeof o.proxy === "string" ? o.proxy : undefined,
-    webBaseUrl: typeof o.webBaseUrl === "string" ? o.webBaseUrl : undefined,
     autoApprove: o.autoApprove === undefined ? undefined : Boolean(o.autoApprove),
     defaultModel: typeof o.defaultModel === "string" ? o.defaultModel : undefined,
     defaultMode: typeof o.defaultMode === "string" ? o.defaultMode : undefined,
@@ -371,9 +439,9 @@ function applyImBotToSettings(m: Map<string, string>, config: Config): void {
   if (!spec) return;
   const ch = spec.channel;
   const base = ch as ImBaseChannel;
-  m.set(`bridge_${base}_instances`, spec.id);
+  const id = getImBotInstanceId();
+  m.set(`bridge_${base}_instances`, id);
   m.set(`bridge_${base}_enabled`, spec.enabled !== false ? "true" : "false");
-  const id = spec.id;
   const en = spec.enabled !== false;
   m.set(imScopedStoreKey(base, id, `bridge_${base}_enabled`), en ? "true" : "false");
 
@@ -578,8 +646,12 @@ export function findImInstanceSpec(
   instanceId: string,
 ): ImInstanceSpec | undefined {
   const bot = config.imBot;
-  if (!bot || bot.channel !== base || bot.id !== instanceId) return undefined;
-  return bot;
+  if (!bot || bot.channel !== base) return undefined;
+  const bridgeId = getImBotInstanceId();
+  if (instanceId === "default") return bot;
+  if (instanceId === bridgeId) return bot;
+  if (bot.id && instanceId === bot.id) return bot;
+  return undefined;
 }
 
 /** Runners for one IM bot: embedded list, or bridge-level `CTI_RUNNERS` fallback. */
@@ -633,7 +705,7 @@ export function collectImLlmBuildEntries(
     return out;
   }
   const spec = config.imBot;
-  const keyPrefix = `${spec.channel}:${spec.id}`;
+  const keyPrefix = `${spec.channel}:${getImBotInstanceId()}`;
   for (const r of normalizeRunnersForInstance(spec, config)) {
     out.push({ keyPrefix, runner: r });
   }
@@ -647,7 +719,7 @@ export function defaultImLlmCompositeKey(config: Config): string {
     return `__legacy__\0${id}`;
   }
   const spec = config.imBot;
-  const ct = `${spec.channel}:${spec.id}`;
+  const ct = `${spec.channel}:${getImBotInstanceId()}`;
   const eff = defaultRunnerIdForChannelType(config, ct) ?? id;
   return `${ct}\0${eff}`;
 }
@@ -657,7 +729,7 @@ export function resolveEffectiveRuntime(config: Config): RuntimeKind {
   const runners = normalizeRunners(config);
   const id = config.defaultRunnerId ?? runners[0]?.id;
   const p = runners.find((x) => x.id === id) ?? runners[0];
-  return p?.runtime ?? config.runtime;
+  return normalizeRuntimeKind(p?.runtime ?? config.runtime);
 }
 
 /** Effective runtime for a platform agent instance (runner id overrides stored `runtime`). */
@@ -667,10 +739,9 @@ export function resolveRuntimeForPlatformInstance(
 ): RuntimeKind {
   if (instance.runtimeProfileId) {
     const p = normalizeRunners(config).find((x) => x.id === instance.runtimeProfileId);
-    if (p) return p.runtime;
+    if (p) return normalizeRuntimeKind(p.runtime);
   }
-  const r = instance.runtime as RuntimeKind;
-  return ["claude", "codex", "cursor", "auto"].includes(r) ? r : "claude";
+  return normalizeRuntimeKind(instance.runtime);
 }
 
 function splitCsv(value: string | undefined): string[] | undefined {
@@ -689,10 +760,7 @@ function applyImBotToFlatConfig(c: Config): void {
     c.defaultWorkDir = b.defaultWorkDir;
   }
   if (b.proxy !== undefined) c.proxy = b.proxy;
-  if (b.webBaseUrl !== undefined) c.webBaseUrl = b.webBaseUrl;
   if (b.autoApprove !== undefined) c.autoApprove = b.autoApprove;
-  if (b.defaultModel !== undefined) c.defaultModel = b.defaultModel;
-  if (b.defaultMode !== undefined) c.defaultMode = b.defaultMode;
   c.runners = normalizeRunners(c).map((x) => ({ ...x }));
   if (b.defaultRunnerId) c.defaultRunnerId = b.defaultRunnerId;
 }
@@ -721,9 +789,6 @@ function stripFlatFieldsMirroredFromRemovedImBot(prev: Config, next: Config): vo
   if (b.proxy !== undefined && next.proxy === b.proxy) {
     next.proxy = undefined;
   }
-  if (b.webBaseUrl !== undefined && next.webBaseUrl === b.webBaseUrl) {
-    next.webBaseUrl = undefined;
-  }
   if (b.autoApprove !== undefined && next.autoApprove === b.autoApprove) {
     next.autoApprove = false;
   }
@@ -747,8 +812,8 @@ export function loadConfig(): Config {
     // Config file doesn't exist yet — use defaults
   }
 
-  const rawRuntime = env.get("CTI_RUNTIME") || "claude";
-  const runtime = (["claude", "codex", "cursor", "auto"].includes(rawRuntime) ? rawRuntime : "claude") as Config["runtime"];
+  const rawRuntime = env.get("CTI_RUNTIME")?.trim() || "claude";
+  const runtime = normalizeRuntimeKind(rawRuntime);
 
   const runners = parseRunnerJsonArray(env.get("CTI_RUNNERS"));
   const defaultRunnerId = env.get("CTI_DEFAULT_RUNNER")?.trim() || undefined;
@@ -799,7 +864,6 @@ export function loadConfig(): Config {
       ? Number(env.get("CTI_JIRA_POLL_INTERVAL_MS"))
       : undefined,
     jiraBotAccountId: env.get("CTI_JIRA_BOT_ACCOUNT_ID") || undefined,
-    webBaseUrl: env.get("CTI_WEB_BASE_URL") || undefined,
     agentEnvSlots: parseAgentSlotsFromEnv(env),
     runners,
     defaultRunnerId,
@@ -838,10 +902,11 @@ export function saveConfig(config: Config): void {
     effectiveEnabledChannels(config).join(",")
   );
   out += formatEnvLine("CTI_DEFAULT_WORKDIR", config.defaultWorkDir);
-  if (config.defaultModel) out += formatEnvLine("CTI_DEFAULT_MODEL", config.defaultModel);
-  out += formatEnvLine("CTI_DEFAULT_MODE", config.defaultMode);
+  if (!config.imBot) {
+    if (config.defaultModel) out += formatEnvLine("CTI_DEFAULT_MODEL", config.defaultModel);
+    out += formatEnvLine("CTI_DEFAULT_MODE", config.defaultMode);
+  }
   out += formatEnvLine("CTI_AUTO_APPROVE", config.autoApprove ? "true" : "");
-  out += formatEnvLine("CTI_WEB_BASE_URL", config.webBaseUrl);
   out += formatEnvLine("CTI_JIRA_BASE_URL", config.jiraBaseUrl);
   out += formatEnvLine("CTI_JIRA_EMAIL", config.jiraEmail);
   out += formatEnvLine("CTI_JIRA_API_TOKEN", config.jiraApiToken);
@@ -1002,6 +1067,11 @@ export function mergeConfigPatch(
         feishuAppSecret: mergeImSecret(spec.feishuAppSecret, prevSpec?.feishuAppSecret),
         qqAppSecret: mergeImSecret(spec.qqAppSecret, prevSpec?.qqAppSecret),
       };
+      delete next.imBot.enabled;
+      delete next.imBot.defaultModel;
+      delete next.imBot.defaultMode;
+      next.defaultModel = undefined;
+      next.imBot.id = getImBotInstanceId();
     }
   }
   applyImBotToFlatConfig(next);

@@ -3,6 +3,7 @@ import path from 'node:path';
 import pino, { multistream, type Logger } from 'pino';
 
 import { getCtiHome } from './config';
+import { BRIDGE_LOG_APP_BASENAME } from './lib/bridge/bridge-log-file';
 
 const MASK_PATTERNS: RegExp[] = [
   /(?:token|secret|password|api_key)["']?\s*[:=]\s*["']?([^\s"',]+)/gi,
@@ -23,9 +24,12 @@ export function maskSecrets(text: string): string {
 }
 
 let loggerInstance: Logger | null = null;
+/** First `setupLogger` wins for this process (Next → bridge.log; daemon → bridge-daemon.log). */
+let logFileBasename: string | null = null;
 
 export function resetLoggerInstance(): void {
   loggerInstance = null;
+  logFileBasename = null;
 }
 let consolePatched = false;
 
@@ -57,7 +61,8 @@ function maskValue(value: unknown): unknown {
 
 function createLogger(): Logger {
   const logDir = path.join(getCtiHome(), 'logs');
-  const logPath = path.join(logDir, 'bridge.log');
+  const basename = logFileBasename ?? BRIDGE_LOG_APP_BASENAME;
+  const logPath = path.join(logDir, basename);
   fs.mkdirSync(logDir, { recursive: true });
   const fileDestination = pino.destination({
     dest: logPath,
@@ -100,7 +105,15 @@ export function getLogger(): Logger {
   return loggerInstance;
 }
 
-export function setupLogger(): Logger {
+export interface SetupLoggerOptions {
+  /** Default `bridge.log` (Next). Use `bridge-daemon.log` for `src/main.ts` only. */
+  logFileName?: string;
+}
+
+export function setupLogger(opts?: SetupLoggerOptions): Logger {
+  if (!loggerInstance && opts?.logFileName?.trim()) {
+    logFileBasename = opts.logFileName.trim();
+  }
   const logger = getLogger();
   if (consolePatched) return logger;
 

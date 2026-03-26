@@ -30,7 +30,6 @@ export async function resolveProvider({
 }: ResolveProviderOptions): Promise<LLMProvider> {
   const runtime = runtimeOverride ?? config.runtime;
   const autoApprove = resolveAutoApprove(config, autoApproveOverride, runner);
-  const passModelToCli = runner?.passModelToCli ?? false;
 
   if (runtime === 'codex') {
     const { CodexProvider, DEFAULT_CODEX_CONFIG } = await import('./codex-provider');
@@ -42,7 +41,6 @@ export async function resolveProvider({
       ...DEFAULT_CODEX_CONFIG,
       wrapperPath,
       useLogin: runner?.codexUseLogin,
-      passModel: runner?.codexPassModel,
     });
   }
 
@@ -50,36 +48,7 @@ export async function resolveProvider({
     const { CursorProvider } = await import('./cursor-provider');
     return new CursorProvider(undefined, {
       agentPath: runner?.cursorExecutable,
-      defaultModel: runner?.cursorDefaultModel,
-    });
-  }
-
-  if (runtime === 'auto') {
-    const cliPath = resolveClaudeCliPathFromRunner(runner);
-    if (cliPath) {
-      const check = preflightCheck(cliPath);
-      if (check.ok) {
-        console.log(`[claude-to-im] Auto: using Claude CLI at ${cliPath} (${check.version})`);
-        return new SDKLLMProvider(pendingPermissions, cliPath, autoApprove, passModelToCli);
-      }
-      console.warn(
-        `[claude-to-im] Auto: Claude CLI at ${cliPath} failed preflight: ${check.error}\n` +
-          '  Falling back to Codex.',
-      );
-    } else {
-      console.log('[claude-to-im] Auto: Claude CLI not found, falling back to Codex');
-    }
-
-    const { CodexProvider, DEFAULT_CODEX_CONFIG } = await import('./codex-provider');
-    const wrapperPath =
-      runner?.codexExecutable?.trim() ||
-      process.env.CTI_CODEX_EXECUTABLE ||
-      DEFAULT_CODEX_CONFIG.wrapperPath;
-    return new CodexProvider(pendingPermissions, {
-      ...DEFAULT_CODEX_CONFIG,
-      wrapperPath,
-      useLogin: runner?.codexUseLogin,
-      passModel: runner?.codexPassModel,
+      defaultModel: runner?.cursorDefaultModel ?? runner?.defaultModel,
     });
   }
 
@@ -95,10 +64,10 @@ export async function resolveProvider({
   if (!check.ok) {
     throw new Error(
       `Claude CLI preflight check failed for ${cliPath}: ${check.error}. ` +
-        'Install Claude Code CLI >= 2.x, set CTI_CLAUDE_CODE_EXECUTABLE, or use CTI_RUNTIME=auto.',
+        'Install Claude Code CLI >= 2.x, or set CTI_CLAUDE_CODE_EXECUTABLE.',
     );
   }
 
   console.log(`[claude-to-im] CLI preflight OK: ${cliPath} (${check.version})`);
-  return new SDKLLMProvider(pendingPermissions, cliPath, autoApprove, passModelToCli);
+  return new SDKLLMProvider(pendingPermissions, cliPath, autoApprove);
 }

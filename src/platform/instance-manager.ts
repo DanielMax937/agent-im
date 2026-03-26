@@ -31,7 +31,6 @@ interface InstanceManagerDeps {
   store: JsonPlatformStore;
   providerFactory?: ProviderFactory;
   jiraClientFactory?: JiraClientFactory;
-  approvalBaseUrl?: string;
 }
 
 class TaskAgentRunner implements ManagedRunner {
@@ -46,7 +45,6 @@ class TaskAgentRunner implements ManagedRunner {
     private readonly instanceId: string,
     private readonly providerFactory: ProviderFactory,
     private readonly jiraClientFactory?: JiraClientFactory,
-    private readonly approvalBaseUrl?: string,
   ) {}
 
   isRunning(): boolean {
@@ -233,8 +231,7 @@ class TaskAgentRunner implements ManagedRunner {
   }
 
   private getApprovalUrl(permissionRequestId: string): string {
-    const baseUrl = this.approvalBaseUrl?.replace(/\/$/, '') || '';
-    return `${baseUrl}/api/approvals/${permissionRequestId}`;
+    return `/api/approvals/${permissionRequestId}`;
   }
 
   private requireInstance(): AgentInstanceRecord {
@@ -360,7 +357,6 @@ export class InstanceManager {
       instanceId,
       this.providerFactory,
       this.deps.jiraClientFactory,
-      this.deps.approvalBaseUrl,
     );
     this.runners.set(instanceId, runner);
     await runner.start();

@@ -245,7 +245,7 @@ describe('CodexProvider', () => {
     assert.equal(chunks.length, 0);
   });
 
-  it('does not pass model by default and skips stale Claude resume id', async () => {
+  it('does not pass Claude-shaped model to Codex thread and skips stale Claude resume id', async () => {
     const { CodexProvider } = await import('../codex-provider');
     const { PendingPermissions } = await import('../permission-gateway');
     const provider = new CodexProvider(new PendingPermissions());
@@ -287,48 +287,38 @@ describe('CodexProvider', () => {
     assert.equal(resumeCalls, 0, 'Should skip resume for stale Claude-model session in Codex runtime');
     assert.equal(startCalls, 1, 'Should start a fresh Codex thread');
     assert.ok(capturedStartOptions, 'startThread options should be captured');
-    assert.ok(!Object.prototype.hasOwnProperty.call(capturedStartOptions!, 'model'), 'Model should not be forwarded by default');
+    assert.ok(!Object.prototype.hasOwnProperty.call(capturedStartOptions!, 'model'), 'Claude-shaped model should not be sent to Codex thread');
   });
 
-  it('passes model only when CTI_CODEX_PASS_MODEL=true', async () => {
-    const old = process.env.CTI_CODEX_PASS_MODEL;
-    process.env.CTI_CODEX_PASS_MODEL = 'true';
-    try {
-      const { CodexProvider } = await import('../codex-provider');
-      const { PendingPermissions } = await import('../permission-gateway');
-      const provider = new CodexProvider(new PendingPermissions());
+  it('forwards non-Claude model to Codex thread options', async () => {
+    const { CodexProvider } = await import('../codex-provider');
+    const { PendingPermissions } = await import('../permission-gateway');
+    const provider = new CodexProvider(new PendingPermissions());
 
-      let capturedStartOptions: Record<string, unknown> | undefined;
-      const mockThread = {
-        runStreamed: () => ({
-          events: (async function* () {
-            yield { type: 'turn.completed', usage: { input_tokens: 1, output_tokens: 1, cached_input_tokens: 0 } };
-          })(),
-        }),
-      };
-      (provider as any).sdk = { Codex: class { constructor() {} } };
-      (provider as any).codex = {
-        startThread: (opts: Record<string, unknown>) => {
-          capturedStartOptions = opts;
-          return mockThread;
-        },
-      };
+    let capturedStartOptions: Record<string, unknown> | undefined;
+    const mockThread = {
+      runStreamed: () => ({
+        events: (async function* () {
+          yield { type: 'turn.completed', usage: { input_tokens: 1, output_tokens: 1, cached_input_tokens: 0 } };
+        })(),
+      }),
+    };
+    (provider as any).sdk = { Codex: class { constructor() {} } };
+    (provider as any).codex = {
+      startThread: (opts: Record<string, unknown>) => {
+        capturedStartOptions = opts;
+        return mockThread;
+      },
+    };
 
-      const stream = provider.streamChat({
-        prompt: 'hello',
-        sessionId: 'model-forward-session',
-        model: 'gpt-5-codex',
-      });
-      await collectStream(stream);
+    const stream = provider.streamChat({
+      prompt: 'hello',
+      sessionId: 'model-forward-session',
+      model: 'gpt-5-codex',
+    });
+    await collectStream(stream);
 
-      assert.equal(capturedStartOptions?.model, 'gpt-5-codex');
-    } finally {
-      if (old === undefined) {
-        delete process.env.CTI_CODEX_PASS_MODEL;
-      } else {
-        process.env.CTI_CODEX_PASS_MODEL = old;
-      }
-    }
+    assert.equal(capturedStartOptions?.model, 'gpt-5-codex');
   });
 
   it('retries with fresh thread when resume fails before any events', async () => {

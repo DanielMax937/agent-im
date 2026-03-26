@@ -142,6 +142,31 @@ export function updateBinding(
 }
 
 /**
+ * Point this chat at a new CodePilot session and clear SDK resume state.
+ * Call when the effective runner changes so the next turn does not resume a
+ * stale CLI thread from the previous backend (avoids "No conversation found" errors).
+ */
+export function recreateBindingSession(binding: ChannelBinding): void {
+  const { store } = getBridgeContext();
+  const cwd =
+    binding.workingDirectory ||
+    store.getSetting('bridge_default_work_dir') ||
+    process.env.HOME ||
+    '';
+  const session = store.createSession(
+    `Bridge: ${binding.chatId}`,
+    binding.model || '',
+    undefined,
+    cwd,
+    binding.mode,
+  );
+  store.updateChannelBinding(binding.id, {
+    codepilotSessionId: session.id,
+    sdkSessionId: '',
+  });
+}
+
+/**
  * List all bindings, optionally filtered by channel type.
  */
 export function listBindings(channelType?: ChannelType): ChannelBinding[] {

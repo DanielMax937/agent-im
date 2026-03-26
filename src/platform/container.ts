@@ -69,7 +69,6 @@ async function createPlatformContainer(): Promise<PlatformContainer> {
   const store = new JsonPlatformStore();
   const instanceManager = InstanceManager.getInstance({
     store,
-    approvalBaseUrl: process.env.CTI_WEB_BASE_URL,
   });
   const workflowService = new WorkflowService({
     store,
