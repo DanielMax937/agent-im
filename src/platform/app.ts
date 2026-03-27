@@ -13,6 +13,7 @@ import {
   startBridgeDaemonChild,
   stopBridgeDaemonChild,
 } from '../lib/bridge-app-child';
+import { getCtiHomeForBridgeSlug } from '../config';
 import { getLogger } from '../logger';
 import type {
   PendingApprovalRecord,
@@ -412,17 +413,26 @@ export function createPlatformApp(options: CreatePlatformAppOptions): PlatformAp
       }
 
       if (request.method === 'GET' && pathname === '/api/bridge/status') {
-        return jsonResponse(getBridgeStatusForApi());
+        const slug = searchParams.get('slug')?.trim();
+        const home = slug ? getCtiHomeForBridgeSlug(slug) : undefined;
+        return jsonResponse(getBridgeStatusForApi(home));
       }
 
       const bridgeActionParams = matchPath('/api/bridge/:action', pathname);
       if (request.method === 'POST' && bridgeActionParams) {
+        const bridgeBody = (await readRequestBody<{ slug?: string }>(request)) as {
+          slug?: string;
+        };
+        const bridgeHome = bridgeBody.slug?.trim()
+          ? getCtiHomeForBridgeSlug(bridgeBody.slug.trim())
+          : undefined;
+
         if (bridgeActionParams.action === 'start') {
-          await startBridgeDaemonChild();
-          return jsonResponse(getBridgeStatusForApi());
+          await startBridgeDaemonChild(bridgeHome);
+          return jsonResponse(getBridgeStatusForApi(bridgeHome));
         }
         if (bridgeActionParams.action === 'stop') {
-          const stopped = await stopBridgeDaemonChild();
+          const stopped = await stopBridgeDaemonChild(bridgeHome);
           if (!stopped.ok) {
             return jsonResponse(
               {
@@ -432,7 +442,7 @@ export function createPlatformApp(options: CreatePlatformAppOptions): PlatformAp
               409,
             );
           }
-          return jsonResponse(getBridgeStatusForApi());
+          return jsonResponse(getBridgeStatusForApi(bridgeHome));
         }
         if (bridgeActionParams.action === 'auto-start') {
           bridgeManager.tryAutoStart();

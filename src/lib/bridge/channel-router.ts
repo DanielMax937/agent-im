@@ -7,7 +7,14 @@
 
 import type { ChannelAddress, ChannelBinding, ChannelType } from './types';
 import { getBridgeContext } from './context';
-import { resolveRunnerForChannelBinding } from './im-instance-settings';
+import {
+  getLocalAgentRunnerIdFromStore,
+  resolveRunnerForChannelBinding,
+} from './im-instance-settings';
+
+function isLocalAgentAddress(address: ChannelAddress): boolean {
+  return address.chatId.startsWith('la:') || (address.userId?.startsWith('localagent-') ?? false);
+}
 
 /**
  * Resolve an inbound address to a ChannelBinding.
@@ -68,10 +75,13 @@ export function createBinding(
     ctxDefaultRunner ??
     storeDefault ??
     allIds[0];
+  const laRunner = isLocalAgentAddress(address)
+    ? getLocalAgentRunnerIdFromStore(store, address.channelType)
+    : undefined;
   const runnerProfileId = resolveRunnerForChannelBinding(
     store,
     address.channelType,
-    undefined,
+    laRunner,
     globalDef,
     allIds,
   );
@@ -111,10 +121,13 @@ export function bindToSession(
     ctxDefaultRunner ??
     storeDefault ??
     allIds[0];
+  const laRunner = isLocalAgentAddress(address)
+    ? getLocalAgentRunnerIdFromStore(store, address.channelType)
+    : undefined;
   const runnerProfileId = resolveRunnerForChannelBinding(
     store,
     address.channelType,
-    undefined,
+    laRunner,
     globalDef,
     allIds,
   );

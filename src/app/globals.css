@@ -202,6 +202,70 @@ a {
   box-shadow: 0 0 0 1px rgba(56, 189, 248, 0.12);
 }
 
+.ui-bridge-accordion-head {
+  display: flex;
+  align-items: stretch;
+  gap: 0;
+}
+
+.ui-bridge-accordion-chevron-btn {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 2.5rem;
+  margin: 0;
+  padding: 0;
+  font: inherit;
+  color: #94a3b8;
+  background: rgba(30, 41, 59, 0.5);
+  border: none;
+  border-right: 1px solid rgba(148, 163, 184, 0.15);
+  cursor: pointer;
+  transition: background 0.15s ease, color 0.15s ease;
+}
+
+.ui-bridge-accordion-chevron-btn:hover:not(:disabled) {
+  background: rgba(51, 65, 85, 0.55);
+  color: #e2e8f0;
+}
+
+.ui-bridge-accordion-chevron-btn:disabled {
+  opacity: 0.65;
+  cursor: not-allowed;
+}
+
+.ui-bridge-accordion-title-btn.ui-bridge-accordion-trigger {
+  flex: 1;
+  min-width: 0;
+}
+
+.ui-bridge-accordion-title {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 14px;
+  color: #e2e8f0;
+  background: rgba(30, 41, 59, 0.35);
+}
+
+.ui-bridge-accordion-hint {
+  margin-left: auto;
+  padding: 2px 10px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 500;
+  color: #94a3b8;
+  background: rgba(148, 163, 184, 0.1);
+  border: 1px solid rgba(148, 163, 184, 0.22);
+}
+
+.ui-bridge-switch-prompt {
+  padding-bottom: 0.25rem;
+}
+
 .ui-bridge-accordion-trigger {
   display: flex;
   align-items: center;

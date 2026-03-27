@@ -69,5 +69,10 @@ export async function resolveProvider({
   }
 
   console.log(`[claude-to-im] CLI preflight OK: ${cliPath} (${check.version})`);
-  return new SDKLLMProvider(pendingPermissions, cliPath, autoApprove);
+  return new SDKLLMProvider(
+    pendingPermissions,
+    cliPath,
+    autoApprove,
+    runner?.claudeUseLogin === true,
+  );
 }

@@ -96,6 +96,24 @@ export function parseImBaseAndInstanceId(channelType: string): { base: ImBaseCha
 }
 
 /**
+ * Runner profile id configured for the Local Agent Redis pipeline (`imBot.localAgentRunnerId`).
+ */
+export function getLocalAgentRunnerIdFromStore(
+  store: BridgeStore,
+  channelType: string,
+): string | undefined {
+  const parsed = parseImBaseAndInstanceId(channelType);
+  if (!parsed) return undefined;
+  const v = imScopedGet(
+    store,
+    parsed.base,
+    parsed.instanceId,
+    `bridge_${parsed.base}_local_agent_runner_id`,
+  )?.trim();
+  return v || undefined;
+}
+
+/**
  * Resolve effective runner id for an IM chat. `allRunnerIds` is the **per-bot** list from config
  * (`imBot.runners`), not a global pool.
  */

@@ -7,6 +7,7 @@ import {
   isNonClaudeModel,
   parseCliMajorVersion,
   handleMessage,
+  buildSubprocessEnvForRuntime,
 } from '../llm-provider';
 import type { StreamState } from '../llm-provider';
 import { sseEvent } from '../sse-utils';
@@ -151,6 +152,64 @@ describe('isNonClaudeModel', () => {
   });
 });
 
+// ── buildSubprocessEnvForRuntime ──
+
+describe('buildSubprocessEnvForRuntime', () => {
+  it('keeps ANTHROPIC_* vars for Claude API-key mode', () => {
+    const prevIsolation = process.env.CTI_ENV_ISOLATION;
+    const prevRuntime = process.env.CTI_RUNTIME;
+    const prevApiKey = process.env.ANTHROPIC_API_KEY;
+    const prevAuthToken = process.env.ANTHROPIC_AUTH_TOKEN;
+
+    process.env.CTI_ENV_ISOLATION = 'strict';
+    process.env.CTI_RUNTIME = 'claude';
+    process.env.ANTHROPIC_API_KEY = 'sk-ant-test';
+    process.env.ANTHROPIC_AUTH_TOKEN = 'auth-ant-test';
+
+    try {
+      const env = buildSubprocessEnvForRuntime({ runtime: 'claude', useLogin: false });
+      assert.equal(env.ANTHROPIC_API_KEY, 'sk-ant-test');
+      assert.equal(env.ANTHROPIC_AUTH_TOKEN, 'auth-ant-test');
+    } finally {
+      if (prevIsolation === undefined) delete process.env.CTI_ENV_ISOLATION;
+      else process.env.CTI_ENV_ISOLATION = prevIsolation;
+      if (prevRuntime === undefined) delete process.env.CTI_RUNTIME;
+      else process.env.CTI_RUNTIME = prevRuntime;
+      if (prevApiKey === undefined) delete process.env.ANTHROPIC_API_KEY;
+      else process.env.ANTHROPIC_API_KEY = prevApiKey;
+      if (prevAuthToken === undefined) delete process.env.ANTHROPIC_AUTH_TOKEN;
+      else process.env.ANTHROPIC_AUTH_TOKEN = prevAuthToken;
+    }
+  });
+
+  it('strips ANTHROPIC_* vars for Claude login mode', () => {
+    const prevIsolation = process.env.CTI_ENV_ISOLATION;
+    const prevRuntime = process.env.CTI_RUNTIME;
+    const prevApiKey = process.env.ANTHROPIC_API_KEY;
+    const prevAuthToken = process.env.ANTHROPIC_AUTH_TOKEN;
+
+    process.env.CTI_ENV_ISOLATION = 'strict';
+    process.env.CTI_RUNTIME = 'claude';
+    process.env.ANTHROPIC_API_KEY = 'sk-ant-test';
+    process.env.ANTHROPIC_AUTH_TOKEN = 'auth-ant-test';
+
+    try {
+      const env = buildSubprocessEnvForRuntime({ runtime: 'claude', useLogin: true });
+      assert.equal(env.ANTHROPIC_API_KEY, undefined);
+      assert.equal(env.ANTHROPIC_AUTH_TOKEN, undefined);
+    } finally {
+      if (prevIsolation === undefined) delete process.env.CTI_ENV_ISOLATION;
+      else process.env.CTI_ENV_ISOLATION = prevIsolation;
+      if (prevRuntime === undefined) delete process.env.CTI_RUNTIME;
+      else process.env.CTI_RUNTIME = prevRuntime;
+      if (prevApiKey === undefined) delete process.env.ANTHROPIC_API_KEY;
+      else process.env.ANTHROPIC_API_KEY = prevApiKey;
+      if (prevAuthToken === undefined) delete process.env.ANTHROPIC_AUTH_TOKEN;
+      else process.env.ANTHROPIC_AUTH_TOKEN = prevAuthToken;
+    }
+  });
+});
+
 // ── parseCliMajorVersion ──
 
 describe('parseCliMajorVersion', () => {
@@ -226,6 +285,62 @@ describe('handleMessage state tracking', () => {
     } as any, controller, state);
 
     assert.equal(state.hasReceivedResult, true);
+  });
+
+  it('emits captured assistant text when success result is flagged as error and no deltas were streamed', () => {
+    const { controller, chunks } = makeFakeController();
+    const state = freshState();
+
+    handleMessage({
+      type: 'assistant',
+      message: { content: [{ type: 'text', text: 'Your organization does not have access to Claude.' }] },
+    } as any, controller, state);
+
+    handleMessage({
+      type: 'result',
+      subtype: 'success',
+      session_id: 'sess-error',
+      is_error: true,
+      result: '',
+      usage: { input_tokens: 10, output_tokens: 5 },
+      total_cost_usd: 0.001,
+    } as any, controller, state);
+
+    const events = chunks.map((chunk) => JSON.parse(chunk.replace(/^data: /, '')));
+    assert.equal(events[0].type, 'text');
+    assert.equal(events[0].data, 'Your organization does not have access to Claude.');
+    assert.equal(events[1].type, 'result');
+    assert.equal(JSON.parse(events[1].data).is_error, true);
+    assert.equal(state.hasStreamedText, true);
+    assert.equal(state.hasReceivedResult, true);
+  });
+
+  it('does not duplicate assistant text when text deltas were already streamed', () => {
+    const { controller, chunks } = makeFakeController();
+    const state = freshState();
+
+    handleMessage({
+      type: 'stream_event',
+      event: { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'Detailed error' } },
+    } as any, controller, state);
+
+    handleMessage({
+      type: 'assistant',
+      message: { content: [{ type: 'text', text: 'Detailed error' }] },
+    } as any, controller, state);
+
+    handleMessage({
+      type: 'result',
+      subtype: 'success',
+      session_id: 'sess-error-2',
+      is_error: true,
+      usage: { input_tokens: 1, output_tokens: 1 },
+      total_cost_usd: 0.001,
+    } as any, controller, state);
+
+    const events = chunks.map((chunk) => JSON.parse(chunk.replace(/^data: /, '')));
+    assert.equal(events.filter((event) => event.type === 'text').length, 1);
+    assert.equal(events.at(-1).type, 'result');
   });
 
   it('sets hasReceivedResult on error result', () => {

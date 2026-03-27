@@ -38,8 +38,9 @@ export {
 } from "./config-shared";
 
 /** Base directory for per-bot homes: `~/.claude-to-im` unless `CTI_BASE` is set. */
-export const CTI_BASE_DIR =
-  process.env.CTI_BASE?.trim() || path.join(os.homedir(), ".claude-to-im");
+export function getCtiBaseDir(): string {
+  return process.env.CTI_BASE?.trim() || path.join(os.homedir(), ".claude-to-im");
+}
 
 const IM_INSTANCE_ID_RE = /^[a-zA-Z0-9_-]+$/;
 const ACTIVE_BRIDGE_FILENAME = ".active_bridge";
@@ -51,7 +52,7 @@ export function invalidateBridgePathsCache(): void {
 }
 
 function activeBridgeFilePath(): string {
-  return path.join(CTI_BASE_DIR, ACTIVE_BRIDGE_FILENAME);
+  return path.join(getCtiBaseDir(), ACTIVE_BRIDGE_FILENAME);
 }
 
 function generateBridgeSlug(): string {
@@ -63,7 +64,7 @@ function generateBridgeSlug(): string {
  * (single-line slug) and set `process.env.CTI_BOT_NAME` so the data directory is stable for this machine.
  */
 function readOrCreateActiveBridgeSlug(): string {
-  fs.mkdirSync(CTI_BASE_DIR, { recursive: true });
+  fs.mkdirSync(getCtiBaseDir(), { recursive: true });
   const filePath = activeBridgeFilePath();
   try {
     const raw = fs.readFileSync(filePath, "utf-8").trim();
@@ -98,10 +99,10 @@ function resolveCtiHomeDisk(): string {
         `CTI_BOT_NAME must match ${IM_INSTANCE_ID_RE.source} (letters, digits, _, -).`,
       );
     }
-    return path.join(CTI_BASE_DIR, bot);
+    return path.join(getCtiBaseDir(), bot);
   }
   const slug = readOrCreateActiveBridgeSlug();
-  return path.join(CTI_BASE_DIR, slug);
+  return path.join(getCtiBaseDir(), slug);
 }
 
 /** Lazily resolved; safe to import before env is fully set (e.g. Next.js without `.env.local`). */
@@ -116,6 +117,23 @@ export function getConfigPath(): string {
 }
 
 /**
+ * Resolve the data directory for a bridge slug under `CTI_BASE_DIR`.
+ * When `CTI_HOME` is set, the **active** bridge (see {@link getCtiBotDisplayName}) maps to that
+ * path; any **other** slug still resolves to `CTI_BASE_DIR/<slug>` so admin/API can address
+ * multiple bridge homes without all sharing one status.json.
+ */
+export function getCtiHomeForBridgeSlug(slug: string): string {
+  const t = slug.trim();
+  if (!t) return getCtiHome();
+  if (process.env.CTI_HOME?.trim()) {
+    const active = getCtiBotDisplayName();
+    if (t === active) return getCtiHome();
+    return path.join(getCtiBaseDir(), t);
+  }
+  return path.join(getCtiBaseDir(), t);
+}
+
+/**
  * Create a new bridge directory: writes `.active_bridge`, sets `CTI_BOT_NAME`, clears path cache.
  * Not available when `CTI_HOME` is set (explicit home wins).
  */
@@ -126,7 +144,7 @@ export function createNewBridge(): { ctiHome: string; configPath: string; botNam
     );
   }
   const slug = generateBridgeSlug();
-  fs.mkdirSync(CTI_BASE_DIR, { recursive: true });
+  fs.mkdirSync(getCtiBaseDir(), { recursive: true });
   fs.writeFileSync(activeBridgeFilePath(), `${slug}\n`, { mode: 0o600 });
   process.env.CTI_BOT_NAME = slug;
   invalidateBridgePathsCache();
@@ -147,10 +165,10 @@ const BRIDGE_INTERNAL_SUBDIRS = new Set(['data', 'logs', 'runtime', 'store']);
  * Subdirectories of `CTI_BASE_DIR` whose names match the bot slug pattern (existing bridge homes).
  */
 export function listBridgeSlugs(): string[] {
-  fs.mkdirSync(CTI_BASE_DIR, { recursive: true });
+  fs.mkdirSync(getCtiBaseDir(), { recursive: true });
   let entries: fs.Dirent[];
   try {
-    entries = fs.readdirSync(CTI_BASE_DIR, { withFileTypes: true });
+    entries = fs.readdirSync(getCtiBaseDir(), { withFileTypes: true });
   } catch {
     return [];
   }
@@ -177,7 +195,7 @@ export function switchActiveBridge(slug: string): { ctiHome: string; configPath:
   if (!t || !IM_INSTANCE_ID_RE.test(t)) {
     throw new Error("无效的桥接标识。");
   }
-  const home = path.join(CTI_BASE_DIR, t);
+  const home = path.join(getCtiBaseDir(), t);
   let st: ReturnType<typeof fs.statSync>;
   try {
     st = fs.statSync(home);
@@ -187,7 +205,7 @@ export function switchActiveBridge(slug: string): { ctiHome: string; configPath:
   if (!st.isDirectory()) {
     throw new Error(`不是目录：${t}`);
   }
-  fs.mkdirSync(CTI_BASE_DIR, { recursive: true });
+  fs.mkdirSync(getCtiBaseDir(), { recursive: true });
   fs.writeFileSync(activeBridgeFilePath(), `${t}\n`, { mode: 0o600 });
   process.env.CTI_BOT_NAME = t;
   invalidateBridgePathsCache();
@@ -212,7 +230,7 @@ export function deleteBridge(slug: string): { ctiHome: string; configPath: strin
   if (BRIDGE_INTERNAL_SUBDIRS.has(t)) {
     throw new Error("无效的桥接标识。");
   }
-  const home = path.join(CTI_BASE_DIR, t);
+  const home = path.join(getCtiBaseDir(), t);
   let st: ReturnType<typeof fs.statSync>;
   try {
     st = fs.statSync(home);
@@ -309,6 +327,7 @@ export function runnerFromRow(o: Record<string, unknown>): RunnerConfig | null {
     defaultMode: pickRunnerModeRow(o),
     autoApprove: pickRunnerBoolRow(o, "autoApprove"),
     claudeExecutable: pickRunnerStrRow(o, "claudeExecutable"),
+    claudeUseLogin: pickRunnerBoolRow(o, "claudeUseLogin"),
     codexUseLogin: pickRunnerBoolRow(o, "codexUseLogin"),
     codexExecutable: pickRunnerStrRow(o, "codexExecutable"),
     cursorExecutable: pickRunnerStrRow(o, "cursorExecutable"),
@@ -389,6 +408,10 @@ function imInstanceSpecFromRow(o: Record<string, unknown>): ImInstanceSpec | nul
     localAgentPeerInstanceId:
       typeof o.localAgentPeerInstanceId === "string"
         ? o.localAgentPeerInstanceId
+        : undefined,
+    localAgentRunnerId:
+      typeof o.localAgentRunnerId === "string" && o.localAgentRunnerId.trim()
+        ? o.localAgentRunnerId.trim()
         : undefined,
     runners: parseRunnersField(o.runners),
     defaultRunnerId:
@@ -557,6 +580,12 @@ function applyImBotToSettings(m: Map<string, string>, config: Config): void {
     m.set(
       imScopedStoreKey(base, id, `bridge_${base}_local_agent_peer_instance_id`),
       spec.localAgentPeerInstanceId,
+    );
+  }
+  if (spec.localAgentRunnerId) {
+    m.set(
+      imScopedStoreKey(base, id, `bridge_${base}_local_agent_runner_id`),
+      spec.localAgentRunnerId,
     );
   }
 }
@@ -803,10 +832,13 @@ function stripFlatFieldsMirroredFromRemovedImBot(prev: Config, next: Config): vo
   }
 }
 
-export function loadConfig(): Config {
+export function loadConfig(ctiHomeOverride?: string): Config {
+  const configPath = ctiHomeOverride?.trim()
+    ? path.join(path.resolve(ctiHomeOverride.trim()), "config.env")
+    : getConfigPath();
   let env = new Map<string, string>();
   try {
-    const content = fs.readFileSync(getConfigPath(), "utf-8");
+    const content = fs.readFileSync(configPath, "utf-8");
     env = parseEnvFile(content);
   } catch {
     // Config file doesn't exist yet — use defaults
@@ -891,7 +923,7 @@ function formatEnvLine(key: string, value: string | undefined): string {
   return `${key}=${value}\n`;
 }
 
-export function saveConfig(config: Config): void {
+export function saveConfig(config: Config, ctiHomeOverride?: string): void {
   let out = "";
   const runnerList = normalizeRunners(config);
   out += formatEnvLine("CTI_RUNNERS", JSON.stringify(runnerList));
@@ -978,8 +1010,11 @@ export function saveConfig(config: Config): void {
       out += formatEnvLine(`${p}MAX_TURNS`, String(slot.maxTurns));
   }
 
-  fs.mkdirSync(getCtiHome(), { recursive: true });
-  const cfgPath = getConfigPath();
+  const targetHome = ctiHomeOverride?.trim()
+    ? path.resolve(ctiHomeOverride.trim())
+    : getCtiHome();
+  fs.mkdirSync(targetHome, { recursive: true });
+  const cfgPath = path.join(targetHome, "config.env");
   const tmpPath = cfgPath + ".tmp";
   fs.writeFileSync(tmpPath, out, { mode: 0o600 });
   fs.renameSync(tmpPath, cfgPath);

@@ -38,6 +38,8 @@ export interface RunnerConfig {
   autoApprove?: boolean;
   /** Claude Code CLI path (overrides CTI_CLAUDE_CODE_EXECUTABLE for this runner). */
   claudeExecutable?: string;
+  /** Claude: use `claude auth login` session instead of ANTHROPIC_* API credentials. */
+  claudeUseLogin?: boolean;
   /** Codex: use `codex login` token instead of API keys. */
   codexUseLogin?: boolean;
   /** Codex wrapper path (overrides CTI_CODEX_EXECUTABLE for this runner). */
@@ -143,8 +145,8 @@ export interface ImInstanceSpec {
   qqImageEnabled?: boolean;
   qqMaxImageSize?: number;
   /**
-   * When true, this bot does not use the platform API for I/O; Runner ↔ Redis only
-   * (`cti:localagent:{channel}:{id}:*`). Optional peer id routes Claude replies to another bot's input.
+   * When true, enable the Local Agent Redis queues (`cti:localagent:{channel}:{id}:*`).
+   * Without a platform token: Redis-only I/O. With token (e.g. Telegram): hybrid IM + Redis.
    */
   localAgentEnabled?: boolean;
   localAgentRedisUrl?: string;
@@ -152,6 +154,11 @@ export interface ImInstanceSpec {
   localAgentMaxTurns?: number;
   /** Same `channel` only: forward Claude text to this instance id's Redis `input` (multi-agent dialogue). */
   localAgentPeerInstanceId?: string;
+  /**
+   * Runner id (`imBot.runners[].id`) for the Local Agent Redis pipeline (separate binding from the IM chat).
+   * If unset, the bot default runner is used.
+   */
+  localAgentRunnerId?: string;
   /** Bridge: default workdir (`CTI_DEFAULT_WORKDIR`) when this bot is the only IM source. */
   defaultWorkDir?: string;
   /** Bridge: HTTP proxy (`CTI_PROXY`). */

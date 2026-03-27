@@ -30,12 +30,12 @@ function isPidAlive(pid: number): boolean {
 }
 
 /**
- * Read standalone daemon status from disk for the **current** `getCtiHome()` (active bridge).
- * When the bridge is started via the Next admin API, it is spawned as a child process and still
- * writes this file; `managedByApp` is determined separately in `bridge-app-child.ts`.
+ * Read standalone daemon status from disk for a bridge home.
+ * @param ctiHomeOverride Resolved absolute path to `$CTI_HOME`, or omit to use {@link getCtiHome}.
  */
-export function readBridgeDaemonDiskStatus(): BridgeDaemonDiskStatus {
-  const statusPath = path.join(getCtiHome(), "runtime", "status.json");
+export function readBridgeDaemonDiskStatus(ctiHomeOverride?: string): BridgeDaemonDiskStatus {
+  const base = ctiHomeOverride !== undefined ? path.resolve(ctiHomeOverride) : getCtiHome();
+  const statusPath = path.join(base, "runtime", "status.json");
   if (!fs.existsSync(statusPath)) {
     return {
       statusFilePresent: false,

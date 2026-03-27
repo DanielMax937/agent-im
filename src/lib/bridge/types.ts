@@ -54,6 +54,15 @@ export interface InboundMessage {
   updateId?: number;
   /** File attachments (images, documents) from the IM channel */
   attachments?: import('./host').FileAttachment[];
+  /**
+   * Hybrid Local Agent: `runner` = user message from IM; `local-agent` = from Redis for the LA pipeline.
+   * Used to prefix outbound replies when both paths share the same Telegram bot.
+   */
+  deliverySource?: 'runner' | 'local-agent';
+  /**
+   * When set, outbound delivery uses this chat id instead of `address.chatId` (e.g. Redis LA path mirrors Telegram).
+   */
+  outboundChatId?: string;
 }
 
 /** Outbound message to send to an IM channel */

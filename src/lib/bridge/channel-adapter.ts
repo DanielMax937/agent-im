@@ -118,6 +118,15 @@ export abstract class BaseChannelAdapter {
    * normal delivery path, so this is typically a no-op.
    */
   endPreview?(_chatId: string, _draftId: number): void;
+
+  /**
+   * Hybrid Local Agent: duplicate the full assistant reply to Redis `out` once before Telegram send.
+   * Default no-op; Telegram overrides for `deliverySource === 'local-agent'`.
+   */
+  hybridDuplicateAssistantToRedis?(
+    _text: string,
+    _deliverySource: 'runner' | 'local-agent',
+  ): Promise<void>;
 }
 
 // ── Adapter Registry ────────────────────────────────────────────

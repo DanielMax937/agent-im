@@ -32,6 +32,8 @@ export interface LocalAgentStoreSettings {
   firstPrompt: string;
   maxTurns: number;
   peerInstanceId?: string;
+  /** Telegram + Redis hybrid: skip LPUSH seed; user text comes from IM instead. */
+  hybridMode?: boolean;
 }
 
 const KEY_PREFIX = 'cti:localagent';
@@ -75,6 +77,30 @@ export function readLocalAgentSettings(
   };
 }
 
+/**
+ * Local Agent + same bot token (e.g. Telegram): IM and Redis pipelines run together; outbound replies get `[runner]` / `[local-agent]` prefixes.
+ */
+export function isHybridLocalAgentEnabled(
+  store: BridgeStore,
+  base: ImBaseChannel,
+  instanceId: string,
+): boolean {
+  if (!readLocalAgentSettings(store, base, instanceId)) return false;
+  if (base === 'telegram') {
+    return Boolean(imScopedGet(store, base, instanceId, 'telegram_bot_token')?.trim());
+  }
+  if (base === 'discord') {
+    return Boolean(imScopedGet(store, base, instanceId, 'bridge_discord_bot_token')?.trim());
+  }
+  if (base === 'feishu') {
+    return Boolean(imScopedGet(store, base, instanceId, 'bridge_feishu_app_id')?.trim());
+  }
+  if (base === 'qq') {
+    return Boolean(imScopedGet(store, base, instanceId, 'bridge_qq_app_id')?.trim());
+  }
+  return false;
+}
+
 export class RedisLocalTransport {
   private client: RedisClient | null = null;
   private readonly sessionId = crypto.randomUUID();
@@ -84,6 +110,7 @@ export class RedisLocalTransport {
     private readonly base: ImBaseChannel,
     private readonly instanceId: string,
     public readonly settings: LocalAgentStoreSettings,
+    private readonly getMirrorChatId?: () => string | null,
   ) {}
 
   private key(suffix: 'input' | 'out' | 'turns'): string {
@@ -124,6 +151,10 @@ export class RedisLocalTransport {
   /** Seed first user message once; skip if Redis already has state (restart-safe). */
   async seedFirstPromptIfNeeded(): Promise<void> {
     if (!this.client || this.initialized) return;
+    if (this.settings.hybridMode) {
+      this.initialized = true;
+      return;
+    }
     const turns = await this.client.get(this.key('turns'));
     if (turns !== null) {
       this.initialized = true;
@@ -132,6 +163,14 @@ export class RedisLocalTransport {
     await this.client.lPush(this.key('input'), this.settings.firstPrompt);
     await this.client.set(this.key('turns'), '0');
     this.initialized = true;
+  }
+
+  /** Fan-out user text from IM into the Local Agent `input` list (hybrid mode). */
+  async pushUserInput(text: string): Promise<void> {
+    if (!this.client) return;
+    const turns = await this.getTurns();
+    if (turns >= this.settings.maxTurns) return;
+    await this.client.lPush(this.key('input'), text);
   }
 
   async getTurns(): Promise<number> {
@@ -176,6 +215,7 @@ export class RedisLocalTransport {
     const input = await this.client.rPop(this.key('input'));
     if (!input) return null;
     const chatId = `la:${this.base}:${this.instanceId}`;
+    const mirror = this.getMirrorChatId?.() ?? null;
     return {
       messageId: crypto.randomUUID(),
       address: {
@@ -186,6 +226,8 @@ export class RedisLocalTransport {
       },
       text: input,
       timestamp: Date.now(),
+      deliverySource: 'local-agent',
+      outboundChatId: mirror ?? undefined,
     };
   }
 

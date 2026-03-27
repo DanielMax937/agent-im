@@ -61,6 +61,10 @@ export const FIELD_HELP = {
     detail: 'Claude Code CLI 可执行文件绝对路径；不填则用 CTI_CLAUDE_CODE_EXECUTABLE 或 PATH。',
     def: '空',
   },
+  runner_claudeUseLogin: {
+    detail: '使用本地 `claude auth login` 会话而非 ANTHROPIC_* API Key；适合已 CLI 登录的机器。',
+    def: 'false',
+  },
   runner_codexExecutable: {
     detail: 'Codex CLI / wrapper 路径；不填则用 CTI_CODEX_EXECUTABLE。',
     def: '空',
@@ -155,6 +159,11 @@ export const FIELD_HELP = {
   },
   localAgentPeerInstanceId: {
     detail: '同平台另一 bot 的 slug；可将一端输出转发到对方 input，做多智能体串联。',
+    def: '空',
+  },
+  localAgentRunnerId: {
+    detail:
+      'Local Agent（Redis pipeline）使用的 Runner 配置 id，须与上方「Runner」列表中某项的 id 一致；未填则沿用该 bot 的默认 Runner。混合模式（IM + Redis）时用于为 la:… 会话单独绑定会话与模型。',
     def: '空',
   },
   action_currentBridge: {

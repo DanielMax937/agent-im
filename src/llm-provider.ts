@@ -94,8 +94,21 @@ export function isNonClaudeModel(model?: string): boolean {
  *   "strict"  — only whitelist + CTI_* + ANTHROPIC_* from config.env
  */
 export function buildSubprocessEnv(): NodeJS.ProcessEnv {
+  return buildSubprocessEnvForRuntime();
+}
+
+export interface BuildSubprocessEnvOptions {
+  runtime?: 'claude' | 'codex' | 'cursor' | 'auto';
+  useLogin?: boolean;
+}
+
+export function buildSubprocessEnvForRuntime(
+  options: BuildSubprocessEnvOptions = {},
+): NodeJS.ProcessEnv {
   const mode = process.env.CTI_ENV_ISOLATION || 'inherit';
   const out = {} as NodeJS.ProcessEnv;
+  const runtime = options.runtime || (process.env.CTI_RUNTIME as 'claude' | 'codex' | 'cursor' | 'auto' | undefined) || 'claude';
+  const useLogin = options.useLogin === true;
 
   if (mode === 'inherit') {
     // Pass everything except always-stripped vars
@@ -114,7 +127,6 @@ export function buildSubprocessEnv(): NodeJS.ProcessEnv {
     }
     // Always pass through ANTHROPIC_* in claude runtime —
     // third-party API providers need these to reach the CLI subprocess.
-    const runtime = process.env.CTI_RUNTIME || 'claude';
     if (runtime === 'claude' || runtime === 'auto') {
       for (const [k, v] of Object.entries(process.env)) {
         if (v !== undefined && k.startsWith('ANTHROPIC_')) out[k] = v;
@@ -126,6 +138,14 @@ export function buildSubprocessEnv(): NodeJS.ProcessEnv {
       for (const [k, v] of Object.entries(process.env)) {
         if (v !== undefined && (k.startsWith('OPENAI_') || k.startsWith('CODEX_') || k.startsWith('CURSOR_'))) out[k] = v;
       }
+    }
+  }
+
+  // Runner-level login mode should ignore explicit API credentials so the CLI
+  // uses its own authenticated session instead of ANTHROPIC_* env vars.
+  if (useLogin && (runtime === 'claude' || runtime === 'auto')) {
+    for (const key of Object.keys(out)) {
+      if (key.startsWith('ANTHROPIC_')) delete out[key];
     }
   }
 
@@ -437,20 +457,24 @@ export interface StreamState {
 export class SDKLLMProvider implements LLMProvider {
   private cliPath: string | undefined;
   private autoApprove: boolean;
+  private useLogin: boolean;
 
   constructor(
     private pendingPerms: PendingPermissions,
     cliPath?: string,
     autoApprove = false,
+    useLogin = false,
   ) {
     this.cliPath = cliPath;
     this.autoApprove = autoApprove;
+    this.useLogin = useLogin;
   }
 
   streamChat(params: StreamChatParams): ReadableStream<string> {
     const pendingPerms = this.pendingPerms;
     const cliPath = this.cliPath;
     const autoApprove = this.autoApprove;
+    const useLogin = this.useLogin;
 
     return new ReadableStream({
       start(controller) {
@@ -461,7 +485,10 @@ export class SDKLLMProvider implements LLMProvider {
           const state: StreamState = { hasReceivedResult: false, hasStreamedText: false, lastAssistantText: '' };
 
           try {
-            const cleanEnv = buildSubprocessEnv();
+            const cleanEnv = buildSubprocessEnvForRuntime({
+              runtime: 'claude',
+              useLogin,
+            });
 
             // Cross-runtime migration safety: drop non-Claude model names
             // that may linger in session data from a previous Codex runtime.
@@ -697,10 +724,24 @@ export function handleMessage(
     case 'result': {
       state.hasReceivedResult = true;
       if (msg.subtype === 'success') {
+        // Some Claude SDK error turns arrive as:
+        //   assistant(text with the real explanation)
+        //   result(subtype=success, is_error=true)
+        // without any prior text_delta events. In that case, the bridge would
+        // otherwise see hasError with no responseText and only render a generic
+        // Error: line. Surface the assistant text once here as the canonical
+        // user-facing body for that error turn.
+        if (msg.is_error && !state.hasStreamedText && state.lastAssistantText.trim()) {
+          controller.enqueue(sseEvent('text', state.lastAssistantText.trim()));
+          state.hasStreamedText = true;
+        }
         controller.enqueue(
           sseEvent('result', {
             session_id: msg.session_id,
             is_error: msg.is_error,
+            /** Present on SDK success result; often explains turns that end with is_error. */
+            result: msg.result,
+            stop_reason: msg.stop_reason,
             usage: {
               input_tokens: msg.usage.input_tokens,
               output_tokens: msg.usage.output_tokens,

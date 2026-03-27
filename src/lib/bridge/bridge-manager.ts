@@ -7,7 +7,15 @@
  * Uses globalThis to survive Next.js HMR in development.
  */
 
-import type { BridgeStatus, ChannelBinding, InboundMessage, OutboundMessage, StreamingPreviewState } from './types';
+import type {
+  BridgeStatus,
+  ChannelBinding,
+  ChannelAddress,
+  InboundMessage,
+  SendResult,
+  OutboundMessage,
+  StreamingPreviewState,
+} from './types';
 import type { BridgeStore } from './host';
 import { createAdapter, getRegisteredTypes } from './channel-adapter';
 import type { BaseChannelAdapter } from './channel-adapter';
@@ -34,9 +42,33 @@ import {
   listInstanceIdsForChannel,
   isInstanceImEnabled,
   resolveRunnerForChannelBinding,
+  parseImBaseAndInstanceId,
   type ImBaseChannel,
 } from './im-instance-settings';
+import { isHybridLocalAgentEnabled } from './redis-local-transport';
 const GLOBAL_KEY = '__bridge_manager__';
+
+function effectiveInboundAddress(msg: InboundMessage): ChannelAddress {
+  if (msg.outboundChatId) {
+    return { ...msg.address, chatId: msg.outboundChatId };
+  }
+  return msg.address;
+}
+
+function effectiveInboundChatId(msg: InboundMessage): string {
+  return msg.outboundChatId ?? msg.address.chatId;
+}
+
+function applyHybridDeliveryPrefix(adapter: BaseChannelAdapter, msg: InboundMessage, text: string): string {
+  if (!msg.deliverySource) return text;
+  const parsed = parseImBaseAndInstanceId(adapter.channelType);
+  if (!parsed) return text;
+  if (!isHybridLocalAgentEnabled(getBridgeContext().store, parsed.base, parsed.instanceId)) {
+    return text;
+  }
+  const prefix = msg.deliverySource === 'local-agent' ? '[local-agent]' : '[runner]';
+  return `${prefix}\n\n${text}`;
+}
 
 /** Runners for IM /runner for this adapter channel (per-bot list from config). */
 function getImRunnerList(channelType: string): Array<{ id: string; runtime: string; label?: string }> {
@@ -146,8 +178,6 @@ function flushPreview(
 
 // ── Channel-aware rendering dispatch ──────────────────────────
 
-import type { ChannelAddress, SendResult } from './types';
-
 /**
  * Render response text and deliver via the appropriate channel format.
  * Telegram: Markdown → HTML chunks via deliverRendered.
@@ -159,8 +189,12 @@ async function deliverResponse(
   responseText: string,
   sessionId: string,
   replyToMessageId?: string,
+  deliverySource?: 'runner' | 'local-agent',
 ): Promise<SendResult> {
   if (adapter.channelType === 'telegram') {
+    if (deliverySource && adapter.hybridDuplicateAssistantToRedis) {
+      await adapter.hybridDuplicateAssistantToRedis(responseText, deliverySource);
+    }
     const chunks = markdownToTelegramChunks(responseText, 4096);
     if (chunks.length > 0) {
       return deliverRendered(adapter, address, chunks, { sessionId, replyToMessageId });
@@ -321,8 +355,8 @@ export async function start(): Promise<void> {
   state.running = true;
   state.startedAt = new Date().toISOString();
 
-  // Notify host that bridge is starting (e.g., suppress competing polling)
-  lifecycle.onBridgeStart?.();
+  // Notify host that bridge is starting (e.g., IM startup message, suppress competing polling)
+  await Promise.resolve(lifecycle.onBridgeStart?.());
 
   // Now start the consumer loops (state.running is already true)
   for (const [, adapter] of state.adapters) {
@@ -491,6 +525,8 @@ async function handleMessage(
   msg: InboundMessage,
 ): Promise<void> {
   const { store } = getBridgeContext();
+  const outAddr = effectiveInboundAddress(msg);
+  const outChat = effectiveInboundChatId(msg);
 
   // Update lastMessageAt for this adapter
   const adapterState = getState();
@@ -532,7 +568,7 @@ async function handleMessage(
     if (handled) {
       // Send confirmation
       const confirmMsg: OutboundMessage = {
-        address: msg.address,
+        address: outAddr,
         text: 'Permission response recorded.',
         parseMode: 'plain',
       };
@@ -550,7 +586,7 @@ async function handleMessage(
     const rawData = msg.raw as { imageDownloadFailed?: boolean; failedCount?: number } | undefined;
     if (rawData?.imageDownloadFailed) {
       await deliver(adapter, {
-        address: msg.address,
+        address: outAddr,
         text: `Failed to download ${rawData.failedCount ?? 1} image(s). Please try sending again.`,
         parseMode: 'plain',
         replyToMessageId: msg.messageId,
@@ -643,7 +679,7 @@ async function handleMessage(
   const binding = router.resolve(msg.address);
 
   // Notify adapter that message processing is starting (e.g., typing indicator)
-  adapter.onMessageStart?.(msg.address.chatId);
+  adapter.onMessageStart?.(outChat);
 
   // Create an AbortController so /stop can cancel this task externally
   const taskAbort = new AbortController();
@@ -652,11 +688,11 @@ async function handleMessage(
 
   // ── Streaming preview setup ──────────────────────────────────
   let previewState: StreamingPreviewState | null = null;
-  const caps = adapter.getPreviewCapabilities?.(msg.address.chatId) ?? null;
+  const caps = adapter.getPreviewCapabilities?.(outChat) ?? null;
   if (caps?.supported) {
     previewState = {
       draftId: generateDraftId(),
-      chatId: msg.address.chatId,
+      chatId: outChat,
       lastSentText: '',
       lastSentAt: 0,
       degraded: false,
@@ -732,11 +768,22 @@ async function handleMessage(
 
     // Send response text — render via channel-appropriate format
     if (result.responseText) {
-      await deliverResponse(adapter, msg.address, result.responseText, binding.codepilotSessionId, msg.messageId);
+      await deliverResponse(
+        adapter,
+        outAddr,
+        applyHybridDeliveryPrefix(adapter, msg, result.responseText),
+        binding.codepilotSessionId,
+        msg.messageId,
+        msg.deliverySource,
+      );
     } else if (result.hasError) {
       const errorResponse: OutboundMessage = {
-        address: msg.address,
-        text: `<b>Error:</b> ${escapeHtml(result.errorMessage)}`,
+        address: outAddr,
+        text: applyHybridDeliveryPrefix(
+          adapter,
+          msg,
+          `<b>Error:</b> ${escapeHtml(result.errorMessage?.trim() || 'Unknown error')}`,
+        ),
         parseMode: 'HTML',
         replyToMessageId: msg.messageId,
       };
@@ -761,12 +808,12 @@ async function handleMessage(
         clearTimeout(previewState.throttleTimer);
         previewState.throttleTimer = null;
       }
-      adapter.endPreview?.(msg.address.chatId, previewState.draftId);
+      adapter.endPreview?.(outChat, previewState.draftId);
     }
 
     state.activeTasks.delete(binding.codepilotSessionId);
     // Notify adapter that message processing ended
-    adapter.onMessageEnd?.(msg.address.chatId);
+    adapter.onMessageEnd?.(outChat);
     // Commit the offset only after full processing (success or failure)
     ack();
   }
@@ -799,7 +846,7 @@ async function handleCommand(
     });
     console.warn(`[bridge-manager] Blocked dangerous command input from chat ${msg.address.chatId}: ${dangerCheck.reason}`);
     await deliver(adapter, {
-      address: msg.address,
+      address: effectiveInboundAddress(msg),
       text: `Command rejected: invalid input detected.`,
       parseMode: 'plain',
       replyToMessageId: msg.messageId,
@@ -808,6 +855,7 @@ async function handleCommand(
   }
 
   let response = '';
+  const cmdOutAddr = effectiveInboundAddress(msg);
 
   switch (command) {
     case '/start':
@@ -1080,7 +1128,7 @@ async function handleCommand(
 
   if (response) {
     await deliver(adapter, {
-      address: msg.address,
+      address: cmdOutAddr,
       text: response,
       parseMode: 'HTML',
       replyToMessageId: msg.messageId,

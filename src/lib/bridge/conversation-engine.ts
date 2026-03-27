@@ -353,9 +353,29 @@ async function consumeStream(
 
           case 'result': {
             try {
-              const resultData = JSON.parse(event.data);
+              const resultData = JSON.parse(event.data) as {
+                usage?: TokenUsage;
+                is_error?: boolean;
+                session_id?: string;
+                result?: string;
+                stop_reason?: string | null;
+                errors?: string[];
+              };
               if (resultData.usage) tokenUsage = resultData.usage;
-              if (resultData.is_error) hasError = true;
+              if (resultData.is_error) {
+                hasError = true;
+                // `error` SSE may be absent; SDK can still set is_error on subtype success.
+                if (!errorMessage) {
+                  const fromSdk =
+                    (typeof resultData.result === 'string' && resultData.result.trim()) ||
+                    (Array.isArray(resultData.errors) && resultData.errors.filter(Boolean).join('; ')) ||
+                    '';
+                  errorMessage = fromSdk
+                    || (resultData.stop_reason
+                      ? `Assistant error (stop_reason: ${resultData.stop_reason})`
+                      : 'Assistant finished with an error but returned no text.');
+                }
+              }
               if (resultData.session_id) {
                 capturedSdkSessionId = resultData.session_id;
                 store.updateSdkSessionId(sessionId, resultData.session_id);

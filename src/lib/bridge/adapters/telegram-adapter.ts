@@ -96,6 +96,10 @@ export class TelegramAdapter extends BaseChannelAdapter {
 
   /** Redis-only mode: no Telegram API; Runner ↔ Redis (see ImInstanceSpec.localAgent*). */
   private redisLocal: RedisLocalTransport | null = null;
+  /** Telegram + Redis: IM runner and Local Agent pipeline share one bot; fan-out user text to Redis `input`. */
+  private hybridLocalAgent = false;
+  /** Last Telegram chat id for mirroring Redis LA replies to the same conversation. */
+  private hybridMirrorChatId: string | null = null;
 
   constructor(instanceId = 'default') {
     super('telegram', instanceId);
@@ -112,7 +116,48 @@ export class TelegramAdapter extends BaseChannelAdapter {
   async start(): Promise<void> {
     if (this.running) return;
 
-    const la = readLocalAgentSettings(getBridgeContext().store, 'telegram', this.instanceId);
+    const store = getBridgeContext().store;
+    const la = readLocalAgentSettings(store, 'telegram', this.instanceId);
+    const token = this.botToken;
+
+    if (la && token) {
+      const configError = this.validateConfig();
+      if (configError) {
+        console.warn('[telegram-adapter] Cannot start (hybrid local agent):', configError);
+        return;
+      }
+      this.hybridLocalAgent = true;
+      this.redisLocal = new RedisLocalTransport(
+        'telegram',
+        this.instanceId,
+        { ...la, hybridMode: true },
+        () => this.hybridMirrorChatId || this.imGet('telegram_chat_id') || null,
+      );
+      try {
+        await this.redisLocal.connect();
+        await this.redisLocal.seedFirstPromptIfNeeded();
+      } catch (err) {
+        console.error('[telegram-adapter] Local agent Redis connect failed:', err);
+        this.redisLocal = null;
+        this.hybridLocalAgent = false;
+        return;
+      }
+      await this.resolveBotIdentity();
+      this.running = true;
+      this.abortController = new AbortController();
+      this.registerCommands().catch(() => {});
+      this.pollLoop().catch((err) => {
+        console.error('[telegram-adapter] Poll loop error:', err);
+      });
+      this.redisLocalPollLoop().catch((err) => {
+        console.error('[telegram-adapter] Redis poll loop error:', err);
+      });
+      console.log(
+        `[telegram-adapter] Hybrid Local Agent (Telegram + Redis), instance=${this.instanceId}`,
+      );
+      return;
+    }
+
     if (la) {
       const configError = this.validateConfig();
       if (configError) {
@@ -171,6 +216,8 @@ export class TelegramAdapter extends BaseChannelAdapter {
       await this.redisLocal.disconnect();
       this.redisLocal = null;
     }
+    this.hybridLocalAgent = false;
+    this.hybridMirrorChatId = null;
 
     // Persist committed offset before shutdown
     this.persistCommittedOffset();
@@ -218,7 +265,7 @@ export class TelegramAdapter extends BaseChannelAdapter {
   }
 
   async send(message: OutboundMessage): Promise<SendResult> {
-    if (this.redisLocal) {
+    if (this.redisLocal && !this.hybridLocalAgent) {
       const r = await this.redisLocal.deliverClaudeReply(message.text);
       return r.ok ? { ok: true, messageId: crypto.randomUUID() } : { ok: false, error: r.error };
     }
@@ -258,7 +305,7 @@ export class TelegramAdapter extends BaseChannelAdapter {
   }
 
   async answerCallback(callbackQueryId: string, text?: string): Promise<void> {
-    if (this.redisLocal) return;
+    if (this.redisLocal && !this.hybridLocalAgent) return;
     const token = this.botToken;
     if (!token) return;
 
@@ -289,7 +336,7 @@ export class TelegramAdapter extends BaseChannelAdapter {
   }
 
   isAuthorized(userId: string, chatId: string): boolean {
-    if (this.redisLocal) return true;
+    if (this.redisLocal && !this.hybridLocalAgent) return true;
     // Check bridge-specific allowed users first
     const allowedUsers = this.imGet('telegram_bridge_allowed_users') || '';
     if (allowedUsers) {
@@ -313,7 +360,7 @@ export class TelegramAdapter extends BaseChannelAdapter {
    * Start a typing indicator that fires every 5 seconds.
    */
   startTyping(chatId: string): void {
-    if (this.redisLocal) return;
+    if (this.redisLocal && !this.hybridLocalAgent) return;
     this.stopTyping(chatId); // Clear any existing
     const token = this.botToken;
     if (!token) return;
@@ -352,7 +399,8 @@ export class TelegramAdapter extends BaseChannelAdapter {
   // ── Streaming preview ────────────────────────────────────────
 
   getPreviewCapabilities(chatId: string): PreviewCapabilities | null {
-    if (readLocalAgentSettings(getBridgeContext().store, 'telegram', this.instanceId)) return null;
+    const la = readLocalAgentSettings(getBridgeContext().store, 'telegram', this.instanceId);
+    if (la && !this.hybridLocalAgent) return null;
     // Global kill switch
     if (this.imGet('bridge_telegram_stream_enabled') === 'false') return null;
 
@@ -367,7 +415,7 @@ export class TelegramAdapter extends BaseChannelAdapter {
   }
 
   async sendPreview(chatId: string, text: string, draftId: number): Promise<'sent' | 'skip' | 'degrade'> {
-    if (this.redisLocal) return 'skip';
+    if (this.redisLocal && !this.hybridLocalAgent) return 'skip';
     const token = this.botToken;
     if (!token) return 'skip';
 
@@ -387,6 +435,17 @@ export class TelegramAdapter extends BaseChannelAdapter {
 
   endPreview(_chatId: string, _draftId: number): void {
     // No-op: the final sendMessage naturally replaces the draft
+  }
+
+  async hybridDuplicateAssistantToRedis(
+    text: string,
+    deliverySource: 'runner' | 'local-agent',
+  ): Promise<void> {
+    if (!this.hybridLocalAgent || !this.redisLocal) return;
+    if (deliverySource !== 'local-agent') return;
+    const prefix = '[local-agent]\n\n';
+    const body = text.startsWith(prefix) ? text.slice(prefix.length) : text;
+    await this.redisLocal.deliverClaudeReply(body).catch(() => {});
   }
 
   // ── Lifecycle hooks (called generically by bridge-manager) ───
@@ -424,6 +483,19 @@ export class TelegramAdapter extends BaseChannelAdapter {
   }
 
   private enqueue(msg: InboundMessage): void {
+    if (this.hybridLocalAgent) {
+      this.hybridMirrorChatId = msg.address.chatId;
+      if (!msg.deliverySource) {
+        msg.deliverySource = 'runner';
+      }
+      if (
+        this.redisLocal &&
+        msg.deliverySource === 'runner' &&
+        msg.text?.trim()
+      ) {
+        void this.redisLocal.pushUserInput(msg.text.trim());
+      }
+    }
     const waiter = this.waiters.shift();
     if (waiter) {
       waiter(msg);

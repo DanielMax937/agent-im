@@ -246,7 +246,7 @@ export interface PermissionGateway {
 
 export interface LifecycleHooks {
   /** Called when the bridge system starts (e.g., to suppress competing polling). */
-  onBridgeStart?(): void;
+  onBridgeStart?: () => void | Promise<void>;
   /** Called when the bridge system stops. */
   onBridgeStop?(): void;
 }

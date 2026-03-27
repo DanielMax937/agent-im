@@ -25,7 +25,7 @@ import {
 } from './config';
 import { buildImBridgeLlmStack } from './lib/bridge/llm-registry';
 import { BRIDGE_LOG_DAEMON_BASENAME } from './lib/bridge/bridge-log-file';
-import { notifyBridgeClosing } from './lib/bridge/shutdown-notify';
+import { notifyBridgeClosing, notifyBridgeStarted } from './lib/bridge/shutdown-notify';
 import { JsonFileStore } from './store';
 import { PendingPermissions } from './permission-gateway';
 import { setupLogger } from './logger';
@@ -113,7 +113,7 @@ async function main(): Promise<void> {
     defaultRunnerId: bridgeDefaultRunnerId,
     permissions: gateway,
     lifecycle: {
-      onBridgeStart: () => {
+      onBridgeStart: async () => {
         // Write authoritative PID from the actual process (not shell $!)
         fs.mkdirSync(runtimeDir(), { recursive: true });
         fs.writeFileSync(pidFile(), String(process.pid), 'utf-8');
@@ -125,6 +125,7 @@ async function main(): Promise<void> {
           channels: config.enabledChannels,
         });
         console.log(`[claude-to-im] Bridge started (PID: ${process.pid}, channels: ${config.enabledChannels.join(', ')})`);
+        await notifyBridgeStarted(process.pid, config.enabledChannels);
       },
       onBridgeStop: () => {
         writeStatus({ running: false });

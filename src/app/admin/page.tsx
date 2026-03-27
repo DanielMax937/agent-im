@@ -30,6 +30,37 @@ async function readJsonFromResponse(res: Response): Promise<unknown> {
   }
 }
 
+/** Avoid browser / CDN reusing one response for different `?slug=` queries. */
+const fetchNoStore: RequestInit = { cache: 'no-store' };
+
+/**
+ * 1) List slugs from GET /api/local-config
+ * 2) For each slug, GET /api/bridge/status?slug= (sequential)
+ * 3) Repeat step 2 once so status.json / child PID settle after start/stop
+ */
+async function fetchEmbeddedStatusesSequential(
+  slugs: string[],
+): Promise<Record<string, EmbeddedBridgeStatus>> {
+  const emb: Record<string, EmbeddedBridgeStatus> = {};
+  for (const slug of slugs) {
+    const r = await fetch(
+      `/api/bridge/status?slug=${encodeURIComponent(slug)}`,
+      fetchNoStore,
+    );
+    if (r.ok) {
+      emb[slug] = (await readJsonFromResponse(r)) as EmbeddedBridgeStatus;
+    }
+  }
+  return emb;
+}
+
+async function fetchEmbeddedStatusesVerify(
+  slugs: string[],
+): Promise<Record<string, EmbeddedBridgeStatus>> {
+  await fetchEmbeddedStatusesSequential(slugs);
+  return fetchEmbeddedStatusesSequential(slugs);
+}
+
 /** From GET /api/bridge/status（桥接为 Next 子进程时 `managedByApp` 为 true）。 */
 type EmbeddedBridgeStatus = {
   running?: boolean;
@@ -50,6 +81,8 @@ type DaemonDiskStatus = {
   channels?: string[];
   lastExitReason?: string;
 };
+
+type EnvPresence = Record<string, boolean>;
 
 /** 机器人「平台」下拉的展示名（与 ImInstanceChannel 一致） */
 const IM_CHANNEL_LABELS: Record<ImInstanceChannel, string> = {
@@ -85,8 +118,112 @@ function adminConfigsEqual(a: AdminConfig, b: AdminConfig): boolean {
   return JSON.stringify(a) === JSON.stringify(b);
 }
 
+function envPresent(envPresence: EnvPresence, key: string): boolean {
+  return envPresence[key] === true;
+}
+
+function EnvCheckRow({
+  name,
+  exists,
+  optional = false,
+}: {
+  name: string;
+  exists: boolean;
+  optional?: boolean;
+}) {
+  return (
+    <div
+      style={{
+        display: 'flex',
+        justifyContent: 'space-between',
+        gap: '0.75rem',
+        fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace',
+      }}
+    >
+      <span>{name}{optional ? '（可选）' : ''}</span>
+      <span style={{ color: exists ? '#86efac' : optional ? '#94a3b8' : '#fca5a5' }}>
+        {exists ? 'exists' : optional ? 'missing' : 'missing'}
+      </span>
+    </div>
+  );
+}
+
+function RunnerEnvTip({
+  runner,
+  envPresence,
+}: {
+  runner: RunnerConfig;
+  envPresence: EnvPresence;
+}) {
+  if (runner.runtime === 'claude' && runner.claudeUseLogin !== true) {
+    const hasPrimary =
+      envPresent(envPresence, 'ANTHROPIC_API_KEY') ||
+      envPresent(envPresence, 'ANTHROPIC_AUTH_TOKEN');
+    return (
+      <div
+        style={{
+          marginTop: '0.5rem',
+          padding: '0.75rem 0.9rem',
+          border: '1px solid #334155',
+          borderRadius: '0.75rem',
+          background: '#0f172a',
+        }}
+      >
+        <p className="ui-muted ui-small" style={{ margin: 0 }}>
+          Claude API 模式会读取当前服务进程环境变量。需要至少一个主凭证：
+          <code>ANTHROPIC_API_KEY</code> 或 <code>ANTHROPIC_AUTH_TOKEN</code>；
+          自定义网关可再提供 <code>ANTHROPIC_BASE_URL</code>。
+        </p>
+        <div style={{ marginTop: '0.55rem' }}>
+          <EnvCheckRow name="ANTHROPIC_API_KEY" exists={envPresent(envPresence, 'ANTHROPIC_API_KEY')} />
+          <EnvCheckRow name="ANTHROPIC_AUTH_TOKEN" exists={envPresent(envPresence, 'ANTHROPIC_AUTH_TOKEN')} />
+          <EnvCheckRow name="ANTHROPIC_BASE_URL" exists={envPresent(envPresence, 'ANTHROPIC_BASE_URL')} optional />
+        </div>
+        <p className="ui-small" style={{ margin: '0.55rem 0 0', color: hasPrimary ? '#86efac' : '#fca5a5' }}>
+          {hasPrimary ? '主凭证已找到。' : '未找到 Claude 主凭证，关闭 CLI login 后仍无法用 API 模式。'}
+        </p>
+      </div>
+    );
+  }
+
+  if (runner.runtime === 'codex' && runner.codexUseLogin !== true) {
+    const hasPrimary =
+      envPresent(envPresence, 'CTI_CODEX_API_KEY') ||
+      envPresent(envPresence, 'CODEX_API_KEY') ||
+      envPresent(envPresence, 'OPENAI_API_KEY');
+    return (
+      <div
+        style={{
+          marginTop: '0.5rem',
+          padding: '0.75rem 0.9rem',
+          border: '1px solid #334155',
+          borderRadius: '0.75rem',
+          background: '#0f172a',
+        }}
+      >
+        <p className="ui-muted ui-small" style={{ margin: 0 }}>
+          Codex API 模式按顺序读取 <code>CTI_CODEX_API_KEY</code>、<code>CODEX_API_KEY</code>、
+          <code>OPENAI_API_KEY</code>；自定义网关使用 <code>CTI_CODEX_BASE_URL</code>。
+        </p>
+        <div style={{ marginTop: '0.55rem' }}>
+          <EnvCheckRow name="CTI_CODEX_API_KEY" exists={envPresent(envPresence, 'CTI_CODEX_API_KEY')} />
+          <EnvCheckRow name="CODEX_API_KEY" exists={envPresent(envPresence, 'CODEX_API_KEY')} />
+          <EnvCheckRow name="OPENAI_API_KEY" exists={envPresent(envPresence, 'OPENAI_API_KEY')} />
+          <EnvCheckRow name="CTI_CODEX_BASE_URL" exists={envPresent(envPresence, 'CTI_CODEX_BASE_URL')} optional />
+        </div>
+        <p className="ui-small" style={{ margin: '0.55rem 0 0', color: hasPrimary ? '#86efac' : '#fca5a5' }}>
+          {hasPrimary ? '主凭证已找到。' : '未找到 Codex 主凭证，关闭 CLI login 后将无法走 API 模式。'}
+        </p>
+      </div>
+    );
+  }
+
+  return null;
+}
+
 export default function AdminPage() {
-  const [cfg, setCfg] = useState<AdminConfig>(defaultConfig);
+  /** Per bridge slug — loaded from GET /api/local-config `configsByBridge`. */
+  const [bridgeConfigs, setBridgeConfigs] = useState<Record<string, AdminConfig>>({});
   const [configPath, setConfigPath] = useState('');
   /** Full config + form (can lag behind status query). */
   const [configLoading, setConfigLoading] = useState(true);
@@ -95,42 +232,53 @@ export default function AdminPage() {
   const [saving, setSaving] = useState(false);
   const [newBridging, setNewBridging] = useState(false);
   const [deletingBridge, setDeletingBridge] = useState(false);
-  const [switchingBridge, setSwitchingBridge] = useState(false);
   const [bridges, setBridges] = useState<string[]>([]);
   const [activeBotName, setActiveBotName] = useState('');
   const [canSwitchBridges, setCanSwitchBridges] = useState(false);
-  const [daemonStatus, setDaemonStatus] = useState<DaemonDiskStatus | null>(null);
-  const [embeddedStatus, setEmbeddedStatus] = useState<EmbeddedBridgeStatus | null>(null);
+  const [daemonStatusByBridge, setDaemonStatusByBridge] = useState<Record<string, DaemonDiskStatus>>({});
+  const [embeddedByBridge, setEmbeddedByBridge] = useState<Record<string, EmbeddedBridgeStatus>>({});
+  const [envPresence, setEnvPresence] = useState<EnvPresence>({});
   const [message, setMessage] = useState<string | null>(null);
-  /** Snapshot after last successful load/save — used to enable Save only when dirty. */
-  const [baselineCfg, setBaselineCfg] = useState<AdminConfig | null>(null);
+  /** Snapshot after last successful load/save — dirty detection per bridge. */
+  const [baselineBridgeConfigs, setBaselineBridgeConfigs] = useState<Record<string, AdminConfig> | null>(null);
+  /** Per-bridge accordion: expanded unless explicitly set to false (default expanded). */
+  const [bridgePanelExpanded, setBridgePanelExpanded] = useState<Record<string, boolean>>({});
 
-  /** 按当前服务端解析的桥接目录（botName / CTI_HOME）查询独立进程 + Next 内嵌状态。 */
+  const isBridgePanelExpanded = useCallback((slug: string) => bridgePanelExpanded[slug] !== false, [bridgePanelExpanded]);
+
+  const toggleBridgePanelExpanded = useCallback((slug: string) => {
+    setBridgePanelExpanded((prev) => {
+      const cur = prev[slug] !== false;
+      return { ...prev, [slug]: !cur };
+    });
+  }, []);
+
+  /** 不覆盖表单：只同步 bridges 列表、默认桥接名、磁盘 daemon、以及按 slug 拉两次子进程状态。 */
   const pollBridgeStatus = useCallback(async () => {
     try {
-      const [cRes, bRes] = await Promise.all([
-        fetch('/api/local-config'),
-        fetch('/api/bridge/status'),
-      ]);
+      const cRes = await fetch('/api/local-config', fetchNoStore);
       const cJson = (await readJsonFromResponse(cRes)) as {
         ok?: boolean;
-        daemonStatus?: DaemonDiskStatus;
+        daemonStatusByBridge?: Record<string, DaemonDiskStatus>;
+        envPresence?: EnvPresence;
         botName?: string;
         bridges?: string[];
         canSwitchBridges?: boolean;
         error?: string;
       };
       if (cRes.ok && cJson.ok !== false) {
-        if (cJson.daemonStatus) setDaemonStatus(cJson.daemonStatus);
+        if (cJson.daemonStatusByBridge && typeof cJson.daemonStatusByBridge === 'object') {
+          setDaemonStatusByBridge(cJson.daemonStatusByBridge);
+        }
+        if (cJson.envPresence && typeof cJson.envPresence === 'object') {
+          setEnvPresence(cJson.envPresence);
+        }
         if (typeof cJson.botName === 'string') setActiveBotName(cJson.botName);
         if (Array.isArray(cJson.bridges)) setBridges(cJson.bridges);
         setCanSwitchBridges(cJson.canSwitchBridges === true);
-      }
-      if (bRes.ok) {
-        const b = (await readJsonFromResponse(bRes)) as EmbeddedBridgeStatus;
-        setEmbeddedStatus(b);
-      } else {
-        setEmbeddedStatus(null);
+        const slugs = Array.isArray(cJson.bridges) ? cJson.bridges : [];
+        const emb = await fetchEmbeddedStatusesVerify(slugs);
+        setEmbeddedByBridge(emb);
       }
     } catch {
       /* ignore */
@@ -145,42 +293,66 @@ export default function AdminPage() {
       setMessage(null);
     }
     try {
-      const cRes = await fetch('/api/local-config');
+      const cRes = await fetch('/api/local-config', fetchNoStore);
       const cJson = (await readJsonFromResponse(cRes)) as {
         ok?: boolean;
         config?: Config;
+        configsByBridge?: Record<string, Config>;
         configPath?: string;
         bridges?: string[];
         botName?: string;
         canSwitchBridges?: boolean;
+        daemonStatusByBridge?: Record<string, DaemonDiskStatus>;
+        envPresence?: EnvPresence;
         error?: string;
       };
       if (!cRes.ok || cJson.ok === false) {
         throw new Error(cJson.error || `HTTP ${cRes.status}`);
       }
-      if (cJson.config) {
+      if (cJson.configsByBridge && typeof cJson.configsByBridge === 'object') {
+        const next: Record<string, AdminConfig> = {};
+        for (const [slug, raw] of Object.entries(cJson.configsByBridge)) {
+          const merged = { ...defaultConfig(), ...raw };
+          if (!merged.runners?.length) {
+            merged.runners = [{ id: 'default', runtime: merged.runtime, label: '默认' }];
+          }
+          next[slug] = merged;
+        }
+        setBridgeConfigs(next);
+        setBaselineBridgeConfigs(JSON.parse(JSON.stringify(next)) as Record<string, AdminConfig>);
+      } else if (cJson.config) {
         const merged = { ...defaultConfig(), ...cJson.config };
         if (!merged.runners?.length) {
           merged.runners = [{ id: 'default', runtime: merged.runtime, label: '默认' }];
         }
-        setCfg(merged);
-        setBaselineCfg(cloneAdminConfig(merged));
+        const bot = cJson.botName ?? 'default';
+        setBridgeConfigs({ [bot]: merged });
+        setBaselineBridgeConfigs({ [bot]: cloneAdminConfig(merged) });
       }
       if (cJson.configPath) setConfigPath(cJson.configPath);
       if (Array.isArray(cJson.bridges)) setBridges(cJson.bridges);
       if (typeof cJson.botName === 'string') setActiveBotName(cJson.botName);
       setCanSwitchBridges(cJson.canSwitchBridges === true);
+      if (cJson.daemonStatusByBridge && typeof cJson.daemonStatusByBridge === 'object') {
+        setDaemonStatusByBridge(cJson.daemonStatusByBridge);
+      }
+      if (cJson.envPresence && typeof cJson.envPresence === 'object') {
+        setEnvPresence(cJson.envPresence);
+      }
+      const slugs = Array.isArray(cJson.bridges) ? cJson.bridges : [];
+      const emb = await fetchEmbeddedStatusesVerify(slugs);
+      setEmbeddedByBridge(emb);
     } catch (e) {
       setMessage(e instanceof Error ? e.message : String(e));
     } finally {
+      setStatusReady(true);
       if (!opts?.silent) setConfigLoading(false);
     }
   }, []);
 
   useEffect(() => {
-    void pollBridgeStatus();
     void load();
-  }, [load, pollBridgeStatus]);
+  }, [load]);
 
   useEffect(() => {
     const id = window.setInterval(() => {
@@ -189,75 +361,23 @@ export default function AdminPage() {
     return () => window.clearInterval(id);
   }, [pollBridgeStatus]);
 
-  const updateImBot = (patch: Partial<ImInstanceSpec>) => {
-    setCfg((prev) => {
-      if (!prev.imBot) return prev;
-      return { ...prev, imBot: { ...prev.imBot, ...patch } };
-    });
-  };
-
-  const addImBot = () => {
-    setCfg((prev) => {
-      const template = normalizeRunners(asConfig(prev)).map((r) => ({ ...r }));
-      if (!template.length) {
-        template.push({ id: 'default', runtime: prev.runtime, label: '默认' });
-      }
-      const bridgeId = activeBotName.trim() || 'im';
-      const spec: ImInstanceSpec = {
-        id: bridgeId,
-        channel: 'telegram',
-        runners: template,
-        defaultRunnerId: template[0]?.id,
-      };
-      return { ...prev, imBot: spec };
-    });
-  };
-
-  const updateImRunner = (runnerIdx: number, patch: Partial<RunnerConfig>) => {
-    setCfg((prev) => {
-      const spec = prev.imBot;
-      if (!spec) return prev;
-      const runners = [...(spec.runners ?? normalizeRunners(asConfig(prev)))];
-      runners[runnerIdx] = { ...runners[runnerIdx], ...patch } as RunnerConfig;
-      return { ...prev, imBot: { ...spec, runners } };
-    });
-  };
-
-  const addImRunner = () => {
-    setCfg((prev) => {
-      const spec = prev.imBot;
-      if (!spec) return prev;
-      const runners = [...(spec.runners ?? normalizeRunners(asConfig(prev)))];
-      const n = runners.length + 1;
-      runners.push({ id: `rt-${n}`, runtime: 'claude', label: `Runner ${n}` });
-      return { ...prev, imBot: { ...spec, runners } };
-    });
-  };
-
-  const removeImRunner = (runnerIdx: number) => {
-    setCfg((prev) => {
-      const spec = prev.imBot;
-      if (!spec) return prev;
-      const runners = [...(spec.runners ?? [])].filter((_, i) => i !== runnerIdx);
-      return { ...prev, imBot: { ...spec, runners } };
-    });
-  };
-
-  const saveConfig = async () => {
+  const saveBridgeConfig = async (slug: string) => {
+    const payload = bridgeConfigs[slug];
+    if (!payload) return;
     setSaving(true);
     setMessage(null);
     try {
       const res = await fetch('/api/local-config', {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(cfg),
+        body: JSON.stringify({ targetBridge: slug, ...payload }),
+        ...fetchNoStore,
       });
       const j = (await readJsonFromResponse(res)) as { ok?: boolean; error?: string; configPath?: string };
       if (!res.ok || j.ok === false) throw new Error(j.error || res.statusText);
       if (j.configPath) setConfigPath(j.configPath);
-      setMessage(`已写入 ${j.configPath || configPath || 'config.env'}。修改后请按需重启桥接进程或 Next 服务。`);
-      await load();
-      await pollBridgeStatus();
+      setMessage(`已写入「${slug}」${j.configPath || ''}。修改后请按需重启该桥接或 Next 服务。`);
+      await load({ silent: true });
     } catch (e) {
       setMessage(e instanceof Error ? e.message : String(e));
     } finally {
@@ -265,47 +385,21 @@ export default function AdminPage() {
     }
   };
 
-  const bridgeAction = async (action: 'start' | 'stop') => {
+  const bridgeAction = async (action: 'start' | 'stop', slug: string) => {
     setMessage(null);
     try {
-      const res = await fetch(`/api/bridge/${action}`, { method: 'POST' });
-      const j = (await readJsonFromResponse(res)) as EmbeddedBridgeStatus & { error?: string };
-      if (!res.ok) throw new Error(j.error || res.statusText);
-      setEmbeddedStatus(j);
-      await pollBridgeStatus();
-      setMessage(action === 'start' ? '桥接启动指令已发送。' : '桥接停止指令已发送。');
-    } catch (e) {
-      setMessage(e instanceof Error ? e.message : String(e));
-    }
-  };
-
-  const switchBridge = async (slug: string) => {
-    if (!slug || slug === activeBotName) return;
-    setSwitchingBridge(true);
-    setMessage(null);
-    try {
-      const res = await fetch('/api/local-config', {
+      const res = await fetch(`/api/bridge/${action}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ switchBridge: slug }),
+        body: JSON.stringify({ slug }),
+        ...fetchNoStore,
       });
-      const j = (await readJsonFromResponse(res)) as {
-        ok?: boolean;
-        error?: string;
-        configPath?: string;
-        botName?: string;
-      };
-      if (!res.ok || j.ok === false) throw new Error(j.error || res.statusText);
-      if (j.configPath) setConfigPath(j.configPath);
-      if (j.botName) setActiveBotName(j.botName);
-      setStatusReady(false);
-      await load({ silent: true });
+      const j = (await readJsonFromResponse(res)) as EmbeddedBridgeStatus & { error?: string };
+      if (!res.ok) throw new Error(j.error || res.statusText);
       await pollBridgeStatus();
-      setMessage(`已切换到桥接「${j.botName ?? slug}」。表单已加载该目录下的配置。`);
+      setMessage(action === 'start' ? `桥接「${slug}」启动指令已发送。` : `桥接「${slug}」停止指令已发送。`);
     } catch (e) {
       setMessage(e instanceof Error ? e.message : String(e));
-    } finally {
-      setSwitchingBridge(false);
     }
   };
 
@@ -317,6 +411,7 @@ export default function AdminPage() {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ newBridge: true }),
+        ...fetchNoStore,
       });
       const j = (await readJsonFromResponse(res)) as {
         ok?: boolean;
@@ -326,10 +421,12 @@ export default function AdminPage() {
       };
       if (!res.ok || j.ok === false) throw new Error(j.error || res.statusText);
       if (j.configPath) setConfigPath(j.configPath);
-      if (j.botName) setActiveBotName(j.botName);
+      if (j.botName) {
+        setActiveBotName(j.botName);
+        setBridgePanelExpanded((prev) => ({ ...prev, [j.botName!]: true }));
+      }
       setStatusReady(false);
       await load({ silent: true });
-      await pollBridgeStatus();
       setMessage(`已新建桥接目录 ${j.botName ?? ''}，配置路径：${j.configPath ?? ''}。表单已重新加载，请按需填写并保存。`);
     } catch (e) {
       setMessage(e instanceof Error ? e.message : String(e));
@@ -337,11 +434,6 @@ export default function AdminPage() {
       setNewBridging(false);
     }
   };
-
-  const configDirty = useMemo(() => {
-    if (baselineCfg === null) return false;
-    return !adminConfigsEqual(cfg, baselineCfg);
-  }, [cfg, baselineCfg]);
 
   const bridgeList = useMemo(() => {
     if (bridges.length > 0) return bridges;
@@ -354,25 +446,11 @@ export default function AdminPage() {
     return activeBotName ? [activeBotName] : bridgeList;
   }, [canSwitchBridges, bridgeList, activeBotName]);
 
-  const handleSelectBridge = (slug: string) => {
-    if (slug === activeBotName) return;
-    if (configDirty) {
-      if (
-        !window.confirm(
-          '当前有未保存的修改，确定切换到其他桥接？未保存的更改将丢失。',
-        )
-      ) {
-        return;
-      }
-    }
-    void switchBridge(slug);
-  };
-
-  const removeBridgeDirectory = async () => {
-    if (!activeBotName) return;
+  const removeBridgeDirectory = async (slug: string) => {
+    if (!slug) return;
     if (
       !window.confirm(
-        `确定删除桥接「${activeBotName}」及其目录下全部数据？此操作不可撤销。若删除当前桥接，将切换到其余桥接或新建空目录。`,
+        `确定删除桥接「${slug}」及其目录下全部数据？此操作不可撤销。若删除的是当前默认桥接，将切换到其余桥接或新建空目录。`,
       )
     ) {
       return;
@@ -383,7 +461,8 @@ export default function AdminPage() {
       const res = await fetch('/api/local-config', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ deleteBridge: activeBotName }),
+        body: JSON.stringify({ deleteBridge: slug }),
+        ...fetchNoStore,
       });
       const j = (await readJsonFromResponse(res)) as {
         ok?: boolean;
@@ -396,7 +475,6 @@ export default function AdminPage() {
       if (j.botName) setActiveBotName(j.botName);
       setStatusReady(false);
       await load({ silent: true });
-      await pollBridgeStatus();
       setMessage(`已删除桥接目录。当前桥接：${j.botName ?? '—'}，配置：${j.configPath ?? ''}。`);
     } catch (e) {
       setMessage(e instanceof Error ? e.message : String(e));
@@ -405,46 +483,8 @@ export default function AdminPage() {
     }
   };
 
-  /** 磁盘或 API 任一方认为在跑，则视为运行中（用于与「启动」互斥）。 */
-  const anyBridgeRunning =
-    embeddedStatus?.running === true || daemonStatus?.effectiveRunning === true;
-  /** 仅当本应用子进程且 API 确认在跑时，才允许「停止」。 */
-  const canStopManagedBridge =
-    embeddedStatus?.running === true && embeddedStatus?.managedByApp === true;
-
   const bridgeActionsLocked =
-    !statusReady || saving || newBridging || deletingBridge || switchingBridge;
-
-  const startDisabled = bridgeActionsLocked || configLoading || anyBridgeRunning;
-  const stopDisabled = bridgeActionsLocked || configLoading || !canStopManagedBridge;
-
-  let daemonLine = '独立进程：正在查询当前目录下的 status.json / PID…';
-  if (statusReady) {
-    if (!daemonStatus) {
-      daemonLine = '独立进程：暂无状态数据';
-    } else if (!daemonStatus.statusFilePresent) {
-      daemonLine =
-        '独立进程：未发现 status.json（通常表示尚未用 daemon/守护进程在本目录启动过）';
-    } else if (daemonStatus.stale) {
-      daemonLine =
-        '独立进程：状态仍为「运行中」但 PID 已不存在（可重新点「启动桥接」或检查守护进程）';
-    } else if (daemonStatus.effectiveRunning) {
-      const pidPart = daemonStatus.pid != null ? ` · PID ${daemonStatus.pid}` : '';
-      const ch =
-        daemonStatus.channels?.length ? ` · 通道 ${daemonStatus.channels.join(', ')}` : '';
-      daemonLine = `独立进程：运行中${pidPart}${ch}`;
-    } else {
-      daemonLine = '独立进程：已停止';
-    }
-  }
-
-  const childLine = !statusReady
-    ? '本应用桥接：查询中…'
-    : embeddedStatus?.running === true && embeddedStatus?.managedByApp === true
-      ? '本应用桥接：由 Next 以子进程启动；关闭本服务或点「停止」会结束该进程。'
-      : embeddedStatus?.running === true && embeddedStatus?.managedByApp !== true
-        ? '本应用桥接：当前为外部进程（非本机 Next 子进程）；关闭 Next 不会自动结束，请用 scripts/daemon.sh stop 或结束对应 PID。'
-        : '本应用桥接：未运行（点「启动」由 Next 启动子进程）。';
+    !statusReady || saving || newBridging || deletingBridge;
 
   return (
     <main className="page-shell ui-admin">
@@ -472,7 +512,7 @@ export default function AdminPage() {
             <button
               type="button"
               className="ui-btn secondary"
-              disabled={saving || newBridging || deletingBridge || switchingBridge}
+              disabled={saving || newBridging || deletingBridge}
               onClick={() => void createNewBridge()}
             >
               {newBridging ? '正在新建…' : '新建桥接'}
@@ -496,14 +536,13 @@ export default function AdminPage() {
           }}
         >
           <p style={{ margin: 0, fontSize: '0.95rem' }}>
-            <strong>当前桥接</strong> · <code>{activeBotName || '—'}</code>
+            每个桥接目录相互独立，可同时运行；请在下方各行查看该目录的独立进程状态并启动或停止。
           </p>
-          <p className="ui-muted ui-small" style={{ margin: '0.4rem 0 0' }}>
-            {daemonLine}
-          </p>
-          <p className="ui-muted ui-small" style={{ margin: '0.25rem 0 0' }}>
-            {childLine}
-          </p>
+          {!canSwitchBridges ? (
+            <p className="ui-muted ui-small" style={{ margin: '0.4rem 0 0' }}>
+              已设置 <code>CTI_HOME</code> 时由环境固定单一数据目录，无法在此新建多个桥接目录。
+            </p>
+          ) : null}
         </div>
         {configLoading ? (
           <p className="ui-muted">正在加载配置表单…</p>
@@ -515,31 +554,99 @@ export default function AdminPage() {
         ) : (
           <div className="ui-bridge-accordion" role="list">
             {displayBridgeList.map((b) => {
-              const showAccordionSwitch = canSwitchBridges && displayBridgeList.length > 1;
+              const showAccordionChevron = canSwitchBridges && displayBridgeList.length > 1;
+              const bridgePanelOpen = showAccordionChevron ? isBridgePanelExpanded(b) : true;
+              const cfgB = bridgeConfigs[b] ?? defaultConfig();
+              const updateImBot = (patch: Partial<ImInstanceSpec>) => {
+                setBridgeConfigs((prev) => {
+                  const cur = prev[b] ?? defaultConfig();
+                  if (!cur.imBot) return prev;
+                  return { ...prev, [b]: { ...cur, imBot: { ...cur.imBot, ...patch } } };
+                });
+              };
+              const addImBot = () => {
+                setBridgeConfigs((prev) => {
+                  const cur = prev[b] ?? defaultConfig();
+                  const template = normalizeRunners(asConfig(cur)).map((r) => ({ ...r }));
+                  if (!template.length) {
+                    template.push({ id: 'default', runtime: cur.runtime, label: '默认' });
+                  }
+                  const spec: ImInstanceSpec = {
+                    id: b.trim() || 'im',
+                    channel: 'telegram',
+                    runners: template,
+                    defaultRunnerId: template[0]?.id,
+                  };
+                  return { ...prev, [b]: { ...cur, imBot: spec } };
+                });
+              };
+              const updateImRunner = (runnerIdx: number, patch: Partial<RunnerConfig>) => {
+                setBridgeConfigs((prev) => {
+                  const cur = prev[b] ?? defaultConfig();
+                  const spec = cur.imBot;
+                  if (!spec) return prev;
+                  const runners = [...(spec.runners ?? normalizeRunners(asConfig(cur)))];
+                  runners[runnerIdx] = { ...runners[runnerIdx], ...patch } as RunnerConfig;
+                  return { ...prev, [b]: { ...cur, imBot: { ...spec, runners } } };
+                });
+              };
+              const addImRunner = () => {
+                setBridgeConfigs((prev) => {
+                  const cur = prev[b] ?? defaultConfig();
+                  const spec = cur.imBot;
+                  if (!spec) return prev;
+                  const runners = [...(spec.runners ?? normalizeRunners(asConfig(cur)))];
+                  const n = runners.length + 1;
+                  runners.push({ id: `rt-${n}`, runtime: 'claude', label: `Runner ${n}` });
+                  return { ...prev, [b]: { ...cur, imBot: { ...spec, runners } } };
+                });
+              };
+              const removeImRunner = (runnerIdx: number) => {
+                setBridgeConfigs((prev) => {
+                  const cur = prev[b] ?? defaultConfig();
+                  const spec = cur.imBot;
+                  if (!spec) return prev;
+                  const runners = [...(spec.runners ?? [])].filter((_, i) => i !== runnerIdx);
+                  return { ...prev, [b]: { ...cur, imBot: { ...spec, runners } } };
+                });
+              };
+              const configDirtyB = !baselineBridgeConfigs?.[b]
+                ? false
+                : !adminConfigsEqual(cfgB, baselineBridgeConfigs[b]!);
+              const embB = embeddedByBridge[b];
+              const dmB = daemonStatusByBridge[b];
+              const anyRunningB = embB?.running === true || dmB?.effectiveRunning === true;
+              const startDisabledB = bridgeActionsLocked || configLoading || anyRunningB;
+              const canStopB = embB?.running === true && embB?.managedByApp === true;
+              const stopDisabledB = bridgeActionsLocked || configLoading || !canStopB;
               return (
               <div
                 key={b}
-                className={`ui-bridge-accordion-item${activeBotName === b ? ' is-active' : ''}`}
+                className="ui-bridge-accordion-item"
                 role="listitem"
               >
-                {showAccordionSwitch ? (
-                  <button
-                    type="button"
-                    className="ui-bridge-accordion-trigger"
-                    aria-expanded={activeBotName === b}
-                    aria-controls={`admin-bridge-panel-${b}`}
-                    id={`admin-bridge-head-${b}`}
-                    disabled={switchingBridge || newBridging || deletingBridge}
-                    onClick={() => handleSelectBridge(b)}
-                  >
-                    <span className="ui-bridge-accordion-chevron" aria-hidden>
-                      {activeBotName === b ? '▼' : '▶'}
-                    </span>
-                    <code>{b}</code>
-                    {activeBotName === b ? (
-                      <span className="ui-bridge-accordion-badge">当前</span>
-                    ) : null}
-                  </button>
+                {showAccordionChevron ? (
+                  <div className="ui-bridge-accordion-head">
+                    <button
+                      type="button"
+                      className="ui-bridge-accordion-chevron-btn"
+                      aria-expanded={isBridgePanelExpanded(b)}
+                      aria-controls={`admin-bridge-panel-${b}`}
+                      disabled={newBridging || deletingBridge}
+                      onClick={() => toggleBridgePanelExpanded(b)}
+                      title={isBridgePanelExpanded(b) ? '收起本行' : '展开本行'}
+                    >
+                      <span className="ui-bridge-accordion-chevron" aria-hidden>
+                        {isBridgePanelExpanded(b) ? '▼' : '▶'}
+                      </span>
+                    </button>
+                    <div
+                      className="ui-bridge-accordion-title"
+                      id={`admin-bridge-head-${b}`}
+                    >
+                      <code>{b}</code>
+                    </div>
+                  </div>
                 ) : (
                   <div
                     className="ui-bridge-accordion-trigger ui-bridge-accordion-trigger-static"
@@ -549,10 +656,9 @@ export default function AdminPage() {
                       ▼
                     </span>
                     <code>{b}</code>
-                    <span className="ui-bridge-accordion-badge">当前</span>
                   </div>
                 )}
-                {activeBotName === b ? (
+                {bridgePanelOpen ? (
                   <div
                     className="ui-bridge-accordion-panel"
                     id={`admin-bridge-panel-${b}`}
@@ -561,7 +667,7 @@ export default function AdminPage() {
                   >
         <div className="ui-section-title">
           <h3>IM 机器人（CTI_IM_BOT）</h3>
-          {!cfg.imBot ? (
+          {!cfgB.imBot ? (
             <button type="button" className="ui-btn secondary" onClick={addImBot}>
               添加机器人
             </button>
@@ -571,20 +677,20 @@ export default function AdminPage() {
           会话绑定里的 channelType 形如 <code>telegram:你的-id</code>。未使用 <code>CTI_IM_BOT</code> 时仍可依赖顶格{' '}
           <code>CTI_TG_BOT_TOKEN</code> 等字段（可直接编辑 config.env）。
         </p>
-        {!cfg.imBot ? (
+        {!cfgB.imBot ? (
           <p className="ui-muted ui-small">尚未配置机器人：请点击「添加机器人」。</p>
         ) : (
           <div className="ui-stack">
             {(() => {
-              const spec = cfg.imBot;
+              const spec = cfgB.imBot!;
               return (
               <div key="im-bot" className="ui-card" style={{ padding: '1rem', border: '1px solid var(--ui-border, #333)' }}>
                 <div className="ui-grid" style={{ alignItems: 'flex-end' }}>
                   <div className="ui-field">
                     <span>桥接实例标识（路由与存储）</span>
                     <p className="ui-muted ui-small" style={{ margin: '0.35rem 0 0' }}>
-                      与当前桥接目录名一致，保存时由服务端写入 <code>CTI_IM_BOT.id</code>：
-                      <code>{activeBotName || '—'}</code>
+                      与本行目录名一致，保存时由服务端写入 <code>CTI_IM_BOT.id</code>：
+                      <code>{b}</code>
                     </p>
                   </div>
                   <label className="ui-field">
@@ -842,14 +948,14 @@ export default function AdminPage() {
                       value={spec.defaultRunnerId ?? (spec.runners?.[0]?.id ?? '')}
                       onChange={(e) => updateImBot({ defaultRunnerId: e.target.value || undefined })}
                     >
-                      {(spec.runners ?? normalizeRunners(asConfig(cfg))).map((r) => (
+                      {(spec.runners ?? normalizeRunners(asConfig(cfgB))).map((r) => (
                         <option key={r.id} value={r.id}>
                           {r.id}（{r.runtime}）
                         </option>
                       ))}
                     </select>
                   </label>
-                  {(spec.runners ?? normalizeRunners(asConfig(cfg))).map((prof, ridx) => (
+                  {(spec.runners ?? normalizeRunners(asConfig(cfgB))).map((prof, ridx) => (
                     <div key={`${ridx}-${prof.id}`} className="ui-slot" style={{ marginTop: '0.5rem' }}>
                       <div className="ui-slot-head">
                         <strong>Runner</strong>
@@ -933,46 +1039,62 @@ export default function AdminPage() {
                         </label>
                       </div>
                       {prof.runtime === 'claude' && (
-                        <div
-                          className="ui-grid"
-                          style={{ marginTop: '0.75rem', marginBottom: '0.75rem' }}
-                        >
-                          <label className="ui-field">
-                            <span>Claude CLI 路径</span>
-                            <input
-                              value={prof.claudeExecutable ?? ''}
-                              onChange={(e) =>
-                                updateImRunner(ridx, { claudeExecutable: e.target.value || undefined })
-                              }
-                            />
-                          </label>
-                        </div>
+                        <>
+                          <div
+                            className="ui-grid"
+                            style={{ marginTop: '0.75rem', marginBottom: '0.75rem' }}
+                          >
+                            <label className="ui-field">
+                              <span>Claude CLI 路径</span>
+                              <input
+                                value={prof.claudeExecutable ?? ''}
+                                onChange={(e) =>
+                                  updateImRunner(ridx, { claudeExecutable: e.target.value || undefined })
+                                }
+                              />
+                            </label>
+                            <label className="ui-field ui-check">
+                              <input
+                                type="checkbox"
+                                checked={prof.claudeUseLogin === true}
+                                onChange={(e) =>
+                                  updateImRunner(ridx, { claudeUseLogin: e.target.checked ? true : undefined })
+                                }
+                              />
+                              <span>Claude 使用 CLI login</span>
+                            </label>
+                          </div>
+                          <RunnerEnvTip runner={prof} envPresence={envPresence} />
+                        </>
                       )}
                       {prof.runtime === 'codex' && (
-                        <div
-                          className="ui-grid"
-                          style={{ marginTop: '0.75rem', marginBottom: '0.75rem' }}
-                        >
-                          <label className="ui-field">
-                            <span>Codex wrapper 路径</span>
-                            <input
-                              value={prof.codexExecutable ?? ''}
-                              onChange={(e) =>
-                                updateImRunner(ridx, { codexExecutable: e.target.value || undefined })
-                              }
-                            />
-                          </label>
-                          <label className="ui-field ui-check">
-                            <input
-                              type="checkbox"
-                              checked={prof.codexUseLogin === true}
-                              onChange={(e) =>
-                                updateImRunner(ridx, { codexUseLogin: e.target.checked ? true : undefined })
-                              }
-                            />
-                            <span>Codex 使用 CLI login</span>
-                          </label>
-                        </div>
+                        <>
+                          <div
+                            className="ui-grid"
+                            style={{ marginTop: '0.75rem', marginBottom: '0.75rem' }}
+                          >
+                            <label className="ui-field">
+                              <span>Codex wrapper 路径</span>
+                              <input
+                                value={prof.codexExecutable ?? ''}
+                                onChange={(e) =>
+                                  updateImRunner(ridx, { codexExecutable: e.target.value || undefined })
+                                }
+                              />
+                            </label>
+                            <label className="ui-field ui-check">
+                              <input
+                                type="checkbox"
+                                checked={prof.codexUseLogin === true}
+                                onChange={(e) =>
+                                  updateImRunner(ridx, { codexUseLogin: e.target.checked ? true : undefined })
+                                }
+                              />
+                              <span>Codex 使用 CLI login</span>
+                            </label>
+                          </div>
+                          <RunnerEnvTip runner={prof} envPresence={envPresence} />
+                        </>
                       )}
                       {prof.runtime === 'cursor' && (
                         <div
@@ -1004,9 +1126,11 @@ export default function AdminPage() {
                   }}
                 >
                   <p className="ui-muted ui-small">
-                    <strong>Local Agent</strong>：勾选后该 bot 不再走上方平台 API；仅在此模式下连接 Redis（普通频道不会用 Redis）。
-                    Runner 从 <code>input</code> 取用户文本，回复写入 <code>out</code>，可转发到同平台另一实例的{' '}
-                    <code>input</code>。键前缀：<code>cti:localagent:平台:实例id:</code>。下方 Redis URL 为<strong>必填</strong>
+                    <strong>Local Agent</strong>：勾选并填写 Redis URL 后，可二选一——（1）<strong>仅 Redis</strong>：不填上方
+                    Telegram/Discord 等平台 token，桥只从 <code>input</code> 取词、把回复写入 <code>out</code>；（2）
+                    <strong>混合</strong>：同时填写平台 token 与 Redis，则 IM 用户消息既走普通 Runner，也会 LPUSH 到{' '}
+                    <code>input</code> 给 Local Agent 管线；两路回复都发到同一聊天，并带前缀 <code>[runner]</code> /{' '}
+                    <code>[local-agent]</code>。键前缀：<code>cti:localagent:平台:实例id:</code>。Redis URL 为<strong>必填</strong>
                     （不使用全局 <code>CTI_AGENT_REDIS_URL</code>）。
                   </p>
                   <div className="ui-grid">
@@ -1057,6 +1181,18 @@ export default function AdminPage() {
                         />
                       </label>
                       <label className="ui-field">
+                        <span>Local Agent Runner id（与上方 Runner 列表其一的 id 一致）</span>
+                        <input
+                          value={spec.localAgentRunnerId ?? ''}
+                          onChange={(e) =>
+                            updateImBot({
+                              localAgentRunnerId: e.target.value.trim() || undefined,
+                            })
+                          }
+                          placeholder="例如 default 或自定义 runner id"
+                        />
+                      </label>
+                      <label className="ui-field">
                         <span>Peer 实例 id（可选，同平台）</span>
                         <input
                           value={spec.localAgentPeerInstanceId ?? ''}
@@ -1076,7 +1212,7 @@ export default function AdminPage() {
           </div>
         )}
         <p className="ui-muted ui-small" style={{ marginTop: '1rem' }}>
-          写入配置中的 CTI_RUNTIME（当前生效值）：<code>{cfg.runtime}</code>
+          写入配置中的 CTI_RUNTIME（本目录）：<code>{cfgB.runtime}</code>
         </p>
         <div
           className="ui-actions-bar ui-bridge-panel-actions"
@@ -1092,43 +1228,40 @@ export default function AdminPage() {
         >
           {!canSwitchBridges ? (
             <p className="ui-muted ui-small" style={{ margin: 0, flex: '1 1 200px' }}>
-              已设置 <code>CTI_HOME</code> 时由环境固定目录，无法在此切换多个桥接；未设置时可在上方折叠行切换。
+              已设置 <code>CTI_HOME</code> 时由环境固定目录，无法在此新建多个桥接目录。
             </p>
           ) : (
             <p className="ui-muted ui-small" style={{ margin: 0, flex: '1 1 200px' }}>
-              切换其他桥接前若有未保存修改将提示确认。
+              左侧箭头只展开/收起本行表单；各行可独立保存、启动或停止。
             </p>
           )}
           <button
             type="button"
             className="ui-btn primary"
             disabled={
-              !configDirty ||
+              !configDirtyB ||
               configLoading ||
               saving ||
               newBridging ||
-              deletingBridge ||
-              switchingBridge
+              deletingBridge
             }
-            onClick={() => void saveConfig()}
-            title={!configDirty ? '没有变更' : undefined}
+            onClick={() => void saveBridgeConfig(b)}
+            title={!configDirtyB ? '没有变更' : undefined}
           >
             {saving ? '保存中…' : '保存 config.env'}
           </button>
-          <button type="button" className="ui-btn secondary" disabled={startDisabled} onClick={() => void bridgeAction('start')}>
+          <button type="button" className="ui-btn secondary" disabled={startDisabledB} onClick={() => void bridgeAction('start', b)}>
             启动桥接
           </button>
-          <button type="button" className="ui-btn secondary" disabled={stopDisabled} onClick={() => void bridgeAction('stop')}>
+          <button type="button" className="ui-btn secondary" disabled={stopDisabledB} onClick={() => void bridgeAction('stop', b)}>
             停止桥接
           </button>
           {canSwitchBridges ? (
             <button
               type="button"
               className="ui-btn secondary"
-              disabled={
-                saving || newBridging || deletingBridge || switchingBridge || !activeBotName
-              }
-              onClick={() => void removeBridgeDirectory()}
+              disabled={saving || newBridging || deletingBridge}
+              onClick={() => void removeBridgeDirectory(b)}
             >
               {deletingBridge ? '正在删除…' : '删除桥接'}
             </button>

@@ -1,21 +1,36 @@
 /**
- * Runs the bridge daemon (`src/main.ts` / `dist/daemon.mjs`) as a **child process** of the
- * Next.js server. When the server exits, the child is terminated so bridge processes are not
- * left orphaned.
+ * Runs bridge daemons (`src/main.ts` / `dist/daemon.mjs`) as **child processes** of the
+ * Next.js server. Multiple bridges (distinct `CTI_HOME` directories) may run at once; each
+ * home has at most one managed child. When the server exits, all children are terminated.
  */
 
 import { spawn, type ChildProcess } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 
+import { getCtiHome } from '../config';
 import { readBridgeDaemonDiskStatus } from './bridge-daemon-status';
 import type { AdapterStatus, BridgeStatus } from './bridge/types';
 
-let managedChild: ChildProcess | null = null;
+/** Resolved absolute path → child process we spawned for that bridge home. */
+const managedChildren = new Map<string, ChildProcess>();
 let shutdownHooksRegistered = false;
 
 function getProjectRoot(): string {
   return process.env.CTI_PROJECT_ROOT?.trim() || process.cwd();
+}
+
+/** Resolved CTI_HOME for this operation (explicit override or active server home). */
+export function resolveBridgeHomeKey(ctiHomeOverride?: string): string {
+  return ctiHomeOverride !== undefined ? path.resolve(ctiHomeOverride) : path.resolve(getCtiHome());
+}
+
+function isProcessAlive(c: ChildProcess | undefined | null): boolean {
+  return c != null && !c.killed && c.exitCode === null;
+}
+
+function getManagedChildForHome(home: string): ChildProcess | undefined {
+  return managedChildren.get(home);
 }
 
 /**
@@ -37,20 +52,20 @@ export function resolveDaemonEntry(): { command: string; args: string[] } {
   );
 }
 
-function isManagedChildAlive(): boolean {
-  const c = managedChild;
-  return c != null && !c.killed && c.exitCode === null;
-}
-
-/** True when status.json PID matches the child we spawned in this process. */
-export function isBridgeManagedByApp(): boolean {
-  const disk = readBridgeDaemonDiskStatus();
+/** True when status.json PID matches the managed child for this `home`. */
+export function isBridgeManagedByApp(ctiHomeOverride?: string): boolean {
+  const home = resolveBridgeHomeKey(ctiHomeOverride);
+  const disk = readBridgeDaemonDiskStatus(home);
   if (!disk.effectiveRunning || disk.pid == null) return false;
-  if (!isManagedChildAlive() || managedChild!.pid == null) return false;
-  return managedChild!.pid === disk.pid;
+  const child = getManagedChildForHome(home);
+  if (!isProcessAlive(child) || child!.pid == null) return false;
+  return child!.pid === disk.pid;
 }
 
-function diskStatusToBridgeStatus(disk: ReturnType<typeof readBridgeDaemonDiskStatus>): BridgeStatus {
+function diskStatusToBridgeStatus(
+  disk: ReturnType<typeof readBridgeDaemonDiskStatus>,
+  home: string,
+): BridgeStatus {
   if (!disk.effectiveRunning) {
     return { running: false, startedAt: null, adapters: [], managedByApp: false };
   }
@@ -66,113 +81,17 @@ function diskStatusToBridgeStatus(disk: ReturnType<typeof readBridgeDaemonDiskSt
     running: true,
     startedAt: disk.startedAt ?? null,
     adapters,
-    managedByApp: isBridgeManagedByApp(),
+    managedByApp: isBridgeManagedByApp(home),
   };
 }
 
-/** Status for GET /api/bridge/status — derived from on-disk daemon + our managed child PID. */
-export function getBridgeStatusForApi(): BridgeStatus {
-  return diskStatusToBridgeStatus(readBridgeDaemonDiskStatus());
+/** Status for GET /api/bridge/status — on-disk daemon + managed child PID for one home. */
+export function getBridgeStatusForApi(ctiHomeOverride?: string): BridgeStatus {
+  const home = resolveBridgeHomeKey(ctiHomeOverride);
+  return diskStatusToBridgeStatus(readBridgeDaemonDiskStatus(home), home);
 }
 
-export function registerBridgeShutdownHooks(): void {
-  if (shutdownHooksRegistered) return;
-  shutdownHooksRegistered = true;
-
-  const onSignal = () => {
-    void stopBridgeDaemonChild().catch(() => {});
-  };
-  process.on('SIGTERM', onSignal);
-  process.on('SIGINT', onSignal);
-
-  process.on('exit', () => {
-    const c = managedChild;
-    if (c && !c.killed) {
-      try {
-        c.kill('SIGKILL');
-      } catch {
-        /* ignore */
-      }
-    }
-  });
-}
-
-function attachChildHandlers(child: ChildProcess): void {
-  child.on('exit', (code, signal) => {
-    if (managedChild === child) managedChild = null;
-    console.log(`[bridge-app-child] daemon exited code=${code} signal=${signal ?? ''}`);
-  });
-  child.on('error', (err) => {
-    console.error('[bridge-app-child] spawn error:', err);
-    if (managedChild === child) managedChild = null;
-  });
-}
-
-/**
- * Start the bridge as a child process. Refuses if another process already holds the bridge
- * (status.json + live PID) unless it is our own child.
- */
-export async function startBridgeDaemonChild(): Promise<void> {
-  registerBridgeShutdownHooks();
-
-  const disk0 = readBridgeDaemonDiskStatus();
-  if (disk0.effectiveRunning) {
-    if (isBridgeManagedByApp()) return;
-    throw new Error(
-      `桥接已在运行（PID ${disk0.pid ?? '?'}）。若为外部 daemon.sh 启动，请先停止或更换 CTI_HOME。`,
-    );
-  }
-
-  if (managedChild && isManagedChildAlive()) {
-    return;
-  }
-
-  if (managedChild) {
-    managedChild = null;
-  }
-
-  const { command, args } = resolveDaemonEntry();
-  const child = spawn(command, args, {
-    cwd: getProjectRoot(),
-    env: { ...process.env },
-    stdio: 'inherit',
-    detached: false,
-  });
-  managedChild = child;
-  attachChildHandlers(child);
-
-  const expectedPid = child.pid;
-  if (expectedPid == null) {
-    managedChild = null;
-    throw new Error('桥接子进程未能取得 PID');
-  }
-
-  for (let i = 0; i < 60; i++) {
-    await new Promise((r) => setTimeout(r, 500));
-    if (!isManagedChildAlive()) {
-      throw new Error('桥接进程启动后立即退出，请查看终端日志。');
-    }
-    const disk = readBridgeDaemonDiskStatus();
-    if (disk.effectiveRunning && disk.pid === expectedPid) return;
-  }
-  throw new Error('桥接进程启动超时（未在 status.json 中看到预期 PID）。');
-}
-
-export type StopBridgeResult = { ok: true } | { ok: false; reason: 'not_managed' };
-
-/**
- * Stop only the daemon we spawned. If another process owns the bridge, returns `not_managed`.
- */
-export async function stopBridgeDaemonChild(): Promise<StopBridgeResult> {
-  const child = managedChild;
-  if (!child) {
-    const disk = readBridgeDaemonDiskStatus();
-    if (disk.effectiveRunning) {
-      return { ok: false, reason: 'not_managed' };
-    }
-    return { ok: true };
-  }
-
+async function killManagedChild(home: string, child: ChildProcess): Promise<void> {
   child.kill('SIGTERM');
   await new Promise<void>((resolve) => {
     const t = setTimeout(() => {
@@ -188,6 +107,120 @@ export async function stopBridgeDaemonChild(): Promise<StopBridgeResult> {
       resolve();
     });
   });
-  if (managedChild === child) managedChild = null;
+  if (managedChildren.get(home) === child) {
+    managedChildren.delete(home);
+  }
+}
+
+async function stopAllManagedBridgeChildren(): Promise<void> {
+  const entries = [...managedChildren.entries()];
+  await Promise.all(entries.map(([home, child]) => killManagedChild(home, child)));
+}
+
+export function registerBridgeShutdownHooks(): void {
+  if (shutdownHooksRegistered) return;
+  shutdownHooksRegistered = true;
+
+  const onSignal = () => {
+    void stopAllManagedBridgeChildren().catch(() => {});
+  };
+  process.on('SIGTERM', onSignal);
+  process.on('SIGINT', onSignal);
+
+  process.on('exit', () => {
+    for (const [, child] of managedChildren) {
+      if (child && !child.killed) {
+        try {
+          child.kill('SIGKILL');
+        } catch {
+          /* ignore */
+        }
+      }
+    }
+  });
+}
+
+function attachChildHandlers(child: ChildProcess, home: string): void {
+  child.on('exit', (code, signal) => {
+    if (managedChildren.get(home) === child) {
+      managedChildren.delete(home);
+    }
+    console.log(`[bridge-app-child] daemon exited home=${home} code=${code} signal=${signal ?? ''}`);
+  });
+  child.on('error', (err) => {
+    console.error('[bridge-app-child] spawn error:', err);
+    if (managedChildren.get(home) === child) {
+      managedChildren.delete(home);
+    }
+  });
+}
+
+/**
+ * Start the bridge daemon for a given `CTI_HOME` (default: active server home).
+ */
+export async function startBridgeDaemonChild(ctiHomeOverride?: string): Promise<void> {
+  registerBridgeShutdownHooks();
+
+  const home = resolveBridgeHomeKey(ctiHomeOverride);
+
+  const disk0 = readBridgeDaemonDiskStatus(home);
+  if (disk0.effectiveRunning) {
+    if (isBridgeManagedByApp(home)) return;
+    throw new Error(
+      `桥接已在运行（PID ${disk0.pid ?? '?'}）。若为外部 daemon.sh 启动，请先停止或更换 CTI_HOME。`,
+    );
+  }
+
+  const existing = managedChildren.get(home);
+  if (existing && isProcessAlive(existing)) {
+    if (isBridgeManagedByApp(home)) return;
+    await killManagedChild(home, existing);
+  }
+
+  const { command, args } = resolveDaemonEntry();
+  const child = spawn(command, args, {
+    cwd: getProjectRoot(),
+    env: { ...process.env, CTI_HOME: home },
+    stdio: 'inherit',
+    detached: false,
+  });
+  managedChildren.set(home, child);
+  attachChildHandlers(child, home);
+
+  const expectedPid = child.pid;
+  if (expectedPid == null) {
+    managedChildren.delete(home);
+    throw new Error('桥接子进程未能取得 PID');
+  }
+
+  for (let i = 0; i < 60; i++) {
+    await new Promise((r) => setTimeout(r, 500));
+    if (!isProcessAlive(managedChildren.get(home))) {
+      managedChildren.delete(home);
+      throw new Error('桥接进程启动后立即退出，请查看终端日志。');
+    }
+    const disk = readBridgeDaemonDiskStatus(home);
+    if (disk.effectiveRunning && disk.pid === expectedPid) return;
+  }
+  throw new Error('桥接进程启动超时（未在 status.json 中看到预期 PID）。');
+}
+
+export type StopBridgeResult = { ok: true } | { ok: false; reason: 'not_managed' };
+
+/**
+ * Stop the managed daemon for a given `CTI_HOME` (default: active server home).
+ */
+export async function stopBridgeDaemonChild(ctiHomeOverride?: string): Promise<StopBridgeResult> {
+  const home = resolveBridgeHomeKey(ctiHomeOverride);
+  const child = managedChildren.get(home);
+  if (!child) {
+    const disk = readBridgeDaemonDiskStatus(home);
+    if (disk.effectiveRunning) {
+      return { ok: false, reason: 'not_managed' };
+    }
+    return { ok: true };
+  }
+
+  await killManagedChild(home, child);
   return { ok: true };
 }
