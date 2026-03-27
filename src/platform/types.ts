@@ -1,4 +1,4 @@
-export type AgentRuntime = 'claude' | 'codex' | 'cursor';
+export type AgentRuntime = 'claude' | 'codex' | 'cursor' | 'copilot';
 export type AgentRole = 'developer' | 'reviewer' | 'tester';
 export type TaskWorkflowState = 'todo' | 'in_progress' | 'review' | 'testing' | 'closed';
 export type SprintStatus = 'planned' | 'active' | 'closed';

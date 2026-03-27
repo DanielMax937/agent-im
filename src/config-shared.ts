@@ -4,7 +4,7 @@
  */
 
 /** Single selectable backend for bridge or platform (matches `CTI_RUNTIME` values). */
-export type RuntimeKind = "claude" | "codex" | "cursor";
+export type RuntimeKind = "claude" | "codex" | "cursor" | "copilot";
 
 /**
  * Parse runtime from config JSON / env. Legacy `auto` is treated as `claude`.
@@ -12,7 +12,7 @@ export type RuntimeKind = "claude" | "codex" | "cursor";
  */
 export function parseRunnerRuntimeKind(raw: unknown): RuntimeKind | null {
   if (typeof raw !== "string") return null;
-  if (raw === "codex" || raw === "cursor") return raw;
+  if (raw === "codex" || raw === "cursor" || raw === "copilot") return raw;
   if (raw === "claude" || raw === "auto") return "claude";
   return null;
 }
@@ -48,6 +48,8 @@ export interface RunnerConfig {
   cursorExecutable?: string;
   /** Cursor default model when binding has none (overrides CTI_CURSOR_MODEL for this runner). */
   cursorDefaultModel?: string;
+  /** GitHub Copilot CLI (`copilot`) binary path. */
+  copilotExecutable?: string;
 }
 
 export interface Config {

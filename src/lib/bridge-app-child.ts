@@ -20,6 +20,45 @@ function getProjectRoot(): string {
   return process.env.CTI_PROJECT_ROOT?.trim() || process.cwd();
 }
 
+function newestSourceMtimeMs(root: string): number {
+  const pending = [path.join(root, 'src')];
+  let newest = 0;
+  while (pending.length > 0) {
+    const current = pending.pop();
+    if (!current || !fs.existsSync(current)) continue;
+    let entries: fs.Dirent[];
+    try {
+      entries = fs.readdirSync(current, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    for (const entry of entries) {
+      const full = path.join(current, entry.name);
+      if (entry.isDirectory()) {
+        pending.push(full);
+        continue;
+      }
+      if (!entry.isFile() || !entry.name.endsWith('.ts')) continue;
+      try {
+        const stat = fs.statSync(full);
+        if (stat.mtimeMs > newest) newest = stat.mtimeMs;
+      } catch {
+        /* ignore */
+      }
+    }
+  }
+  return newest;
+}
+
+function isBundledDaemonFresh(root: string, bundledPath: string): boolean {
+  try {
+    const bundledStat = fs.statSync(bundledPath);
+    return bundledStat.mtimeMs >= newestSourceMtimeMs(root);
+  } catch {
+    return false;
+  }
+}
+
 /** Resolved CTI_HOME for this operation (explicit override or active server home). */
 export function resolveBridgeHomeKey(ctiHomeOverride?: string): string {
   return ctiHomeOverride !== undefined ? path.resolve(ctiHomeOverride) : path.resolve(getCtiHome());
@@ -39,16 +78,19 @@ function getManagedChildForHome(home: string): ChildProcess | undefined {
 export function resolveDaemonEntry(): { command: string; args: string[] } {
   const root = getProjectRoot();
   const bundled = path.join(root, 'dist', 'daemon.mjs');
-  if (fs.existsSync(bundled)) {
-    return { command: process.execPath, args: [bundled] };
-  }
   const tsxCli = path.join(root, 'node_modules', 'tsx', 'dist', 'cli.mjs');
   const mainTs = path.join(root, 'src', 'main.ts');
-  if (fs.existsSync(tsxCli) && fs.existsSync(mainTs)) {
+  const hasTsxFallback = fs.existsSync(tsxCli) && fs.existsSync(mainTs);
+  if (fs.existsSync(bundled) && isBundledDaemonFresh(root, bundled)) {
+    return { command: process.execPath, args: [bundled] };
+  }
+  if (hasTsxFallback) {
     return { command: process.execPath, args: [tsxCli, mainTs] };
   }
   throw new Error(
-    '未找到桥接入口：请先执行 npm run build:daemon 生成 dist/daemon.mjs，或在开发环境安装 tsx。',
+    fs.existsSync(bundled)
+      ? '桥接 daemon 构建产物已过期：请先执行 npm run build:daemon，或在开发环境安装 tsx 以直接运行 src/main.ts。'
+      : '未找到桥接入口：请先执行 npm run build:daemon 生成 dist/daemon.mjs，或在开发环境安装 tsx。',
   );
 }
 

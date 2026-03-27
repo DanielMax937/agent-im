@@ -11,7 +11,7 @@ import {
 } from '../../config-shared';
 
 const IM_INSTANCE_CHANNELS: ImInstanceChannel[] = ['telegram', 'discord', 'feishu', 'qq'];
-const RUNTIMES = ['claude', 'codex', 'cursor'] as const;
+const RUNTIMES = ['claude', 'codex', 'cursor', 'copilot'] as const;
 const RUNNER_MODES = ['code', 'plan', 'ask'] as const;
 
 async function readJsonFromResponse(res: Response): Promise<unknown> {
@@ -1107,6 +1107,22 @@ export default function AdminPage() {
                               value={prof.cursorExecutable ?? ''}
                               onChange={(e) =>
                                 updateImRunner(ridx, { cursorExecutable: e.target.value || undefined })
+                              }
+                            />
+                          </label>
+                        </div>
+                      )}
+                      {prof.runtime === 'copilot' && (
+                        <div
+                          className="ui-grid"
+                          style={{ marginTop: '0.75rem', marginBottom: '0.75rem' }}
+                        >
+                          <label className="ui-field">
+                            <span>Copilot CLI 路径</span>
+                            <input
+                              value={prof.copilotExecutable ?? ''}
+                              onChange={(e) =>
+                                updateImRunner(ridx, { copilotExecutable: e.target.value || undefined })
                               }
                             />
                           </label>

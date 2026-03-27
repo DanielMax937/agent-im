@@ -332,6 +332,7 @@ export function runnerFromRow(o: Record<string, unknown>): RunnerConfig | null {
     codexExecutable: pickRunnerStrRow(o, "codexExecutable"),
     cursorExecutable: pickRunnerStrRow(o, "cursorExecutable"),
     cursorDefaultModel: pickRunnerStrRow(o, "cursorDefaultModel"),
+    copilotExecutable: pickRunnerStrRow(o, "copilotExecutable"),
   };
 }
 
@@ -924,6 +925,7 @@ function formatEnvLine(key: string, value: string | undefined): string {
 }
 
 export function saveConfig(config: Config, ctiHomeOverride?: string): void {
+  validateConfigRunners(config);
   let out = "";
   const runnerList = normalizeRunners(config);
   out += formatEnvLine("CTI_RUNNERS", JSON.stringify(runnerList));
@@ -1018,6 +1020,25 @@ export function saveConfig(config: Config, ctiHomeOverride?: string): void {
   const tmpPath = cfgPath + ".tmp";
   fs.writeFileSync(tmpPath, out, { mode: 0o600 });
   fs.renameSync(tmpPath, cfgPath);
+}
+
+function validateRunnerList(runners: RunnerConfig[] | undefined, pathLabel: string): void {
+  if (!runners) return;
+  for (let index = 0; index < runners.length; index += 1) {
+    const runner = runners[index];
+    const runtime = runner.runtime;
+    if (runtime !== 'claude' && runtime !== 'codex' && runtime !== 'cursor' && runtime !== 'copilot') {
+      throw new Error(
+        `${pathLabel}[${index}] has unsupported runtime "${String(runtime)}". ` +
+          'Allowed values: claude, codex, cursor, copilot.',
+      );
+    }
+  }
+}
+
+export function validateConfigRunners(config: Config): void {
+  validateRunnerList(config.runners, 'runners');
+  validateRunnerList(config.imBot?.runners, 'imBot.runners');
 }
 
 export function maskSecret(value: string): string {

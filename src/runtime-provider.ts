@@ -52,6 +52,14 @@ export async function resolveProvider({
     });
   }
 
+  if (runtime === 'copilot') {
+    const { CopilotProvider } = await import('./copilot-provider');
+    return new CopilotProvider(undefined, {
+      copilotExecutable: runner?.copilotExecutable,
+      defaultModel: runner?.defaultModel,
+    });
+  }
+
   const cliPath = resolveClaudeCliPathFromRunner(runner);
   if (!cliPath) {
     throw new Error(

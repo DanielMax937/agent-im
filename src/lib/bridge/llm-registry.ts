@@ -9,6 +9,7 @@ import {
   defaultImLlmCompositeKey,
   defaultRunnerIdForChannelType,
   imLlmKeyPrefix,
+  loadConfig,
   normalizeRunnersForChannelType,
 } from '../../config';
 import type { PendingPermissions } from '../../permission-gateway';
@@ -53,9 +54,10 @@ export async function buildImBridgeLlmStack(
     defaultLlm,
     resolveLlmForBinding: (binding: ChannelBinding): LLMProvider => {
       const store = getBridgeContext().store;
-      const runners = normalizeRunnersForChannelType(config, binding.channelType);
+      const fresh = loadConfig();
+      const runners = normalizeRunnersForChannelType(fresh, binding.channelType);
       const allIds = runners.map((r) => r.id);
-      const globalDef = defaultRunnerIdForChannelType(config, binding.channelType);
+      const globalDef = defaultRunnerIdForChannelType(fresh, binding.channelType);
       const pid = resolveRunnerForChannelBinding(
         store,
         binding.channelType,
@@ -63,12 +65,12 @@ export async function buildImBridgeLlmStack(
         globalDef,
         allIds,
       );
-      const prefix = imLlmKeyPrefix(config, binding.channelType);
+      const prefix = imLlmKeyPrefix(fresh, binding.channelType);
       const key = `${prefix}\0${pid}`;
       if (idToLlm.has(key)) {
         return idToLlm.get(key)!;
       }
-      if (!config.imBot) {
+      if (!fresh.imBot) {
         const legacy = `__legacy__\0${pid}`;
         if (idToLlm.has(legacy)) return idToLlm.get(legacy)!;
       }

@@ -98,7 +98,7 @@ export function buildSubprocessEnv(): NodeJS.ProcessEnv {
 }
 
 export interface BuildSubprocessEnvOptions {
-  runtime?: 'claude' | 'codex' | 'cursor' | 'auto';
+  runtime?: 'claude' | 'codex' | 'cursor' | 'copilot' | 'auto';
   useLogin?: boolean;
 }
 
@@ -107,7 +107,7 @@ export function buildSubprocessEnvForRuntime(
 ): NodeJS.ProcessEnv {
   const mode = process.env.CTI_ENV_ISOLATION || 'inherit';
   const out = {} as NodeJS.ProcessEnv;
-  const runtime = options.runtime || (process.env.CTI_RUNTIME as 'claude' | 'codex' | 'cursor' | 'auto' | undefined) || 'claude';
+  const runtime = options.runtime || (process.env.CTI_RUNTIME as 'claude' | 'codex' | 'cursor' | 'copilot' | 'auto' | undefined) || 'claude';
   const useLogin = options.useLogin === true;
 
   if (mode === 'inherit') {
@@ -133,10 +133,20 @@ export function buildSubprocessEnvForRuntime(
       }
     }
 
-    // In codex/cursor mode, pass through OPENAI_* / CODEX_* env vars
-    if (runtime === 'codex' || runtime === 'cursor' || runtime === 'auto') {
+    // In codex/cursor/copilot mode, pass through provider-related env vars
+    if (runtime === 'codex' || runtime === 'cursor' || runtime === 'copilot' || runtime === 'auto') {
       for (const [k, v] of Object.entries(process.env)) {
-        if (v !== undefined && (k.startsWith('OPENAI_') || k.startsWith('CODEX_') || k.startsWith('CURSOR_'))) out[k] = v;
+        if (v === undefined) continue;
+        if (
+          k.startsWith('OPENAI_') ||
+          k.startsWith('CODEX_') ||
+          k.startsWith('CURSOR_') ||
+          k.startsWith('GITHUB_') ||
+          k.startsWith('GH_') ||
+          k.startsWith('COPILOT_')
+        ) {
+          out[k] = v;
+        }
       }
     }
   }

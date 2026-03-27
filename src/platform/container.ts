@@ -50,8 +50,10 @@ async function createPlatformContainer(): Promise<PlatformContainer> {
     store: new JsonFileStore(configToSettings(config)),
     llm: defaultLlm,
     resolveLlmForBinding,
-    getRunnerConfigsForChannelType: (channelType) => normalizeRunnersForChannelType(config, channelType),
-    getDefaultRunnerIdForChannelType: (channelType) => defaultRunnerIdForChannelType(config, channelType),
+    getRunnerConfigsForChannelType: (channelType) =>
+      normalizeRunnersForChannelType(loadConfig(), channelType),
+    getDefaultRunnerIdForChannelType: (channelType) =>
+      defaultRunnerIdForChannelType(loadConfig(), channelType),
     imRunners: bridgeRunners.map((p) => ({
       id: p.id,
       runtime: p.runtime,

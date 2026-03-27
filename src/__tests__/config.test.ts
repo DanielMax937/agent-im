@@ -8,6 +8,9 @@ import {
   configToSettings,
   mergeConfigPatch,
   configForAdminResponse,
+  saveConfig,
+  loadConfig,
+  normalizeRunnersForChannelType,
   type Config,
 } from '../config';
 
@@ -311,6 +314,52 @@ describe('mergeConfigPatch imBot', () => {
   });
 });
 
+describe('loadConfig with real config.env', () => {
+  let tempHome: string;
+  let prevCtiHome: string | undefined;
+
+  beforeEach(() => {
+    prevCtiHome = process.env.CTI_HOME;
+    tempHome = fs.mkdtempSync(path.join(os.tmpdir(), 'cti-config-real-'));
+    process.env.CTI_HOME = tempHome;
+  });
+
+  afterEach(() => {
+    if (prevCtiHome === undefined) delete process.env.CTI_HOME;
+    else process.env.CTI_HOME = prevCtiHome;
+    fs.rmSync(tempHome, { recursive: true, force: true });
+  });
+
+  it('keeps copilot runners visible for the bot channel', () => {
+    fs.writeFileSync(
+      path.join(tempHome, 'config.env'),
+      [
+        'CTI_RUNNERS=[{"id":"default","runtime":"claude","label":"默认"},{"id":"rt-2","runtime":"copilot","label":"copilot"}]',
+        'CTI_DEFAULT_RUNNER=default',
+        'CTI_RUNTIME=claude',
+        'CTI_ENABLED_CHANNELS=telegram',
+        'CTI_IM_BOT={"id":"bridge-mn8af15s-f698ba74","channel":"telegram","runners":[{"id":"default","runtime":"claude","label":"默认"},{"id":"rt-2","runtime":"copilot","label":"copilot"}],"defaultRunnerId":"default"}',
+        '',
+      ].join('\n'),
+      'utf-8',
+    );
+
+    const config = loadConfig(tempHome);
+    const runners = normalizeRunnersForChannelType(
+      config,
+      'telegram:bridge-mn8af15s-f698ba74',
+    );
+
+    assert.deepEqual(
+      runners.map((runner) => ({ id: runner.id, runtime: runner.runtime, label: runner.label })),
+      [
+        { id: 'default', runtime: 'claude', label: '默认' },
+        { id: 'rt-2', runtime: 'copilot', label: 'copilot' },
+      ],
+    );
+  });
+});
+
 describe('configForAdminResponse imBot', () => {
   it('masks per-bot secrets', () => {
     const { config: out } = configForAdminResponse({
@@ -357,5 +406,33 @@ describe('loadConfig/saveConfig round-trip', () => {
     assert.equal(m.get('bridge_discord_enabled'), 'false');
     assert.equal(m.get('bridge_feishu_enabled'), 'false');
     assert.equal(m.get('bridge_qq_enabled'), 'false');
+  });
+
+  it('saveConfig rejects unsupported runner runtime instead of silently dropping it later', () => {
+    assert.throws(
+      () =>
+        saveConfig(
+          {
+            runtime: 'claude',
+            enabledChannels: ['telegram'],
+            defaultWorkDir: process.cwd(),
+            defaultMode: 'code',
+            runners: [
+              { id: 'default', runtime: 'claude' },
+              { id: 'bad', runtime: 'unknown-runtime' as any },
+            ],
+            imBot: {
+              id: 'bridge-test',
+              channel: 'telegram',
+              runners: [
+                { id: 'default', runtime: 'claude' },
+                { id: 'bad', runtime: 'unknown-runtime' as any },
+              ],
+            },
+          },
+          tmpDir,
+        ),
+      /unsupported runtime "unknown-runtime"/i,
+    );
   });
 });
