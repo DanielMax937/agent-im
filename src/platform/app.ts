@@ -15,7 +15,7 @@ import {
   stopBridgeDaemonChild,
 } from '../lib/bridge-app-child';
 import { readBridgeDaemonDiskStatus } from '../lib/bridge-daemon-status';
-import { getCtiHomeForBridgeSlug, getSlaveEnvPath, loadConfig } from '../config';
+import { getCtiHomeForBridgeSlug, getSlaveEnvPath, listBridgeSlugs, loadConfig } from '../config';
 import { readMonitorMessages } from '../lib/monitor-messages';
 import { getLogger } from '../logger';
 import type {
@@ -488,12 +488,32 @@ export function createPlatformApp(options: CreatePlatformAppOptions): PlatformAp
       if (request.method === 'GET' && pathname === '/api/monitor/responses') {
         try {
           const slug = searchParams.get('bridge') ?? undefined;
-          const home = slug ? getCtiHomeForBridgeSlug(slug) : undefined;
-          const data = readMonitorMessages(home ?? undefined);
-          return jsonResponse({
-            masterOut: data.master,
-            slaveOut: data.slave,
-          });
+          if (slug) {
+            const home = getCtiHomeForBridgeSlug(slug);
+            const data = readMonitorMessages(home);
+            return jsonResponse({ masterOut: data.master, slaveOut: data.slave });
+          }
+          // No slug — merge from all bridges
+          const allSlugs = listBridgeSlugs();
+          let masterOut: { text: string; ts: number; bridgeSlug?: string }[] = [];
+          let slaveOut: { text: string; ts: number; bridgeSlug?: string }[] = [];
+          for (const s of allSlugs) {
+            try {
+              const home = getCtiHomeForBridgeSlug(s);
+              const data = readMonitorMessages(home);
+              masterOut = masterOut.concat(data.master);
+              slaveOut = slaveOut.concat(data.slave);
+            } catch { /* skip */ }
+          }
+          // Also try default home (non-multi-bridge setups)
+          if (allSlugs.length === 0) {
+            const data = readMonitorMessages();
+            masterOut = data.master;
+            slaveOut = data.slave;
+          }
+          masterOut.sort((a, b) => a.ts - b.ts);
+          slaveOut.sort((a, b) => a.ts - b.ts);
+          return jsonResponse({ masterOut, slaveOut });
         } catch (err) {
           return jsonResponse({ error: err instanceof Error ? err.message : String(err) }, 500);
         }
