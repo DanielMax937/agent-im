@@ -192,7 +192,7 @@ async function deliverResponse(
   deliverySource?: 'runner' | 'master' | 'slave',
   masterRunnerId?: string,
 ): Promise<SendResult> {
-  if (adapter.channelType === 'telegram') {
+  if (adapter.baseChannelType === 'telegram') {
     if (deliverySource === 'slave' && adapter.hybridDuplicateAssistantToRedis) {
       await adapter.hybridDuplicateAssistantToRedis(responseText, deliverySource);
     }
@@ -208,7 +208,7 @@ async function deliverResponse(
     }
     return { ok: true };
   }
-  if (adapter.channelType === 'discord') {
+  if (adapter.baseChannelType === 'discord') {
     // Discord: native markdown, chunk at 2000 chars with fence repair
     const chunks = markdownToDiscordChunks(responseText, 2000);
     for (let i = 0; i < chunks.length; i++) {
@@ -222,7 +222,7 @@ async function deliverResponse(
     }
     return { ok: true };
   }
-  if (adapter.channelType === 'feishu') {
+  if (adapter.baseChannelType === 'feishu') {
     // Feishu: pass markdown through for adapter to format as post/card
     return deliver(adapter, {
       address,
