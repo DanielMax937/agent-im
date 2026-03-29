@@ -491,21 +491,23 @@ export function createPlatformApp(options: CreatePlatformAppOptions): PlatformAp
           if (slug) {
             const home = getCtiHomeForBridgeSlug(slug);
             const data = readMonitorMessages(home);
-            return jsonResponse({ masterOut: data.master, slaveOut: data.slave });
+            // Tag entries with source bridge
+            const tag = (e: { text: string; ts: number; bridgeSlug?: string }) => ({ ...e, homeBridge: slug });
+            return jsonResponse({ masterOut: data.master.map(tag), slaveOut: data.slave.map(tag) });
           }
-          // No slug — merge from all bridges
+          // No slug — merge from all bridges, tag with source
           const allSlugs = listBridgeSlugs();
-          let masterOut: { text: string; ts: number; bridgeSlug?: string }[] = [];
-          let slaveOut: { text: string; ts: number; bridgeSlug?: string }[] = [];
+          let masterOut: { text: string; ts: number; bridgeSlug?: string; homeBridge?: string }[] = [];
+          let slaveOut: { text: string; ts: number; bridgeSlug?: string; homeBridge?: string }[] = [];
           for (const s of allSlugs) {
             try {
               const home = getCtiHomeForBridgeSlug(s);
               const data = readMonitorMessages(home);
-              masterOut = masterOut.concat(data.master);
-              slaveOut = slaveOut.concat(data.slave);
+              const tag = (e: { text: string; ts: number; bridgeSlug?: string }) => ({ ...e, homeBridge: s });
+              masterOut = masterOut.concat(data.master.map(tag));
+              slaveOut = slaveOut.concat(data.slave.map(tag));
             } catch { /* skip */ }
           }
-          // Also try default home (non-multi-bridge setups)
           if (allSlugs.length === 0) {
             const data = readMonitorMessages();
             masterOut = data.master;

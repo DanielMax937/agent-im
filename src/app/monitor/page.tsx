@@ -8,6 +8,7 @@ type MonitorEntry = {
   text: string;
   ts: number;
   bridgeSlug?: string;
+  homeBridge?: string;
 };
 
 type MonitorData = {
@@ -119,6 +120,12 @@ export default function MonitorPage() {
       <div className="ui-bridge-accordion" role="list">
         {(bridges.length > 0 ? bridges : ['default']).map((b) => {
           const dm = daemonStatus[b];
+          const bridgeMaster = (monitorData?.masterOut ?? []).filter(
+            (e) => e.homeBridge === b || (!e.homeBridge && bridges.length <= 1),
+          );
+          const bridgeSlave = (monitorData?.slaveOut ?? []).filter(
+            (e) => e.homeBridge === b || (!e.homeBridge && bridges.length <= 1),
+          );
           return (
             <div key={b} className="ui-bridge-accordion-item" role="listitem">
               <div className="ui-bridge-accordion-head" style={{ cursor: 'pointer' }} onClick={() => toggle(b)}>
@@ -127,6 +134,7 @@ export default function MonitorPage() {
                 <span style={{ marginLeft: '0.75rem', fontSize: '0.8rem' }} className="ui-muted">
                   Master: {dm?.effectiveRunning ? '🟢' : '⚫'}
                   {' '}Slave: {dm?.slave?.effectiveRunning ? '🟢' : '⚫'}
+                  {' '}({bridgeMaster.length}M / {bridgeSlave.length}S)
                 </span>
               </div>
 
@@ -135,20 +143,20 @@ export default function MonitorPage() {
                   <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '1rem' }}>
                     <div>
                       <h3 style={{ margin: '0 0 0.75rem', fontSize: '1rem', color: '#38bdf8' }}>
-                        Master Responses ({masterCount})
+                        Master Responses ({bridgeMaster.length})
                       </h3>
                       <MessageList
-                        entries={monitorData?.masterOut ?? []}
+                        entries={bridgeMaster}
                         emptyText="No master responses yet"
                         roleTag="master"
                       />
                     </div>
                     <div>
                       <h3 style={{ margin: '0 0 0.75rem', fontSize: '1rem', color: '#a78bfa' }}>
-                        Slave Responses ({slaveCount})
+                        Slave Responses ({bridgeSlave.length})
                       </h3>
                       <MessageList
-                        entries={monitorData?.slaveOut ?? []}
+                        entries={bridgeSlave}
                         emptyText="No slave responses yet"
                         roleTag="slave"
                       />
