@@ -252,9 +252,16 @@ export class AutoModeRedisTransport {
     if (!this.client) return;
     const turns = await this.getMasterTurns();
     if (turns >= this.settings.maxTurns) return;
+    const key = this.keyMaster('input');
     await this.client.lPush(
-      this.keyMaster('input'),
+      key,
       encodeQueuePayload({ text, outboundChatId }),
+    );
+    const isReport = text.startsWith('## Slave Execution Report');
+    console.log(
+      `[auto-mode-redis] Pushed to master:input (${this.bridgeSlug}), ` +
+      `key=${key}, type=${isReport ? 'slave-report' : 'other'}, ` +
+      `len=${text.length}, preview=${JSON.stringify(text.slice(0, 100))}`,
     );
   }
 
@@ -395,6 +402,10 @@ export class AutoModeRedisTransport {
       await this.client.lPush(this.keySlave('out'), text);
       await this.incrSlaveTurns();
       appendSlaveMessage(text, this.bridgeSlug);
+      console.log(
+        `[auto-mode-redis] Slave delivered reply to Redis (${this.bridgeSlug}), ` +
+        `key=${this.keySlave('out')}, len=${text.length}, preview=${JSON.stringify(text.slice(0, 100))}`,
+      );
       return { ok: true };
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
@@ -414,9 +425,14 @@ export class AutoModeRedisTransport {
     if (!this.client) return;
     const turns = await this.getSlaveTurns();
     if (turns >= this.settings.maxTurns) return;
+    const key = this.keySlave('input');
     await this.client.lPush(
-      this.keySlave('input'),
+      key,
       encodeQueuePayload({ text, outboundChatId }),
+    );
+    console.log(
+      `[auto-mode-redis] Pushed to slave:input (${this.bridgeSlug}), ` +
+      `key=${key}, len=${text.length}, preview=${JSON.stringify(text.slice(0, 100))}`,
     );
   }
 
@@ -510,6 +526,10 @@ export async function runAutoModeRedisInboundLoop(
         await new Promise((r) => setTimeout(r, 1000));
         continue;
       }
+      console.log(
+        `[auto-mode-redis] Slave got message from Redis (${transport.bridgeSlug}), ` +
+        `len=${msg.text.length}, preview=${JSON.stringify(msg.text.slice(0, 120))}`,
+      );
       try {
         store.insertAuditLog({
           channelType: adapterChannelType,
@@ -563,6 +583,12 @@ export async function runAutoModeMasterRedisInboundLoop(
         await new Promise((r) => setTimeout(r, 1000));
         continue;
       }
+      const isReport = msg.text.startsWith('## Slave Execution Report');
+      console.log(
+        `[auto-mode-redis] Master got message from Redis (${transport.bridgeSlug}), ` +
+        `type=${isReport ? 'slave-report' : 'user-message'}, ` +
+        `len=${msg.text.length}, preview=${JSON.stringify(msg.text.slice(0, 120))}`,
+      );
       await onMasterFetchFromRedis(msg);
       try {
         store.insertAuditLog({

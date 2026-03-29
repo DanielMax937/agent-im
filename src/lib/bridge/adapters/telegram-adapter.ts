@@ -510,6 +510,11 @@ export class TelegramAdapter extends BaseChannelAdapter {
     const goalMatch = summary?.match(/User goal: (.+?)(\n|$)/);
     const userGoal = goalMatch ? goalMatch[1] : '(unknown — see session context)';
 
+    console.log(
+      `[telegram-adapter] Slave completed task, feeding report to master. ` +
+      `goal=${JSON.stringify(userGoal)}, replyLen=${body.length}`,
+    );
+
     // Feed slave's result back to master for evaluation
     const slaveReport =
       `## Slave Execution Report\n\n` +
@@ -571,11 +576,19 @@ export class TelegramAdapter extends BaseChannelAdapter {
 
     if (!needsFollowUp) {
       // Master accepted slave's work — done
+      console.log(
+        `[telegram-adapter] Master evaluation: ACCEPTED slave work. ` +
+        `responseLen=${payload.responseText.length}, preview=${JSON.stringify(payload.responseText.slice(0, 150))}`,
+      );
       await this.autoModeRedis.incrMasterTurns().catch(() => {});
       return;
     }
 
     // Master found issues — send follow-up to slave
+    console.log(
+      `[telegram-adapter] Master evaluation: NEEDS FOLLOW-UP. ` +
+      `responseLen=${payload.responseText.length}, preview=${JSON.stringify(payload.responseText.slice(0, 150))}`,
+    );
     await this.autoModeRedis.setSlaveBusy(600).catch(() => {});
 
     const handoff =
@@ -739,6 +752,10 @@ export class TelegramAdapter extends BaseChannelAdapter {
 
     if (isSlaveReport) {
       // Slave report → master LLM evaluates
+      console.log(
+        `[telegram-adapter] Master received slave report, enqueueing for LLM evaluation. ` +
+        `len=${msg.text.length}, preview=${JSON.stringify(msg.text.slice(0, 120))}`,
+      );
       this.enqueue(msg);
     } else {
       // User message from Telegram → forward directly to slave, no LLM call
