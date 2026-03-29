@@ -221,6 +221,8 @@ export interface StreamChatParams {
    * IM streaming previews should also be disabled by the caller when this is on.
    */
   disableLlmStreaming?: boolean;
+  /** Restrict available tools (empty array = no tools). */
+  allowedTools?: string[];
 }
 
 export interface LLMProvider {

@@ -587,6 +587,12 @@ export class SDKLLMProvider implements LLMProvider {
             if (cliPath) {
               queryOptions.pathToClaudeCodeExecutable = cliPath;
             }
+            if (params.systemPrompt) {
+              queryOptions.systemPrompt = params.systemPrompt;
+            }
+            if (params.allowedTools) {
+              queryOptions.allowedTools = params.allowedTools;
+            }
 
             const prompt = buildPrompt(params.prompt, params.files);
             const q = query({

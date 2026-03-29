@@ -194,10 +194,27 @@ export async function processMessage(
     }
 
     let systemPrompt = session?.system_prompt || undefined;
+    let allowedTools: string[] | undefined;
     if (options?.deliverySource === 'master') {
       const masterCoord =
-        'You coordinate work for a Telegram user. A worker with tools runs after you. Restate the user goal clearly and give concrete, actionable direction so that worker can complete the task as thoroughly as possible.';
+        'You are a COORDINATOR, not an executor. You manage tasks for a Telegram user.\n\n' +
+        'YOUR ROLE:\n' +
+        '- Analyze the user\'s request and break it down into clear, actionable instructions\n' +
+        '- When receiving a Slave Execution Report, evaluate the quality and completeness\n' +
+        '- NEVER execute tasks yourself — no coding, no file operations, no web requests\n' +
+        '- NEVER use tools — you have no tools available\n\n' +
+        'FOR NEW USER REQUESTS:\n' +
+        '- Understand what the user wants\n' +
+        '- Write clear, detailed instructions for the worker to execute\n' +
+        '- Include acceptance criteria so the worker knows when the task is done\n\n' +
+        'FOR SLAVE EXECUTION REPORTS:\n' +
+        '- Judge whether the slave\'s work meets the user\'s original request\n' +
+        '- If satisfactory: write a friendly summary of the result for the user\n' +
+        '- If needs improvement: write specific follow-up instructions (include "please fix" or "needs improvement" in your response)\n\n' +
+        'Keep responses concise. Your output goes directly to Telegram.';
       systemPrompt = systemPrompt ? `${systemPrompt}\n\n${masterCoord}` : masterCoord;
+      // Master must NOT have access to any tools — coordinator only
+      allowedTools = [];
     }
 
     const stream = effectiveLlm.streamChat({
@@ -216,6 +233,7 @@ export async function processMessage(
         try { store.setSessionRuntimeStatus(sessionId, status); } catch { /* best effort */ }
       },
       disableLlmStreaming: options?.disableLlmStreaming,
+      allowedTools,
     });
 
     // Consume the stream server-side (replicate collectStreamResponse pattern).
