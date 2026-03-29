@@ -503,6 +503,23 @@ export class TelegramAdapter extends BaseChannelAdapter {
     const prefix = '[slave]\n\n';
     const body = text.startsWith(prefix) ? text.slice(prefix.length) : text;
     await this.autoModeRedis.deliverClaudeReply(body).catch(() => {});
+
+    // Feed slave's result back to master for evaluation
+    const slaveReport =
+      `## Slave Execution Report\n\n` +
+      `The slave runner has completed its task. Below is the slave's response:\n\n` +
+      `---\n${body.slice(0, 2000)}\n---\n\n` +
+      `### Your Role (Master Coordinator)\n` +
+      `You are the master coordinator. Evaluate the slave's work above and decide:\n\n` +
+      `1. **Quality check**: Did the slave complete the task correctly and thoroughly?\n` +
+      `2. **Completeness**: Is anything missing or incomplete?\n` +
+      `3. **Next action**: Choose ONE:\n` +
+      `   - If the result is satisfactory, summarize the outcome for the user in a clear, friendly message.\n` +
+      `   - If the result needs improvement, provide specific follow-up instructions (these will be sent to the slave as a new task).\n` +
+      `   - If there was an error, diagnose it and provide corrective instructions.\n\n` +
+      `Reply with your evaluation and decision. Keep it concise — your response will be shown to the user via Telegram.`;
+    const chatId = this.hybridMirrorChatId || this.imGet('telegram_chat_id') || undefined;
+    await this.autoModeRedis.pushMasterInput(slaveReport, 'default', chatId).catch(() => {});
   }
 
   override async hybridDuplicateMasterAssistantToRedis(
@@ -522,34 +539,66 @@ export class TelegramAdapter extends BaseChannelAdapter {
   }): Promise<void> {
     if (!this.autoModeRedis) return;
 
-    // Set slave busy before handoff
-    await this.autoModeRedis.setSlaveBusy(600).catch(() => {});
+    const isSlaveReport = payload.userPrompt.startsWith('## Slave Execution Report');
 
     // Build a rolling summary to prevent handoff context bloat
     const prevSummary = await this.autoModeRedis.getSessionSummary().catch(() => null);
+    const label = isSlaveReport ? 'SlaveReport→Master' : 'User→Master';
     const newSummary = prevSummary
-      ? `${prevSummary}\n---\nUser: ${payload.userPrompt.slice(0, 300)}\nMaster: ${payload.responseText.slice(0, 300)}`
-      : `User: ${payload.userPrompt.slice(0, 300)}\nMaster: ${payload.responseText.slice(0, 300)}`;
-    // Keep summary under ~2000 chars (trim oldest entries)
+      ? `${prevSummary}\n---\n${label}: ${payload.userPrompt.slice(0, 300)}\nMaster: ${payload.responseText.slice(0, 300)}`
+      : `${label}: ${payload.userPrompt.slice(0, 300)}\nMaster: ${payload.responseText.slice(0, 300)}`;
     const trimmed = newSummary.length > 2000
       ? '...' + newSummary.slice(newSummary.length - 1997)
       : newSummary;
     await this.autoModeRedis.setSessionSummary(trimmed).catch(() => {});
 
-    const handoff =
-      `## Task Handoff from Master\n\n` +
-      `### Session Context\n${trimmed}\n\n` +
-      `### User's Original Request\n${payload.userPrompt.slice(0, 800)}\n\n` +
-      `### Master's Analysis & Instructions\n${payload.responseText.slice(0, 1500)}\n\n` +
-      `### Your Mission (Slave Runner)\n` +
-      `You are the execution agent. The user sent the request above via Telegram, and the master coordinator has analyzed it.\n\n` +
-      `**Requirements:**\n` +
-      `1. Complete the task described above to the highest quality possible.\n` +
-      `2. Be thorough — check edge cases, validate your work, and verify the outcome matches the user's intent.\n` +
-      `3. If the task involves code, run tests/linting to confirm correctness before finishing.\n` +
-      `4. If the task is ambiguous, interpret it in the way most helpful to the user rather than doing nothing.\n` +
-      `5. Provide a clear, concise summary of what you did and the result.\n\n` +
-      `Do your best work. The user is waiting for your response.`;
+    // If this was a slave report evaluation, only hand off again if master
+    // explicitly requests follow-up work (contains action keywords).
+    if (isSlaveReport) {
+      const resp = payload.responseText.toLowerCase();
+      const needsFollowUp =
+        resp.includes('follow-up') || resp.includes('follow up') ||
+        resp.includes('please fix') || resp.includes('please improve') ||
+        resp.includes('try again') || resp.includes('redo') ||
+        resp.includes('not complete') || resp.includes('incomplete') ||
+        resp.includes('needs improvement') || resp.includes('need improvement') ||
+        resp.includes('missing') || resp.includes('incorrect') ||
+        resp.includes('## follow-up instructions');
+      if (!needsFollowUp) {
+        // Master accepted the slave's work — no further handoff needed
+        await this.autoModeRedis.incrMasterTurns().catch(() => {});
+        return;
+      }
+    }
+
+    // Set slave busy before handoff
+    await this.autoModeRedis.setSlaveBusy(600).catch(() => {});
+
+    const handoff = isSlaveReport
+      ? `## Follow-up Instructions from Master\n\n` +
+        `### Session Context\n${trimmed}\n\n` +
+        `### Master's Feedback & Corrections\n${payload.responseText.slice(0, 1500)}\n\n` +
+        `### Your Mission (Slave Runner)\n` +
+        `The master coordinator reviewed your previous work and found issues that need to be addressed.\n\n` +
+        `**Requirements:**\n` +
+        `1. Carefully read the master's feedback above — address every point raised.\n` +
+        `2. Fix the issues identified, then re-verify your work.\n` +
+        `3. Be more thorough this time — double-check edge cases and test your changes.\n` +
+        `4. Provide a clear summary of what you fixed and how you verified it.\n\n` +
+        `Do better this time. The master found problems with your previous attempt.`
+      : `## Task Handoff from Master\n\n` +
+        `### Session Context\n${trimmed}\n\n` +
+        `### User's Original Request\n${payload.userPrompt.slice(0, 800)}\n\n` +
+        `### Master's Analysis & Instructions\n${payload.responseText.slice(0, 1500)}\n\n` +
+        `### Your Mission (Slave Runner)\n` +
+        `You are the execution agent. The user sent the request above via Telegram, and the master coordinator has analyzed it.\n\n` +
+        `**Requirements:**\n` +
+        `1. Complete the task described above to the highest quality possible.\n` +
+        `2. Be thorough — check edge cases, validate your work, and verify the outcome matches the user's intent.\n` +
+        `3. If the task involves code, run tests/linting to confirm correctness before finishing.\n` +
+        `4. If the task is ambiguous, interpret it in the way most helpful to the user rather than doing nothing.\n` +
+        `5. Provide a clear, concise summary of what you did and the result.\n\n` +
+        `Do your best work. The user is waiting for your response.`;
     await this.autoModeRedis
       .pushSlaveHandoff(handoff, payload.outboundChatId)
       .catch(() => {});
