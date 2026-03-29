@@ -798,6 +798,9 @@ export class TelegramAdapter extends BaseChannelAdapter {
   }
 
   private async notifyTelegramMasterRedisFetch(msg: InboundMessage): Promise<void> {
+    // Don't show internal slave execution reports or follow-up instructions to the user
+    if (msg.text.startsWith('## Slave Execution Report') ||
+        msg.text.startsWith('## Follow-up Instructions from Master')) return;
     const chatId = msg.outboundChatId || this.hybridMirrorChatId || this.imGet('telegram_chat_id');
     const token = this.botToken;
     if (!token || !chatId) return;
