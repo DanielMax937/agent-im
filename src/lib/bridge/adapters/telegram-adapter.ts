@@ -499,7 +499,7 @@ export class TelegramAdapter extends BaseChannelAdapter {
     text: string,
     deliverySource: 'runner' | 'slave',
   ): Promise<void> {
-    if (!this.hybridAutoMode || !this.autoModeRedis) return;
+    if (!this.autoModeRedis) return;
     if (deliverySource !== 'slave') return;
     const prefix = '[slave]\n\n';
     const body = text.startsWith(prefix) ? text.slice(prefix.length) : text;
@@ -537,7 +537,7 @@ export class TelegramAdapter extends BaseChannelAdapter {
     text: string,
     masterRunnerId: string,
   ): Promise<void> {
-    if (!this.hybridAutoMode || !this.autoModeRedis) return;
+    if (!this.autoModeRedis) return;
     let body = text;
     if (body.startsWith('[master]\n\n')) body = body.slice('[master]\n\n'.length);
     await this.autoModeRedis.duplicateMasterOut(body, masterRunnerId).catch(() => {});
