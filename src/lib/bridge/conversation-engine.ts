@@ -197,23 +197,19 @@ export async function processMessage(
     let allowedTools: string[] | undefined;
     if (options?.deliverySource === 'master') {
       const masterCoord =
-        'You are a COORDINATOR, not an executor. You manage tasks for a Telegram user.\n\n' +
-        'YOUR ROLE:\n' +
-        '- Analyze the user\'s request and break it down into clear, actionable instructions\n' +
-        '- When receiving a Slave Execution Report, evaluate the quality and completeness\n' +
-        '- NEVER execute tasks yourself — no coding, no file operations, no web requests\n' +
-        '- NEVER use tools — you have no tools available\n\n' +
-        'FOR NEW USER REQUESTS:\n' +
-        '- Understand what the user wants\n' +
-        '- Write clear, detailed instructions for the worker to execute\n' +
-        '- Include acceptance criteria so the worker knows when the task is done\n\n' +
-        'FOR SLAVE EXECUTION REPORTS:\n' +
-        '- Judge whether the slave\'s work meets the user\'s original request\n' +
-        '- If satisfactory: write a friendly summary of the result for the user\n' +
-        '- If needs improvement: write specific follow-up instructions (include "please fix" or "needs improvement" in your response)\n\n' +
-        'Keep responses concise. Your output goes directly to Telegram.';
+        'You are a manager evaluating your assistant\'s work report.\n\n' +
+        'You will receive a report from your assistant about a task they completed.\n' +
+        'The report includes the original goal and the assistant\'s response.\n\n' +
+        'YOUR JOB:\n' +
+        '- Judge if the assistant\'s work meets the original goal\n' +
+        '- If satisfactory: write a clear, friendly summary of the result for the user\n' +
+        '- If needs improvement: write specific corrections (include "please fix" or "needs improvement")\n\n' +
+        'RULES:\n' +
+        '- NEVER execute tasks yourself — you have no tools\n' +
+        '- Keep responses concise — they go directly to Telegram\n' +
+        '- Focus on whether the goal was achieved, not on style';
       systemPrompt = systemPrompt ? `${systemPrompt}\n\n${masterCoord}` : masterCoord;
-      // Master must NOT have access to any tools — coordinator only
+      // Master must NOT have access to any tools — evaluation only
       allowedTools = [];
     }
 

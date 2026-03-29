@@ -171,7 +171,7 @@ export class AutoModeRedisTransport {
     /** Full adapter channel key, e.g. `telegram` or `telegram:instanceId`. */
     public readonly channelType: string,
     public readonly settings: AutoModeStoreSettings,
-    private readonly bridgeSlug: string,
+    public readonly bridgeSlug: string,
     /** All runner ids that may host a master queue (kept for synthetic chatId). */
     private readonly masterRunnerIds: string[],
     private readonly slaveRunnerId: string,

@@ -312,6 +312,23 @@ describe('mergeConfigPatch imBot', () => {
     );
     assert.deepEqual(next.imBot?.runners, [{ id: 'default', runtime: 'claude' }]);
   });
+
+  it('drops autoSlaveExternal for non-telegram bots', () => {
+    const next = mergeConfigPatch(
+      {
+        ...base,
+        imBot: {
+          id: 'a',
+          channel: 'discord',
+          discordBotToken: 'discord-token',
+        },
+      },
+      {
+        imBot: { id: 'a', channel: 'discord', autoSlaveExternal: true },
+      },
+    );
+    assert.equal(next.imBot?.autoSlaveExternal, undefined);
+  });
 });
 
 describe('loadConfig with real config.env', () => {
@@ -428,6 +445,32 @@ describe('loadConfig/saveConfig round-trip', () => {
                 { id: 'default', runtime: 'claude' },
                 { id: 'bad', runtime: 'unknown-runtime' as any },
               ],
+            },
+          },
+          tmpDir,
+        ),
+      /unsupported runtime "unknown-runtime"/i,
+    );
+  });
+
+  it('saveConfig rejects unsupported autoSlaveRunner runtime', () => {
+    assert.throws(
+      () =>
+        saveConfig(
+          {
+            runtime: 'claude',
+            enabledChannels: ['telegram'],
+            defaultWorkDir: process.cwd(),
+            defaultMode: 'code',
+            imBot: {
+              id: 'bridge-test',
+              channel: 'telegram',
+              autoMode: true,
+              autoRedisUrl: 'redis://127.0.0.1:6379',
+              autoSlaveRunner: {
+                id: 'slave',
+                runtime: 'unknown-runtime' as any,
+              },
             },
           },
           tmpDir,

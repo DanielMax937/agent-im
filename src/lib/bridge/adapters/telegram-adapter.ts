@@ -32,6 +32,7 @@ import {
 } from '../redis-local-transport';
 import { callTelegramApi, escapeHtml, sendMessageDraft } from './telegram-utils';
 import { startSlaveProcess, stopSlaveProcess } from '../slave-process';
+import { appendMasterMessage } from '../../monitor-messages';
 import {
   isImageEnabled,
   downloadPhoto,
@@ -504,20 +505,25 @@ export class TelegramAdapter extends BaseChannelAdapter {
     const body = text.startsWith(prefix) ? text.slice(prefix.length) : text;
     await this.autoModeRedis.deliverClaudeReply(body).catch(() => {});
 
+    // Get original user goal from session summary
+    const summary = await this.autoModeRedis.getSessionSummary().catch(() => null);
+    const goalMatch = summary?.match(/User goal: (.+?)(\n|$)/);
+    const userGoal = goalMatch ? goalMatch[1] : '(unknown — see session context)';
+
     // Feed slave's result back to master for evaluation
     const slaveReport =
       `## Slave Execution Report\n\n` +
-      `The slave runner has completed its task. Below is the slave's response:\n\n` +
-      `---\n${body.slice(0, 2000)}\n---\n\n` +
-      `### Your Role (Master Coordinator)\n` +
-      `You are the master coordinator. Evaluate the slave's work above and decide:\n\n` +
-      `1. **Quality check**: Did the slave complete the task correctly and thoroughly?\n` +
-      `2. **Completeness**: Is anything missing or incomplete?\n` +
-      `3. **Next action**: Choose ONE:\n` +
-      `   - If the result is satisfactory, summarize the outcome for the user in a clear, friendly message.\n` +
-      `   - If the result needs improvement, provide specific follow-up instructions (these will be sent to the slave as a new task).\n` +
-      `   - If there was an error, diagnose it and provide corrective instructions.\n\n` +
-      `Reply with your evaluation and decision. Keep it concise — your response will be shown to the user via Telegram.`;
+      `You asked your assistant to achieve the following goal:\n` +
+      `**${userGoal}**\n\n` +
+      `Your assistant has reported back:\n\n` +
+      `---\n${body.slice(0, 3000)}\n---\n\n` +
+      (summary ? `### Session Context\n${summary}\n\n` : '') +
+      `### Your Decision\n` +
+      `Based on the original goal and the assistant's report:\n` +
+      `- If the result is satisfactory and there is nothing to improve, write a clear summary for the user.\n` +
+      `- If the result needs improvement, write specific follow-up instructions for your assistant. ` +
+      `Include phrases like "please fix" or "needs improvement" so the system knows to forward your response.\n\n` +
+      `Keep it concise — your response goes directly to the user via Telegram.`;
     const chatId = this.hybridMirrorChatId || this.imGet('telegram_chat_id') || undefined;
     await this.autoModeRedis.pushMasterInput(slaveReport, 'default', chatId).catch(() => {});
   }
@@ -539,66 +545,51 @@ export class TelegramAdapter extends BaseChannelAdapter {
   }): Promise<void> {
     if (!this.autoModeRedis) return;
 
-    const isSlaveReport = payload.userPrompt.startsWith('## Slave Execution Report');
+    // afterAutoModeMasterTurn is now ONLY called after master LLM evaluates
+    // a slave execution report. User messages bypass master LLM entirely.
 
-    // Build a rolling summary to prevent handoff context bloat
+    // Update session summary
     const prevSummary = await this.autoModeRedis.getSessionSummary().catch(() => null);
-    const label = isSlaveReport ? 'SlaveReport→Master' : 'User→Master';
     const newSummary = prevSummary
-      ? `${prevSummary}\n---\n${label}: ${payload.userPrompt.slice(0, 300)}\nMaster: ${payload.responseText.slice(0, 300)}`
-      : `${label}: ${payload.userPrompt.slice(0, 300)}\nMaster: ${payload.responseText.slice(0, 300)}`;
+      ? `${prevSummary}\n---\nMaster evaluation: ${payload.responseText.slice(0, 300)}`
+      : `Master evaluation: ${payload.responseText.slice(0, 300)}`;
     const trimmed = newSummary.length > 2000
       ? '...' + newSummary.slice(newSummary.length - 1997)
       : newSummary;
     await this.autoModeRedis.setSessionSummary(trimmed).catch(() => {});
 
-    // If this was a slave report evaluation, only hand off again if master
-    // explicitly requests follow-up work (contains action keywords).
-    if (isSlaveReport) {
-      const resp = payload.responseText.toLowerCase();
-      const needsFollowUp =
-        resp.includes('follow-up') || resp.includes('follow up') ||
-        resp.includes('please fix') || resp.includes('please improve') ||
-        resp.includes('try again') || resp.includes('redo') ||
-        resp.includes('not complete') || resp.includes('incomplete') ||
-        resp.includes('needs improvement') || resp.includes('need improvement') ||
-        resp.includes('missing') || resp.includes('incorrect') ||
-        resp.includes('## follow-up instructions');
-      if (!needsFollowUp) {
-        // Master accepted the slave's work — no further handoff needed
-        await this.autoModeRedis.incrMasterTurns().catch(() => {});
-        return;
-      }
+    // Check if master wants to send follow-up work to slave
+    const resp = payload.responseText.toLowerCase();
+    const needsFollowUp =
+      resp.includes('follow-up') || resp.includes('follow up') ||
+      resp.includes('please fix') || resp.includes('please improve') ||
+      resp.includes('try again') || resp.includes('redo') ||
+      resp.includes('not complete') || resp.includes('incomplete') ||
+      resp.includes('needs improvement') || resp.includes('need improvement') ||
+      resp.includes('missing') || resp.includes('incorrect') ||
+      resp.includes('## follow-up instructions');
+
+    if (!needsFollowUp) {
+      // Master accepted slave's work — done
+      await this.autoModeRedis.incrMasterTurns().catch(() => {});
+      return;
     }
 
-    // Set slave busy before handoff
+    // Master found issues — send follow-up to slave
     await this.autoModeRedis.setSlaveBusy(600).catch(() => {});
 
-    const handoff = isSlaveReport
-      ? `## Follow-up Instructions from Master\n\n` +
-        `### Session Context\n${trimmed}\n\n` +
-        `### Master's Feedback & Corrections\n${payload.responseText.slice(0, 1500)}\n\n` +
-        `### Your Mission (Slave Runner)\n` +
-        `The master coordinator reviewed your previous work and found issues that need to be addressed.\n\n` +
-        `**Requirements:**\n` +
-        `1. Carefully read the master's feedback above — address every point raised.\n` +
-        `2. Fix the issues identified, then re-verify your work.\n` +
-        `3. Be more thorough this time — double-check edge cases and test your changes.\n` +
-        `4. Provide a clear summary of what you fixed and how you verified it.\n\n` +
-        `Do better this time. The master found problems with your previous attempt.`
-      : `## Task Handoff from Master\n\n` +
-        `### Session Context\n${trimmed}\n\n` +
-        `### User's Original Request\n${payload.userPrompt.slice(0, 800)}\n\n` +
-        `### Master's Analysis & Instructions\n${payload.responseText.slice(0, 1500)}\n\n` +
-        `### Your Mission (Slave Runner)\n` +
-        `You are the execution agent. The user sent the request above via Telegram, and the master coordinator has analyzed it.\n\n` +
-        `**Requirements:**\n` +
-        `1. Complete the task described above to the highest quality possible.\n` +
-        `2. Be thorough — check edge cases, validate your work, and verify the outcome matches the user's intent.\n` +
-        `3. If the task involves code, run tests/linting to confirm correctness before finishing.\n` +
-        `4. If the task is ambiguous, interpret it in the way most helpful to the user rather than doing nothing.\n` +
-        `5. Provide a clear, concise summary of what you did and the result.\n\n` +
-        `Do your best work. The user is waiting for your response.`;
+    const handoff =
+      `## Follow-up Instructions from Master\n\n` +
+      `### Session Context\n${trimmed}\n\n` +
+      `### Master's Feedback & Corrections\n${payload.responseText.slice(0, 1500)}\n\n` +
+      `### Your Mission (Slave Runner)\n` +
+      `The master reviewed your previous work and found issues.\n\n` +
+      `**Requirements:**\n` +
+      `1. Carefully read the master's feedback above — address every point.\n` +
+      `2. Fix the issues, then re-verify your work.\n` +
+      `3. Double-check edge cases and test your changes.\n` +
+      `4. Provide a clear summary of what you fixed.\n\n` +
+      `Do better this time.`;
     await this.autoModeRedis
       .pushSlaveHandoff(handoff, payload.outboundChatId)
       .catch(() => {});
@@ -727,13 +718,66 @@ export class TelegramAdapter extends BaseChannelAdapter {
       rt,
       this.channelType,
       (msg) => this.notifyTelegramMasterRedisFetch(msg),
-      (msg) => this.enqueue(msg),
+      (msg) => this.handleMasterRedisMessage(msg),
       () => this.running,
       async () => {
         console.log(`[telegram-adapter] Auto mode master max turns (${this.instanceId})`);
         await this.stop();
       },
     );
+  }
+
+  /**
+   * Master message routing:
+   * - User messages from Telegram → forward directly to slave (no LLM)
+   * - Slave execution reports → enqueue for LLM evaluation
+   */
+  private async handleMasterRedisMessage(msg: InboundMessage): Promise<void> {
+    const rt = this.autoModeRedis;
+    if (!rt) return;
+    const isSlaveReport = msg.text.startsWith('## Slave Execution Report');
+
+    if (isSlaveReport) {
+      // Slave report → master LLM evaluates
+      this.enqueue(msg);
+    } else {
+      // User message from Telegram → forward directly to slave, no LLM call
+      const chatId = msg.outboundChatId || this.hybridMirrorChatId || this.imGet('telegram_chat_id') || undefined;
+
+      // Store user's original goal in session summary for later evaluation
+      const prevSummary = await rt.getSessionSummary().catch(() => null);
+      const newSummary = prevSummary
+        ? `${prevSummary}\n---\nUser goal: ${msg.text.slice(0, 500)}`
+        : `User goal: ${msg.text.slice(0, 500)}`;
+      const trimmed = newSummary.length > 2000
+        ? '...' + newSummary.slice(newSummary.length - 1997)
+        : newSummary;
+      await rt.setSessionSummary(trimmed).catch(() => {});
+
+      // Set slave busy
+      await rt.setSlaveBusy(600).catch(() => {});
+
+      // Build slave handoff with user's original text
+      const handoff =
+        `## Task from User (via Telegram)\n\n` +
+        `### User's Request\n${msg.text}\n\n` +
+        `### Your Mission (Slave Runner)\n` +
+        `You are the execution agent. Complete the user's request above.\n\n` +
+        `**Requirements:**\n` +
+        `1. Complete the task to the highest quality possible.\n` +
+        `2. Be thorough — check edge cases, validate your work, verify the outcome.\n` +
+        `3. If the task involves code, run tests/linting to confirm correctness.\n` +
+        `4. If ambiguous, interpret in the way most helpful to the user.\n` +
+        `5. Provide a clear, concise summary of what you did and the result.\n\n` +
+        `Do your best work. The user is waiting.`;
+      await rt.pushSlaveHandoff(handoff, chatId).catch(() => {});
+      await rt.incrMasterTurns().catch(() => {});
+
+      // Record to monitor
+      appendMasterMessage(`[forwarded to slave] ${msg.text.slice(0, 200)}`, rt.bridgeSlug);
+
+      console.log(`[telegram-adapter] Auto mode: user message forwarded directly to slave (no master LLM)`);
+    }
   }
 
   private async notifyTelegramMasterRedisFetch(msg: InboundMessage): Promise<void> {
