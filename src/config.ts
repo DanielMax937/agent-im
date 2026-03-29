@@ -116,6 +116,66 @@ export function getConfigPath(): string {
   return path.join(getCtiHome(), "config.env");
 }
 
+export function getSlaveEnvPath(ctiHomeOverride?: string): string {
+  const home = ctiHomeOverride?.trim() ? path.resolve(ctiHomeOverride.trim()) : getCtiHome();
+  return path.join(home, "config.slave.env");
+}
+
+/** Load slave runner env vars from `$CTI_HOME/config.slave.env`. Returns empty object if file missing. */
+export function loadSlaveEnv(ctiHomeOverride?: string): Record<string, string> {
+  try {
+    const content = fs.readFileSync(getSlaveEnvPath(ctiHomeOverride), "utf-8");
+    const map = parseEnvFile(content);
+    const out: Record<string, string> = {};
+    for (const [k, v] of map) out[k] = v;
+    return out;
+  } catch {
+    return {};
+  }
+}
+
+/** Build env var entries from a slave runner config + auto mode settings. */
+export function buildSlaveEnvFromRunner(
+  runner: RunnerConfig,
+  spec: ImInstanceSpec,
+  parentConfig: Config,
+): Record<string, string> {
+  const env: Record<string, string> = {};
+  env.CTI_RUNTIME = runner.runtime;
+  env.CTI_RUNNERS = JSON.stringify([runner]);
+  env.CTI_DEFAULT_RUNNER = runner.id;
+  if (runner.defaultModel) env.CTI_DEFAULT_MODEL = runner.defaultModel;
+  if (runner.defaultMode) env.CTI_DEFAULT_MODE = runner.defaultMode;
+  if (runner.autoApprove !== undefined) env.CTI_AUTO_APPROVE = runner.autoApprove ? "true" : "false";
+  if (runner.claudeExecutable) env.CTI_CLAUDE_CODE_EXECUTABLE = runner.claudeExecutable;
+  if (runner.codexExecutable) env.CTI_CODEX_EXECUTABLE = runner.codexExecutable;
+  if (runner.cursorExecutable) env.CTI_CURSOR_EXECUTABLE = runner.cursorExecutable;
+  if (runner.copilotExecutable) env.CTI_COPILOT_EXECUTABLE = runner.copilotExecutable;
+  // Carry forward Auto mode Redis settings so the slave bridge can connect
+  if (spec.autoRedisUrl) env.CTI_AUTO_REDIS_URL = spec.autoRedisUrl;
+  if (spec.autoRedisNamespace) env.CTI_AUTO_REDIS_NAMESPACE = spec.autoRedisNamespace;
+  if (spec.autoMaxTurns !== undefined) env.CTI_AUTO_MAX_TURNS = String(spec.autoMaxTurns);
+  // Carry forward proxy
+  if (parentConfig.proxy) env.CTI_PROXY = parentConfig.proxy;
+  // Merge runner-level subprocess env last (overrides)
+  if (runner.subprocessEnv) Object.assign(env, runner.subprocessEnv);
+  return env;
+}
+
+/** Write slave runner env to `$CTI_HOME/config.slave.env` (atomic). */
+export function saveSlaveEnv(env: Record<string, string>, ctiHomeOverride?: string): void {
+  const filePath = getSlaveEnvPath(ctiHomeOverride);
+  fs.mkdirSync(path.dirname(filePath), { recursive: true });
+  let out = "# Slave runner environment — generated from admin UI\n";
+  for (const [k, v] of Object.entries(env)) {
+    if (!k.trim()) continue;
+    out += formatEnvLine(k.trim(), v);
+  }
+  const tmp = `${filePath}.tmp.${process.pid}`;
+  fs.writeFileSync(tmp, out, { mode: 0o600 });
+  fs.renameSync(tmp, filePath);
+}
+
 /**
  * Resolve the data directory for a bridge slug under `CTI_BASE_DIR`.
  * When `CTI_HOME` is set, the **active** bridge (see {@link getCtiBotDisplayName}) maps to that
@@ -272,6 +332,16 @@ export function getCtiBotDisplayName(): string {
 export function getImBotInstanceId(): string {
   return getCtiBotDisplayName();
 }
+
+/**
+ * Redis `cti:auto:{slug}:…` segment: use {@link ImInstanceSpec.autoRedisNamespace} when set so a
+ * second bridge (separate `CTI_HOME` / `config.env`) can share queues with the first.
+ */
+export function resolveAutoRedisBridgeSlug(config: Config): string {
+  const raw = config.imBot?.autoRedisNamespace?.trim();
+  if (raw && IM_INSTANCE_ID_RE.test(raw)) return raw;
+  return getImBotInstanceId();
+}
 const IM_INSTANCE_CHANNELS: ImInstanceChannel[] = ["telegram", "discord", "feishu", "qq"];
 const IM_BASE_CHANNEL_SET = new Set<string>(IM_INSTANCE_CHANNELS);
 
@@ -312,6 +382,16 @@ function pickRunnerModeRow(o: Record<string, unknown>): "code" | "plan" | "ask" 
   return undefined;
 }
 
+function pickRunnerSubprocessEnvRow(o: Record<string, unknown>): Record<string, string> | undefined {
+  const raw = o.subprocessEnv;
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return undefined;
+  const out: Record<string, string> = {};
+  for (const [k, v] of Object.entries(raw)) {
+    if (typeof v === "string") out[k] = v;
+  }
+  return Object.keys(out).length ? out : undefined;
+}
+
 /** Parse one runner object from JSON (shared by `CTI_RUNNERS` and `imBot.runners`). */
 export function runnerFromRow(o: Record<string, unknown>): RunnerConfig | null {
   const id = o.id;
@@ -333,6 +413,7 @@ export function runnerFromRow(o: Record<string, unknown>): RunnerConfig | null {
     cursorExecutable: pickRunnerStrRow(o, "cursorExecutable"),
     cursorDefaultModel: pickRunnerStrRow(o, "cursorDefaultModel"),
     copilotExecutable: pickRunnerStrRow(o, "copilotExecutable"),
+    subprocessEnv: pickRunnerSubprocessEnvRow(o),
   };
 }
 
@@ -362,6 +443,34 @@ function imInstanceSpecFromRow(o: Record<string, unknown>): ImInstanceSpec | nul
       ? rawId.trim()
       : getCtiBotDisplayName();
   if (!IM_INSTANCE_ID_RE.test(id)) return null;
+  const autoModeMerged =
+    typeof o.autoMode === "boolean"
+      ? o.autoMode
+      : typeof o.localAgentEnabled === "boolean"
+        ? o.localAgentEnabled
+        : undefined;
+  const autoSlaveRunner =
+    o.autoSlaveRunner && typeof o.autoSlaveRunner === "object"
+      ? runnerFromRow(o.autoSlaveRunner as Record<string, unknown>) ?? undefined
+      : undefined;
+  const autoRedisUrl =
+    typeof o.autoRedisUrl === "string"
+      ? o.autoRedisUrl
+      : typeof o.localAgentRedisUrl === "string"
+        ? o.localAgentRedisUrl
+        : undefined;
+  const autoMaxTurns =
+    typeof o.autoMaxTurns === "number"
+      ? o.autoMaxTurns
+      : typeof o.localAgentMaxTurns === "number"
+        ? o.localAgentMaxTurns
+        : undefined;
+  const autoRedisNamespace =
+    typeof o.autoRedisNamespace === "string" && IM_INSTANCE_ID_RE.test(o.autoRedisNamespace.trim())
+      ? o.autoRedisNamespace.trim()
+      : undefined;
+  const autoSlaveExternal =
+    typeof o.autoSlaveExternal === "boolean" ? o.autoSlaveExternal : undefined;
   return {
     id,
     channel: ch,
@@ -398,22 +507,12 @@ function imInstanceSpecFromRow(o: Record<string, unknown>): ImInstanceSpec | nul
       typeof o.qqImageEnabled === "boolean" ? o.qqImageEnabled : undefined,
     qqMaxImageSize:
       typeof o.qqMaxImageSize === "number" ? o.qqMaxImageSize : undefined,
-    localAgentEnabled:
-      typeof o.localAgentEnabled === "boolean" ? o.localAgentEnabled : undefined,
-    localAgentRedisUrl:
-      typeof o.localAgentRedisUrl === "string" ? o.localAgentRedisUrl : undefined,
-    localAgentFirstPrompt:
-      typeof o.localAgentFirstPrompt === "string" ? o.localAgentFirstPrompt : undefined,
-    localAgentMaxTurns:
-      typeof o.localAgentMaxTurns === "number" ? o.localAgentMaxTurns : undefined,
-    localAgentPeerInstanceId:
-      typeof o.localAgentPeerInstanceId === "string"
-        ? o.localAgentPeerInstanceId
-        : undefined,
-    localAgentRunnerId:
-      typeof o.localAgentRunnerId === "string" && o.localAgentRunnerId.trim()
-        ? o.localAgentRunnerId.trim()
-        : undefined,
+    autoMode: autoModeMerged,
+    autoRedisUrl,
+    autoMaxTurns,
+    autoSlaveRunner,
+    autoRedisNamespace,
+    autoSlaveExternal,
     runners: parseRunnersField(o.runners),
     defaultRunnerId:
       typeof o.defaultRunnerId === "string" && o.defaultRunnerId.trim()
@@ -553,40 +652,22 @@ function applyImBotToSettings(m: Map<string, string>, config: Config): void {
         }
   }
 
-  if (spec.localAgentEnabled !== undefined) {
+  if (spec.autoMode !== undefined) {
     m.set(
-      imScopedStoreKey(base, id, `bridge_${base}_local_agent_enabled`),
-      spec.localAgentEnabled ? "true" : "false",
+      imScopedStoreKey(base, id, `bridge_${base}_auto_mode`),
+      spec.autoMode ? "true" : "false",
     );
   }
-  if (spec.localAgentRedisUrl) {
+  if (spec.autoRedisUrl) {
     m.set(
-      imScopedStoreKey(base, id, `bridge_${base}_local_agent_redis_url`),
-      spec.localAgentRedisUrl,
+      imScopedStoreKey(base, id, `bridge_${base}_auto_redis_url`),
+      spec.autoRedisUrl,
     );
   }
-  if (spec.localAgentFirstPrompt) {
+  if (spec.autoMaxTurns !== undefined) {
     m.set(
-      imScopedStoreKey(base, id, `bridge_${base}_local_agent_first_prompt`),
-      spec.localAgentFirstPrompt,
-    );
-  }
-  if (spec.localAgentMaxTurns !== undefined) {
-    m.set(
-      imScopedStoreKey(base, id, `bridge_${base}_local_agent_max_turns`),
-      String(spec.localAgentMaxTurns),
-    );
-  }
-  if (spec.localAgentPeerInstanceId) {
-    m.set(
-      imScopedStoreKey(base, id, `bridge_${base}_local_agent_peer_instance_id`),
-      spec.localAgentPeerInstanceId,
-    );
-  }
-  if (spec.localAgentRunnerId) {
-    m.set(
-      imScopedStoreKey(base, id, `bridge_${base}_local_agent_runner_id`),
-      spec.localAgentRunnerId,
+      imScopedStoreKey(base, id, `bridge_${base}_auto_max_turns`),
+      String(spec.autoMaxTurns),
     );
   }
 }
@@ -686,10 +767,20 @@ export function findImInstanceSpec(
 
 /** Runners for one IM bot: embedded list, or bridge-level `CTI_RUNNERS` fallback. */
 export function normalizeRunnersForInstance(spec: ImInstanceSpec, config: Config): RunnerConfig[] {
-  if (spec.runners && spec.runners.length > 0) {
-    return spec.runners;
-  }
-  return normalizeRunners(config);
+  const base =
+    spec.runners && spec.runners.length > 0 ? spec.runners : normalizeRunners(config);
+  const s = spec.autoSlaveRunner;
+  if (!s?.id?.trim()) return base;
+  const id = s.id.trim();
+  // Populate slave runner subprocessEnv from config.slave.env (file-based, replaces inline JSON)
+  const fileEnv = loadSlaveEnv();
+  const merged: RunnerConfig = {
+    ...s,
+    id,
+    subprocessEnv: Object.keys(fileEnv).length > 0 ? fileEnv : s.subprocessEnv,
+  };
+  const withoutDup = base.filter((r) => r.id !== id);
+  return [...withoutDup, merged];
 }
 
 /** Runners visible on a given adapter `channelType` (`telegram` or `telegram:slug`). */
@@ -1036,9 +1127,21 @@ function validateRunnerList(runners: RunnerConfig[] | undefined, pathLabel: stri
   }
 }
 
+function normalizeImBotAutoFields(spec: ImInstanceSpec): ImInstanceSpec {
+  if (spec.channel === 'telegram') return spec;
+  if (spec.autoSlaveExternal === undefined) return spec;
+  return {
+    ...spec,
+    autoSlaveExternal: undefined,
+  };
+}
+
 export function validateConfigRunners(config: Config): void {
   validateRunnerList(config.runners, 'runners');
   validateRunnerList(config.imBot?.runners, 'imBot.runners');
+  if (config.imBot?.autoSlaveRunner) {
+    validateRunnerList([config.imBot.autoSlaveRunner], 'imBot.autoSlaveRunner');
+  }
 }
 
 export function maskSecret(value: string): string {
@@ -1123,6 +1226,7 @@ export function mergeConfigPatch(
         feishuAppSecret: mergeImSecret(spec.feishuAppSecret, prevSpec?.feishuAppSecret),
         qqAppSecret: mergeImSecret(spec.qqAppSecret, prevSpec?.qqAppSecret),
       };
+      next.imBot = normalizeImBotAutoFields(next.imBot);
       delete next.imBot.enabled;
       delete next.imBot.defaultModel;
       delete next.imBot.defaultMode;

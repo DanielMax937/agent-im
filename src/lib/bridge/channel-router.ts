@@ -7,13 +7,40 @@
 
 import type { ChannelAddress, ChannelBinding, ChannelType } from './types';
 import { getBridgeContext } from './context';
+import { findImInstanceSpec, loadConfig } from '../../config';
 import {
-  getLocalAgentRunnerIdFromStore,
+  getAutoSlaveRunnerIdFromStore,
+  parseAutoMasterRunnerIdFromChatId,
+  parseImBaseAndInstanceId,
   resolveRunnerForChannelBinding,
 } from './im-instance-settings';
 
-function isLocalAgentAddress(address: ChannelAddress): boolean {
-  return address.chatId.startsWith('la:') || (address.userId?.startsWith('localagent-') ?? false);
+/** Redis master synthetic address (`auto:master:…`). */
+function isAutoModeMasterAddress(address: ChannelAddress): boolean {
+  return address.chatId.startsWith('auto:master:') || address.userId?.startsWith('automaster-') === true;
+}
+
+/** Redis slave synthetic address (new `auto:` / `autoslave-`, or legacy `la:` / `localagent-` sessions). */
+function isAutoModeSlaveAddress(address: ChannelAddress): boolean {
+  if (isAutoModeMasterAddress(address)) return false;
+  return (
+    address.chatId.startsWith('auto:') ||
+    address.chatId.startsWith('la:') ||
+    (address.userId?.startsWith('autoslave-') ?? false) ||
+    (address.userId?.startsWith('localagent-') ?? false)
+  );
+}
+
+function autoSlaveRunnerOverrideFromConfig(channelType: string): string | undefined {
+  try {
+    const cfg = loadConfig();
+    const parsed = parseImBaseAndInstanceId(channelType);
+    if (!parsed) return undefined;
+    const spec = findImInstanceSpec(cfg, parsed.base, parsed.instanceId);
+    return spec?.autoSlaveRunner?.id?.trim() || undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 /**
@@ -75,13 +102,16 @@ export function createBinding(
     ctxDefaultRunner ??
     storeDefault ??
     allIds[0];
-  const laRunner = isLocalAgentAddress(address)
-    ? getLocalAgentRunnerIdFromStore(store, address.channelType)
-    : undefined;
+  const autoRunnerOverride = isAutoModeMasterAddress(address)
+    ? parseAutoMasterRunnerIdFromChatId(address.chatId)
+    : isAutoModeSlaveAddress(address)
+      ? autoSlaveRunnerOverrideFromConfig(address.channelType) ||
+        getAutoSlaveRunnerIdFromStore(store, address.channelType)
+      : undefined;
   const runnerProfileId = resolveRunnerForChannelBinding(
     store,
     address.channelType,
-    laRunner,
+    autoRunnerOverride,
     globalDef,
     allIds,
   );
@@ -121,13 +151,16 @@ export function bindToSession(
     ctxDefaultRunner ??
     storeDefault ??
     allIds[0];
-  const laRunner = isLocalAgentAddress(address)
-    ? getLocalAgentRunnerIdFromStore(store, address.channelType)
-    : undefined;
+  const autoRunnerOverride = isAutoModeMasterAddress(address)
+    ? parseAutoMasterRunnerIdFromChatId(address.chatId)
+    : isAutoModeSlaveAddress(address)
+      ? autoSlaveRunnerOverrideFromConfig(address.channelType) ||
+        getAutoSlaveRunnerIdFromStore(store, address.channelType)
+      : undefined;
   const runnerProfileId = resolveRunnerForChannelBinding(
     store,
     address.channelType,
-    laRunner,
+    autoRunnerOverride,
     globalDef,
     allIds,
   );

@@ -1,4 +1,5 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
+import fs from 'node:fs';
 
 import * as bridgeManager from '../lib/bridge/bridge-manager';
 import {
@@ -13,7 +14,9 @@ import {
   startBridgeDaemonChild,
   stopBridgeDaemonChild,
 } from '../lib/bridge-app-child';
-import { getCtiHomeForBridgeSlug } from '../config';
+import { readBridgeDaemonDiskStatus } from '../lib/bridge-daemon-status';
+import { getCtiHomeForBridgeSlug, getSlaveEnvPath, loadConfig } from '../config';
+import { readMonitorMessages } from '../lib/monitor-messages';
 import { getLogger } from '../logger';
 import type {
   PendingApprovalRecord,
@@ -428,19 +431,49 @@ export function createPlatformApp(options: CreatePlatformAppOptions): PlatformAp
           : undefined;
 
         if (bridgeActionParams.action === 'start') {
+          // Preflight: if auto mode is enabled, config.slave.env must exist
+          try {
+            const cfg = loadConfig();
+            if (cfg.imBot?.autoMode) {
+              const slaveEnvPath = getSlaveEnvPath(bridgeHome);
+              if (!fs.existsSync(slaveEnvPath)) {
+                return jsonResponse(
+                  {
+                    error:
+                      '已启用 Auto 模式，但未找到 config.slave.env。请先在管理页面配置 Slave Runner 并点击「保存 config.slave.env」。',
+                  },
+                  400,
+                );
+              }
+            }
+          } catch {
+            /* config load failure will surface during daemon start */
+          }
           await startBridgeDaemonChild(bridgeHome);
           return jsonResponse(getBridgeStatusForApi(bridgeHome));
         }
         if (bridgeActionParams.action === 'stop') {
           const stopped = await stopBridgeDaemonChild(bridgeHome);
           if (!stopped.ok) {
-            return jsonResponse(
-              {
-                error:
-                  '桥接未由本应用启动，无法在此停止。请先使用 scripts/daemon.sh stop，或结束对应 PID。',
-              },
-              409,
-            );
+            // Not managed by app — try to kill via PID from status.json
+            const disk = readBridgeDaemonDiskStatus(bridgeHome);
+            if (disk.effectiveRunning && disk.pid) {
+              try {
+                process.kill(disk.pid, 'SIGTERM');
+                // Wait briefly for process to exit
+                for (let i = 0; i < 20; i++) {
+                  await new Promise((r) => setTimeout(r, 500));
+                  try { process.kill(disk.pid!, 0); } catch { break; }
+                }
+              } catch {
+                /* already dead */
+              }
+            } else {
+              return jsonResponse(
+                { error: '桥接未在运行或无法找到 PID。' },
+                409,
+              );
+            }
           }
           return jsonResponse(getBridgeStatusForApi(bridgeHome));
         }
@@ -449,6 +482,21 @@ export function createPlatformApp(options: CreatePlatformAppOptions): PlatformAp
           return jsonResponse(getBridgeStatusForApi());
         }
         return jsonResponse({ error: `Unknown bridge action: ${bridgeActionParams.action}` }, 404);
+      }
+
+      // ── Monitor API ──
+      if (request.method === 'GET' && pathname === '/api/monitor/responses') {
+        try {
+          const slug = searchParams.get('bridge') ?? undefined;
+          const home = slug ? getCtiHomeForBridgeSlug(slug) : undefined;
+          const data = readMonitorMessages(home ?? undefined);
+          return jsonResponse({
+            masterOut: data.master,
+            slaveOut: data.slave,
+          });
+        } catch (err) {
+          return jsonResponse({ error: err instanceof Error ? err.message : String(err) }, 500);
+        }
       }
 
       return jsonResponse({ error: `Route not found: ${request.method} ${pathname}` }, 404);

@@ -80,6 +80,13 @@ type DaemonDiskStatus = {
   runId?: string;
   channels?: string[];
   lastExitReason?: string;
+  slave?: {
+    running: boolean;
+    effectiveRunning: boolean;
+    pid?: number;
+    startedAt?: string;
+    lastExitReason?: string;
+  };
 };
 
 type EnvPresence = Record<string, boolean>;
@@ -100,6 +107,34 @@ function defaultConfig(): Config {
     defaultMode: 'code',
     autoApprove: false,
     runners: [{ id: 'default', runtime: 'claude', label: '默认' }],
+  };
+}
+
+function summarizeAutoMode(config: AdminConfig, bridgeSlug: string) {
+  const spec = config.imBot;
+  if (!spec?.autoMode) {
+    return {
+      enabled: false,
+      modeLabel: '关闭',
+      namespace: bridgeSlug,
+      slaveRunnerId: null as string | null,
+      consumerLabel: null as string | null,
+    };
+  }
+
+  const namespace = spec.autoRedisNamespace?.trim() || bridgeSlug;
+  const slaveRunnerId =
+    spec.autoSlaveRunner?.id?.trim() ||
+    spec.defaultRunnerId?.trim() ||
+    spec.runners?.[0]?.id ||
+    'default';
+
+  return {
+    enabled: true,
+    modeLabel: 'Hybrid (Telegram + Redis)',
+    namespace,
+    slaveRunnerId,
+    consumerLabel: 'Master / Slave 为独立桥接进程',
   };
 }
 
@@ -385,6 +420,40 @@ export default function AdminPage() {
     }
   };
 
+  const saveSlaveEnvForBridge = async (slug: string) => {
+    setSaving(true);
+    setMessage(null);
+    try {
+      // First save the main config so slave runner fields are persisted
+      const payload = bridgeConfigs[slug];
+      if (payload) {
+        const saveRes = await fetch('/api/local-config', {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ targetBridge: slug, ...payload }),
+          ...fetchNoStore,
+        });
+        const saveJ = (await readJsonFromResponse(saveRes)) as { ok?: boolean; error?: string };
+        if (!saveRes.ok || saveJ.ok === false) throw new Error(saveJ.error || saveRes.statusText);
+      }
+      // Then generate config.slave.env from the saved slave runner config
+      const res = await fetch('/api/local-config', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ targetBridge: slug, saveSlaveEnv: true }),
+        ...fetchNoStore,
+      });
+      const j = (await readJsonFromResponse(res)) as { ok?: boolean; error?: string; configPath?: string };
+      if (!res.ok || j.ok === false) throw new Error(j.error || res.statusText);
+      setMessage(`已保存 config.slave.env → ${j.configPath || ''}。重启桥接后生效。`);
+      await load({ silent: true });
+    } catch (e) {
+      setMessage(e instanceof Error ? e.message : String(e));
+    } finally {
+      setSaving(false);
+    }
+  };
+
   const bridgeAction = async (action: 'start' | 'stop', slug: string) => {
     setMessage(null);
     try {
@@ -505,6 +574,7 @@ export default function AdminPage() {
             <a href="/">首页</a>
             <a href="/board">任务看板</a>
             <a href="/health">健康检查</a>
+            <a href="/monitor">Auto Monitor</a>
           </nav>
         </div>
         <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: '0.35rem' }}>
@@ -615,9 +685,10 @@ export default function AdminPage() {
                 : !adminConfigsEqual(cfgB, baselineBridgeConfigs[b]!);
               const embB = embeddedByBridge[b];
               const dmB = daemonStatusByBridge[b];
+              const autoSummary = summarizeAutoMode(cfgB, b);
               const anyRunningB = embB?.running === true || dmB?.effectiveRunning === true;
               const startDisabledB = bridgeActionsLocked || configLoading || anyRunningB;
-              const canStopB = embB?.running === true && embB?.managedByApp === true;
+              const canStopB = anyRunningB;
               const stopDisabledB = bridgeActionsLocked || configLoading || !canStopB;
               return (
               <div
@@ -665,6 +736,57 @@ export default function AdminPage() {
                     role="region"
                     aria-labelledby={`admin-bridge-head-${b}`}
                   >
+        <div
+          className="ui-card"
+          style={{
+            padding: '0.9rem 1rem',
+            marginBottom: '1rem',
+            border: '1px solid var(--ui-border, #333)',
+            background: 'rgba(148, 163, 184, 0.06)',
+          }}
+        >
+          <div
+            style={{
+              display: 'grid',
+              gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))',
+              gap: '0.75rem 1rem',
+            }}
+          >
+            <div>
+              <div className="ui-muted ui-small">Auto 模式</div>
+              <div>{autoSummary.modeLabel}</div>
+            </div>
+            <div>
+              <div className="ui-muted ui-small">Redis 命名空间</div>
+              <div><code>{autoSummary.namespace}</code></div>
+            </div>
+            <div>
+              <div className="ui-muted ui-small">Slave Runner</div>
+              <div>{autoSummary.slaveRunnerId ? <code>{autoSummary.slaveRunnerId}</code> : '—'}</div>
+            </div>
+            <div>
+              <div className="ui-muted ui-small">消费拓扑</div>
+              <div>{autoSummary.consumerLabel ?? '—'}</div>
+            </div>
+            <div>
+              <div className="ui-muted ui-small">磁盘 daemon 状态</div>
+              <div>{dmB?.effectiveRunning ? '运行中' : '未运行'}{dmB?.pid ? ` (PID: ${dmB.pid})` : ''}</div>
+            </div>
+            <div>
+              <div className="ui-muted ui-small">Slave 进程状态</div>
+              <div>{dmB?.slave?.effectiveRunning ? '运行中' : '未运行'}{dmB?.slave?.pid ? ` (PID: ${dmB.slave.pid})` : ''}</div>
+            </div>
+            <div>
+              <div className="ui-muted ui-small">App 子进程状态</div>
+              <div>{embB?.running ? '运行中' : '未运行'}</div>
+            </div>
+          </div>
+          {autoSummary.enabled ? (
+            <p className="ui-muted ui-small" style={{ margin: '0.75rem 0 0' }}>
+              master 队列按当前聊天 <code>/runner</code> 分流；slave 固定使用上方摘要里的 Runner。
+            </p>
+          ) : null}
+        </div>
         <div className="ui-section-title">
           <h3>IM 机器人（CTI_IM_BOT）</h3>
           {!cfgB.imBot ? (
@@ -1142,45 +1264,32 @@ export default function AdminPage() {
                   }}
                 >
                   <p className="ui-muted ui-small">
-                    <strong>Local Agent</strong>：勾选并填写 Redis URL 后，可二选一——（1）<strong>仅 Redis</strong>：不填上方
-                    Telegram/Discord 等平台 token，桥只从 <code>input</code> 取词、把回复写入 <code>out</code>；（2）
-                    <strong>混合</strong>：同时填写平台 token 与 Redis，则 IM 用户消息既走普通 Runner，也会 LPUSH 到{' '}
-                    <code>input</code> 给 Local Agent 管线；两路回复都发到同一聊天，并带前缀 <code>[runner]</code> /{' '}
-                    <code>[local-agent]</code>。键前缀：<code>cti:localagent:平台:实例id:</code>。Redis URL 为<strong>必填</strong>
-                    （不使用全局 <code>CTI_AGENT_REDIS_URL</code>）。
+                    <strong>Auto 模式（混合 Telegram + Redis）</strong>：同时填写 Telegram token 与 Redis URL 后，用户文本进入<strong>当前聊天所选 Runner</strong>（<code>/runner</code>）对应的 master <code>input</code>；桥从 Redis 取出后跑该 Runner 作为协调器，回复发到 Telegram 并写入 master <code>out</code>，随后下发给 slave（工具）。<strong>master 与 slave 同一条桥接进程</strong>；slave 若需独立 API Key 等，在下方「Slave Runner」配置后点击「保存 config.slave.env」。可选：<strong>另起桥接目录</strong>专跑 slave（两桥同一 Redis 命名空间 + 勾选「Slave 由独立桥接消费」）。前缀 <code>[master]</code> / <code>[slave]</code>。Telegram token 与 Redis URL 均<strong>必填</strong>。启用后关闭<strong>流式预览</strong>与<strong>运行时 token 级流式输出</strong>。
                   </p>
                   <div className="ui-grid">
                     <label className="ui-field ui-check">
                       <input
                         type="checkbox"
-                        checked={!!spec.localAgentEnabled}
-                        onChange={(e) =>
-                          updateImBot({ localAgentEnabled: e.target.checked ? true : false })
-                        }
+                        checked={!!spec.autoMode}
+                        onChange={(e) => {
+                          const on = e.target.checked ? true : false;
+                          updateImBot({ autoMode: on });
+                        }}
                       />
-                      <span>启用 Local Agent</span>
+                      <span>启用 Auto 模式</span>
                     </label>
                   </div>
-                  {spec.localAgentEnabled ? (
+                  {spec.autoMode ? (
                     <div className="ui-grid">
                       <label className="ui-field">
                         <span>Redis URL（必填）</span>
                         <input
-                          value={spec.localAgentRedisUrl ?? ''}
+                          value={spec.autoRedisUrl ?? ''}
                           onChange={(e) =>
-                            updateImBot({ localAgentRedisUrl: e.target.value || undefined })
+                            updateImBot({ autoRedisUrl: e.target.value || undefined })
                           }
                           placeholder="redis://127.0.0.1:6379"
                           required
-                        />
-                      </label>
-                      <label className="ui-field">
-                        <span>首条入队文本（LPUSH 到 input）</span>
-                        <input
-                          value={spec.localAgentFirstPrompt ?? ''}
-                          onChange={(e) =>
-                            updateImBot({ localAgentFirstPrompt: e.target.value || undefined })
-                          }
                         />
                       </label>
                       <label className="ui-field">
@@ -1188,38 +1297,254 @@ export default function AdminPage() {
                         <input
                           type="number"
                           min={1}
-                          value={spec.localAgentMaxTurns ?? ''}
+                          value={spec.autoMaxTurns ?? ''}
                           onChange={(e) =>
                             updateImBot({
-                              localAgentMaxTurns: e.target.value ? Number(e.target.value) : undefined,
+                              autoMaxTurns: e.target.value ? Number(e.target.value) : undefined,
                             })
                           }
                         />
                       </label>
                       <label className="ui-field">
-                        <span>Local Agent Runner id（与上方 Runner 列表其一的 id 一致）</span>
+                        <span>Redis 命名空间（可选，双桥共用）</span>
                         <input
-                          value={spec.localAgentRunnerId ?? ''}
-                          onChange={(e) =>
-                            updateImBot({
-                              localAgentRunnerId: e.target.value.trim() || undefined,
-                            })
-                          }
-                          placeholder="例如 default 或自定义 runner id"
+                          value={spec.autoRedisNamespace ?? ''}
+                          onChange={(e) => {
+                            const v = e.target.value.trim();
+                            updateImBot({ autoRedisNamespace: v || undefined });
+                          }}
+                          placeholder="留空则用本桥目录名；双桥对齐时请填相同值"
                         />
                       </label>
-                      <label className="ui-field">
-                        <span>Peer 实例 id（可选，同平台）</span>
-                        <input
-                          value={spec.localAgentPeerInstanceId ?? ''}
-                          onChange={(e) =>
+                      {spec.channel !== 'telegram' && (
+                        <p className="ui-muted ui-small" style={{ gridColumn: '1 / -1', margin: 0 }}>
+                          Auto 模式仅支持 Telegram 混合模式；请先将平台切换为 Telegram 并填写 Bot Token。
+                        </p>
+                      )}
+                      <div style={{ gridColumn: '1 / -1' }}>
+                        <p className="ui-muted ui-small" style={{ marginBottom: '0.5rem' }}>
+                          <strong>Slave 专用 Runner</strong>：字段与上方 Runners 相同；留空 Runner ID 则不使用专用配置，slave 与<strong>默认 Runner</strong>相同。Master 与 Slave 始终为独立桥接进程；配置完成后点击「保存 config.slave.env」将 Slave Runner 配置导出，另起桥接加载。
+                        </p>
+                        {(() => {
+                          const slaveProf: RunnerConfig = spec.autoSlaveRunner ?? {
+                            id: '',
+                            runtime: 'claude',
+                          };
+                          const updateSlave = (patch: Partial<RunnerConfig>) => {
+                            const merged: RunnerConfig = { ...slaveProf, ...patch };
+                            const id = merged.id?.trim();
+                            if (!id) {
+                              updateImBot({ autoSlaveRunner: undefined });
+                              return;
+                            }
                             updateImBot({
-                              localAgentPeerInstanceId: e.target.value.trim() || undefined,
-                            })
-                          }
-                          placeholder="另一 bot 的 slug，转发 Claude 回复到其 input"
-                        />
-                      </label>
+                              autoSlaveRunner: {
+                                ...merged,
+                                id,
+                                runtime: merged.runtime ?? 'claude',
+                              },
+                            });
+                          };
+                          return (
+                            <div className="ui-slot" style={{ marginTop: '0.25rem' }}>
+                              <div className="ui-slot-head">
+                                <strong>Slave Runner</strong>
+                                {spec.autoSlaveRunner?.id?.trim() ? (
+                                  <button
+                                    type="button"
+                                    className="ui-btn ghost"
+                                    onClick={() => updateImBot({ autoSlaveRunner: undefined })}
+                                  >
+                                    清除
+                                  </button>
+                                ) : null}
+                              </div>
+                              <div className="ui-grid">
+                                <label className="ui-field">
+                                  <span>Runner ID</span>
+                                  <input
+                                    value={slaveProf.id}
+                                    onChange={(e) => updateSlave({ id: e.target.value })}
+                                    placeholder="填写后启用专用 slave"
+                                  />
+                                </label>
+                                <label className="ui-field">
+                                  <span>显示名称</span>
+                                  <input
+                                    value={slaveProf.label ?? ''}
+                                    onChange={(e) => updateSlave({ label: e.target.value || undefined })}
+                                  />
+                                </label>
+                                <label className="ui-field">
+                                  <span>后端类型</span>
+                                  <select
+                                    value={slaveProf.runtime}
+                                    onChange={(e) =>
+                                      updateSlave({ runtime: e.target.value as RunnerConfig['runtime'] })
+                                    }
+                                  >
+                                    {RUNTIMES.map((r) => (
+                                      <option key={r} value={r}>
+                                        {r}
+                                      </option>
+                                    ))}
+                                  </select>
+                                </label>
+                                <label className="ui-field">
+                                  <span>默认模型（可选）</span>
+                                  <input
+                                    value={slaveProf.defaultModel ?? ''}
+                                    onChange={(e) =>
+                                      updateSlave({ defaultModel: e.target.value || undefined })
+                                    }
+                                  />
+                                </label>
+                                <label className="ui-field">
+                                  <span>建议模式</span>
+                                  <select
+                                    value={slaveProf.defaultMode ?? ''}
+                                    onChange={(e) => {
+                                      const v = e.target.value;
+                                      updateSlave({
+                                        defaultMode:
+                                          v === 'code' || v === 'plan' || v === 'ask' ? v : undefined,
+                                      });
+                                    }}
+                                  >
+                                    <option value="">（未设置）</option>
+                                    {RUNNER_MODES.map((m) => (
+                                      <option key={m} value={m}>
+                                        {m}
+                                      </option>
+                                    ))}
+                                  </select>
+                                </label>
+                                <label className="ui-field">
+                                  <span>自动批准工具</span>
+                                  <select
+                                    value={slaveProf.autoApprove === undefined ? '' : slaveProf.autoApprove ? 'yes' : 'no'}
+                                    onChange={(e) => {
+                                      const v = e.target.value;
+                                      updateSlave({
+                                        autoApprove: v === '' ? undefined : v === 'yes',
+                                      });
+                                    }}
+                                  >
+                                    <option value="">继承桥接默认</option>
+                                    <option value="yes">是</option>
+                                    <option value="no">否</option>
+                                  </select>
+                                </label>
+                              </div>
+                              {slaveProf.runtime === 'claude' && (
+                                <>
+                                  <div
+                                    className="ui-grid"
+                                    style={{ marginTop: '0.75rem', marginBottom: '0.75rem' }}
+                                  >
+                                    <label className="ui-field">
+                                      <span>Claude CLI 路径</span>
+                                      <input
+                                        value={slaveProf.claudeExecutable ?? ''}
+                                        onChange={(e) =>
+                                          updateSlave({ claudeExecutable: e.target.value || undefined })
+                                        }
+                                      />
+                                    </label>
+                                    <label className="ui-field ui-check">
+                                      <input
+                                        type="checkbox"
+                                        checked={slaveProf.claudeUseLogin === true}
+                                        onChange={(e) =>
+                                          updateSlave({ claudeUseLogin: e.target.checked ? true : undefined })
+                                        }
+                                      />
+                                      <span>Claude 使用 CLI login</span>
+                                    </label>
+                                  </div>
+                                  <RunnerEnvTip runner={slaveProf} envPresence={envPresence} />
+                                </>
+                              )}
+                              {slaveProf.runtime === 'codex' && (
+                                <>
+                                  <div
+                                    className="ui-grid"
+                                    style={{ marginTop: '0.75rem', marginBottom: '0.75rem' }}
+                                  >
+                                    <label className="ui-field">
+                                      <span>Codex wrapper 路径</span>
+                                      <input
+                                        value={slaveProf.codexExecutable ?? ''}
+                                        onChange={(e) =>
+                                          updateSlave({ codexExecutable: e.target.value || undefined })
+                                        }
+                                      />
+                                    </label>
+                                    <label className="ui-field ui-check">
+                                      <input
+                                        type="checkbox"
+                                        checked={slaveProf.codexUseLogin === true}
+                                        onChange={(e) =>
+                                          updateSlave({ codexUseLogin: e.target.checked ? true : undefined })
+                                        }
+                                      />
+                                      <span>Codex 使用 CLI login</span>
+                                    </label>
+                                  </div>
+                                  <RunnerEnvTip runner={slaveProf} envPresence={envPresence} />
+                                </>
+                              )}
+                              {slaveProf.runtime === 'cursor' && (
+                                <div
+                                  className="ui-grid"
+                                  style={{ marginTop: '0.75rem', marginBottom: '0.75rem' }}
+                                >
+                                  <label className="ui-field">
+                                    <span>Cursor agent 路径</span>
+                                    <input
+                                      value={slaveProf.cursorExecutable ?? ''}
+                                      onChange={(e) =>
+                                        updateSlave({ cursorExecutable: e.target.value || undefined })
+                                      }
+                                    />
+                                  </label>
+                                </div>
+                              )}
+                              {slaveProf.runtime === 'copilot' && (
+                                <div
+                                  className="ui-grid"
+                                  style={{ marginTop: '0.75rem', marginBottom: '0.75rem' }}
+                                >
+                                  <label className="ui-field">
+                                    <span>Copilot CLI 路径</span>
+                                    <input
+                                      value={slaveProf.copilotExecutable ?? ''}
+                                      onChange={(e) =>
+                                        updateSlave({ copilotExecutable: e.target.value || undefined })
+                                      }
+                                    />
+                                  </label>
+                                </div>
+                              )}
+                              {spec.channel === 'telegram' && spec.tgBotToken?.trim() && spec.autoRedisUrl?.trim() && (
+                                <div style={{ marginTop: '0.75rem' }}>
+                                  <button
+                                    type="button"
+                                    className="ui-btn ui-btn-sm"
+                                    disabled={saving || !slaveProf.id?.trim()}
+                                    onClick={() => void saveSlaveEnvForBridge(b)}
+                                  >
+                                    {saving ? '保存中…' : '保存 config.slave.env'}
+                                  </button>
+                                  <span className="ui-muted ui-small" style={{ marginLeft: '0.75rem' }}>
+                                    将上方 Slave Runner 配置导出为 <code>config.slave.env</code>，供独立 slave 桥接加载。
+                                  </span>
+                                </div>
+                              )}
+                            </div>
+                          );
+                        })()}
+                      </div>
                     </div>
                   ) : null}
                 </div>

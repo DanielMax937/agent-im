@@ -50,6 +50,12 @@ export interface RunnerConfig {
   cursorDefaultModel?: string;
   /** GitHub Copilot CLI (`copilot`) binary path. */
   copilotExecutable?: string;
+  /**
+   * Extra env vars merged into the subprocess when this runner spawns its CLI/SDK
+   * (after `buildSubprocessEnv*`). Use for Auto slave with a different `ANTHROPIC_*`
+   * or provider key than master while keeping one bridge / one `config.env`.
+   */
+  subprocessEnv?: Record<string, string>;
 }
 
 export interface Config {
@@ -147,20 +153,26 @@ export interface ImInstanceSpec {
   qqImageEnabled?: boolean;
   qqMaxImageSize?: number;
   /**
-   * When true, enable the Local Agent Redis queues (`cti:localagent:{channel}:{id}:*`).
-   * Without a platform token: Redis-only I/O. With token (e.g. Telegram): hybrid IM + Redis.
+   * Auto mode: Redis `cti:auto:…` slave queues; optional hybrid IM + Redis.
    */
-  localAgentEnabled?: boolean;
-  localAgentRedisUrl?: string;
-  localAgentFirstPrompt?: string;
-  localAgentMaxTurns?: number;
-  /** Same `channel` only: forward Claude text to this instance id's Redis `input` (multi-agent dialogue). */
-  localAgentPeerInstanceId?: string;
+  autoMode?: boolean;
+  autoRedisUrl?: string;
+  autoMaxTurns?: number;
   /**
-   * Runner id (`imBot.runners[].id`) for the Local Agent Redis pipeline (separate binding from the IM chat).
-   * If unset, the bot default runner is used.
+   * Auto mode **slave** pipeline only: dedicated runner profile (runtime, executables, etc.).
+   * Merged into the bot runner list by id; master uses each chat’s current runner (`/runner`).
    */
-  localAgentRunnerId?: string;
+  autoSlaveRunner?: RunnerConfig;
+  /**
+   * Shared Redis key segment for Auto mode (`cti:auto:{namespace}:…`) so two bridge directories
+   * (two `CTI_HOME` / two agents) can share the same queues. If unset, defaults to this bridge’s id.
+   */
+  autoRedisNamespace?: string;
+  /**
+   * Hybrid Telegram only: do not run the slave Redis consumer in **this** process; use a second
+   * bridge with the same `autoRedisNamespace` + `autoMode` + Redis URL to consume slave `input` only.
+   */
+  autoSlaveExternal?: boolean;
   /** Bridge: default workdir (`CTI_DEFAULT_WORKDIR`) when this bot is the only IM source. */
   defaultWorkDir?: string;
   /** Bridge: HTTP proxy (`CTI_PROXY`). */

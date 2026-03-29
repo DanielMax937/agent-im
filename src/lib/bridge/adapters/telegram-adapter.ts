@@ -16,14 +16,22 @@ import type {
 import type { FileAttachment } from '../types';
 import { BaseChannelAdapter, registerAdapterFactory } from '../channel-adapter';
 import { getBridgeContext } from '../context';
-import { imScopedGet } from '../im-instance-settings';
+import { imScopedGet, resolveAutoSlaveRunnerId } from '../im-instance-settings';
+import * as router from '../channel-router';
 import {
-  isLocalAgentIntentEnabled,
-  readLocalAgentSettings,
-  RedisLocalTransport,
-  runRedisLocalInboundLoop,
+  loadConfig,
+  normalizeRunnersForChannelType,
+  resolveAutoRedisBridgeSlug,
+} from '../../../config';
+import {
+  isAutoModeIntentEnabled,
+  readAutoModeSettings,
+  AutoModeRedisTransport,
+  runAutoModeMasterRedisInboundLoop,
+  runAutoModeRedisInboundLoop,
 } from '../redis-local-transport';
-import { callTelegramApi, sendMessageDraft } from './telegram-utils';
+import { callTelegramApi, escapeHtml, sendMessageDraft } from './telegram-utils';
+import { startSlaveProcess, stopSlaveProcess } from '../slave-process';
 import {
   isImageEnabled,
   downloadPhoto,
@@ -94,10 +102,10 @@ export class TelegramAdapter extends BaseChannelAdapter {
   /** Stable bot user ID from Telegram's getMe, used for offset key identity. */
   private botUserId: string | null = null;
 
-  /** Redis-only mode: no Telegram API; Runner ↔ Redis (see ImInstanceSpec.localAgent*). */
-  private redisLocal: RedisLocalTransport | null = null;
-  /** Telegram + Redis: IM runner and Local Agent pipeline share one bot; fan-out user text to Redis `input`. */
-  private hybridLocalAgent = false;
+  /** Redis-only mode: no Telegram API; Runner ↔ Redis (see ImInstanceSpec auto fields). */
+  private autoModeRedis: AutoModeRedisTransport | null = null;
+  /** Telegram + Redis hybrid: IM user text is forwarded to Redis master `input`, then processed by the master loop. */
+  private hybridAutoMode = false;
   /** Last Telegram chat id for mirroring Redis LA replies to the same conversation. */
   private hybridMirrorChatId: string | null = null;
 
@@ -117,29 +125,43 @@ export class TelegramAdapter extends BaseChannelAdapter {
     if (this.running) return;
 
     const store = getBridgeContext().store;
-    const la = readLocalAgentSettings(store, 'telegram', this.instanceId);
-    const token = this.botToken;
+    const la = readAutoModeSettings(store, 'telegram', this.instanceId);
+    const isSlaveBridge = process.env.CTI_SLAVE_BRIDGE === '1';
+    const token = isSlaveBridge ? '' : this.botToken;
+    const defaultRunner = getBridgeContext().getDefaultRunnerIdForChannelType?.(this.channelType);
+    const cfg = loadConfig();
+    const masterIds = normalizeRunnersForChannelType(cfg, this.channelType).map((r) => r.id);
+    const masterRunnerIds = masterIds.length > 0 ? masterIds : ['default'];
+    const slaveRunnerId = resolveAutoSlaveRunnerId(
+      store,
+      this.channelType,
+      defaultRunner,
+      cfg.imBot?.autoSlaveRunner?.id,
+    );
+    const bridgeSlug = resolveAutoRedisBridgeSlug(cfg);
 
     if (la && token) {
       const configError = this.validateConfig();
       if (configError) {
-        console.warn('[telegram-adapter] Cannot start (hybrid local agent):', configError);
+        console.warn('[telegram-adapter] Cannot start (hybrid auto mode):', configError);
         return;
       }
-      this.hybridLocalAgent = true;
-      this.redisLocal = new RedisLocalTransport(
-        'telegram',
-        this.instanceId,
+      this.hybridAutoMode = true;
+      this.autoModeRedis = new AutoModeRedisTransport(
+        this.channelType,
         { ...la, hybridMode: true },
+        bridgeSlug,
+        masterRunnerIds,
+        slaveRunnerId,
         () => this.hybridMirrorChatId || this.imGet('telegram_chat_id') || null,
       );
       try {
-        await this.redisLocal.connect();
-        await this.redisLocal.seedFirstPromptIfNeeded();
+        await this.autoModeRedis.connect();
+        await this.autoModeRedis.seedFirstPromptIfNeeded();
       } catch (err) {
-        console.error('[telegram-adapter] Local agent Redis connect failed:', err);
-        this.redisLocal = null;
-        this.hybridLocalAgent = false;
+        console.error('[telegram-adapter] Auto mode Redis connect failed:', err);
+        this.autoModeRedis = null;
+        this.hybridAutoMode = false;
         return;
       }
       await this.resolveBotIdentity();
@@ -149,11 +171,22 @@ export class TelegramAdapter extends BaseChannelAdapter {
       this.pollLoop().catch((err) => {
         console.error('[telegram-adapter] Poll loop error:', err);
       });
-      this.redisLocalPollLoop().catch((err) => {
-        console.error('[telegram-adapter] Redis poll loop error:', err);
+      if (!cfg.imBot?.autoSlaveExternal) {
+        console.log(
+          `[telegram-adapter] Slave Redis consumer disabled — slave runs as a separate bridge (config.slave.env)`,
+        );
+      }
+      this.autoModeMasterRedisPollLoop().catch((err) => {
+        console.error('[telegram-adapter] Master Redis poll loop error:', err);
       });
+      // Auto-start the slave bridge child process
+      try {
+        startSlaveProcess(this.instanceId);
+      } catch (err) {
+        console.warn('[telegram-adapter] Failed to start slave process:', err);
+      }
       console.log(
-        `[telegram-adapter] Hybrid Local Agent (Telegram + Redis), instance=${this.instanceId}`,
+        `[telegram-adapter] Hybrid Auto mode (Telegram + Redis), instance=${this.instanceId}`,
       );
       return;
     }
@@ -161,24 +194,30 @@ export class TelegramAdapter extends BaseChannelAdapter {
     if (la) {
       const configError = this.validateConfig();
       if (configError) {
-        console.warn('[telegram-adapter] Cannot start (local agent):', configError);
+        console.warn('[telegram-adapter] Cannot start (auto mode redis-only):', configError);
         return;
       }
-      this.redisLocal = new RedisLocalTransport('telegram', this.instanceId, la);
+      this.autoModeRedis = new AutoModeRedisTransport(
+        this.channelType,
+        la,
+        bridgeSlug,
+        masterRunnerIds,
+        slaveRunnerId,
+      );
       try {
-        await this.redisLocal.connect();
-        await this.redisLocal.seedFirstPromptIfNeeded();
+        await this.autoModeRedis.connect();
+        await this.autoModeRedis.seedFirstPromptIfNeeded();
       } catch (err) {
-        console.error('[telegram-adapter] Local agent Redis connect failed:', err);
-        this.redisLocal = null;
+        console.error('[telegram-adapter] Auto mode Redis connect failed:', err);
+        this.autoModeRedis = null;
         return;
       }
       this.running = true;
       this.abortController = new AbortController();
-      this.redisLocalPollLoop().catch((err) => {
+      this.autoModeRedisPollLoop().catch((err) => {
         console.error('[telegram-adapter] Redis poll loop error:', err);
       });
-      console.log(`[telegram-adapter] Local Agent mode (Redis-only), instance=${this.instanceId}`);
+      console.log(`[telegram-adapter] Auto mode (Redis-only), instance=${this.instanceId}`);
       return;
     }
 
@@ -212,11 +251,16 @@ export class TelegramAdapter extends BaseChannelAdapter {
     this.abortController?.abort();
     this.abortController = null;
 
-    if (this.redisLocal) {
-      await this.redisLocal.disconnect();
-      this.redisLocal = null;
+    // Always stop slave process if one was started for this instance
+    await stopSlaveProcess(this.instanceId).catch((err) => {
+      console.warn('[telegram-adapter] Error stopping slave process:', err);
+    });
+
+    if (this.autoModeRedis) {
+      await this.autoModeRedis.disconnect();
+      this.autoModeRedis = null;
     }
-    this.hybridLocalAgent = false;
+    this.hybridAutoMode = false;
     this.hybridMirrorChatId = null;
 
     // Persist committed offset before shutdown
@@ -265,8 +309,20 @@ export class TelegramAdapter extends BaseChannelAdapter {
   }
 
   async send(message: OutboundMessage): Promise<SendResult> {
-    if (this.redisLocal && !this.hybridLocalAgent) {
-      const r = await this.redisLocal.deliverClaudeReply(message.text);
+    if (this.autoModeRedis && !this.hybridAutoMode) {
+      const r = await this.autoModeRedis.deliverClaudeReply(message.text);
+      // Mirror slave response to Telegram (text already has [slave] prefix from bridge-manager)
+      const realChatId = message.address.chatId.startsWith('auto:')
+        ? (this.hybridMirrorChatId ?? this.imGet('telegram_chat_id'))
+        : message.address.chatId;
+      const token = this.imGet('telegram_bot_token');
+      if (realChatId && token) {
+        await callTelegramApi(token, 'sendMessage', {
+          chat_id: realChatId,
+          text: message.text,
+          disable_web_page_preview: true,
+        }).catch(() => {});
+      }
       return r.ok ? { ok: true, messageId: crypto.randomUUID() } : { ok: false, error: r.error };
     }
 
@@ -305,7 +361,7 @@ export class TelegramAdapter extends BaseChannelAdapter {
   }
 
   async answerCallback(callbackQueryId: string, text?: string): Promise<void> {
-    if (this.redisLocal && !this.hybridLocalAgent) return;
+    if (this.autoModeRedis && !this.hybridAutoMode) return;
     const token = this.botToken;
     if (!token) return;
 
@@ -317,9 +373,9 @@ export class TelegramAdapter extends BaseChannelAdapter {
 
   validateConfig(): string | null {
     const store = getBridgeContext().store;
-    if (isLocalAgentIntentEnabled(store, 'telegram', this.instanceId)) {
-      if (!readLocalAgentSettings(store, 'telegram', this.instanceId)) {
-        return 'local agent enabled but bridge_telegram_local_agent_redis_url is required';
+    if (isAutoModeIntentEnabled(store, 'telegram', this.instanceId)) {
+      if (!readAutoModeSettings(store, 'telegram', this.instanceId)) {
+        return 'auto mode enabled but bridge_telegram_auto_redis_url is required';
       }
       const bridgeEnabled = this.imGet('bridge_telegram_enabled');
       if (bridgeEnabled !== 'true') return 'bridge_telegram_enabled is not true';
@@ -336,7 +392,7 @@ export class TelegramAdapter extends BaseChannelAdapter {
   }
 
   isAuthorized(userId: string, chatId: string): boolean {
-    if (this.redisLocal && !this.hybridLocalAgent) return true;
+    if (this.autoModeRedis && !this.hybridAutoMode) return true;
     // Check bridge-specific allowed users first
     const allowedUsers = this.imGet('telegram_bridge_allowed_users') || '';
     if (allowedUsers) {
@@ -360,7 +416,7 @@ export class TelegramAdapter extends BaseChannelAdapter {
    * Start a typing indicator that fires every 5 seconds.
    */
   startTyping(chatId: string): void {
-    if (this.redisLocal && !this.hybridLocalAgent) return;
+    if (this.autoModeRedis && !this.hybridAutoMode) return;
     this.stopTyping(chatId); // Clear any existing
     const token = this.botToken;
     if (!token) return;
@@ -399,8 +455,9 @@ export class TelegramAdapter extends BaseChannelAdapter {
   // ── Streaming preview ────────────────────────────────────────
 
   getPreviewCapabilities(chatId: string): PreviewCapabilities | null {
-    const la = readLocalAgentSettings(getBridgeContext().store, 'telegram', this.instanceId);
-    if (la && !this.hybridLocalAgent) return null;
+    const la = readAutoModeSettings(getBridgeContext().store, 'telegram', this.instanceId);
+    // Disable streaming in any auto mode (hybrid or redis-only)
+    if (la) return null;
     // Global kill switch
     if (this.imGet('bridge_telegram_stream_enabled') === 'false') return null;
 
@@ -415,7 +472,7 @@ export class TelegramAdapter extends BaseChannelAdapter {
   }
 
   async sendPreview(chatId: string, text: string, draftId: number): Promise<'sent' | 'skip' | 'degrade'> {
-    if (this.redisLocal && !this.hybridLocalAgent) return 'skip';
+    if (this.autoModeRedis) return 'skip';
     const token = this.botToken;
     if (!token) return 'skip';
 
@@ -439,13 +496,70 @@ export class TelegramAdapter extends BaseChannelAdapter {
 
   async hybridDuplicateAssistantToRedis(
     text: string,
-    deliverySource: 'runner' | 'local-agent',
+    deliverySource: 'runner' | 'slave',
   ): Promise<void> {
-    if (!this.hybridLocalAgent || !this.redisLocal) return;
-    if (deliverySource !== 'local-agent') return;
-    const prefix = '[local-agent]\n\n';
+    if (!this.hybridAutoMode || !this.autoModeRedis) return;
+    if (deliverySource !== 'slave') return;
+    const prefix = '[slave]\n\n';
     const body = text.startsWith(prefix) ? text.slice(prefix.length) : text;
-    await this.redisLocal.deliverClaudeReply(body).catch(() => {});
+    await this.autoModeRedis.deliverClaudeReply(body).catch(() => {});
+  }
+
+  override async hybridDuplicateMasterAssistantToRedis(
+    text: string,
+    masterRunnerId: string,
+  ): Promise<void> {
+    if (!this.hybridAutoMode || !this.autoModeRedis) return;
+    let body = text;
+    if (body.startsWith('[master]\n\n')) body = body.slice('[master]\n\n'.length);
+    await this.autoModeRedis.duplicateMasterOut(body, masterRunnerId).catch(() => {});
+  }
+
+  override async afterAutoModeMasterTurn(payload: {
+    userPrompt: string;
+    responseText: string;
+    outboundChatId?: string;
+  }): Promise<void> {
+    if (!this.autoModeRedis) return;
+
+    // Set slave busy before handoff
+    await this.autoModeRedis.setSlaveBusy(600).catch(() => {});
+
+    // Build a rolling summary to prevent handoff context bloat
+    const prevSummary = await this.autoModeRedis.getSessionSummary().catch(() => null);
+    const newSummary = prevSummary
+      ? `${prevSummary}\n---\nUser: ${payload.userPrompt.slice(0, 300)}\nMaster: ${payload.responseText.slice(0, 300)}`
+      : `User: ${payload.userPrompt.slice(0, 300)}\nMaster: ${payload.responseText.slice(0, 300)}`;
+    // Keep summary under ~2000 chars (trim oldest entries)
+    const trimmed = newSummary.length > 2000
+      ? '...' + newSummary.slice(newSummary.length - 1997)
+      : newSummary;
+    await this.autoModeRedis.setSessionSummary(trimmed).catch(() => {});
+
+    const handoff =
+      `## Task Handoff from Master\n\n` +
+      `### Session Context\n${trimmed}\n\n` +
+      `### User's Original Request\n${payload.userPrompt.slice(0, 800)}\n\n` +
+      `### Master's Analysis & Instructions\n${payload.responseText.slice(0, 1500)}\n\n` +
+      `### Your Mission (Slave Runner)\n` +
+      `You are the execution agent. The user sent the request above via Telegram, and the master coordinator has analyzed it.\n\n` +
+      `**Requirements:**\n` +
+      `1. Complete the task described above to the highest quality possible.\n` +
+      `2. Be thorough — check edge cases, validate your work, and verify the outcome matches the user's intent.\n` +
+      `3. If the task involves code, run tests/linting to confirm correctness before finishing.\n` +
+      `4. If the task is ambiguous, interpret it in the way most helpful to the user rather than doing nothing.\n` +
+      `5. Provide a clear, concise summary of what you did and the result.\n\n` +
+      `Do your best work. The user is waiting for your response.`;
+    await this.autoModeRedis
+      .pushSlaveHandoff(handoff, payload.outboundChatId)
+      .catch(() => {});
+    await this.autoModeRedis.incrMasterTurns().catch(() => {});
+  }
+
+  override async recordAutoModeSlaveTurnCompleted(): Promise<void> {
+    if (!this.autoModeRedis) return;
+    await this.autoModeRedis.incrSlaveResponseCount();
+    await this.autoModeRedis.clearSlaveBusy().catch(() => {});
   }
 
   // ── Lifecycle hooks (called generically by bridge-manager) ───
@@ -483,17 +597,39 @@ export class TelegramAdapter extends BaseChannelAdapter {
   }
 
   private enqueue(msg: InboundMessage): void {
-    if (this.hybridLocalAgent) {
+    if (
+      this.hybridAutoMode &&
+      this.autoModeRedis &&
+      (!msg.deliverySource || msg.deliverySource === 'runner') &&
+      msg.text?.trim()
+    ) {
+      const t = msg.text.trim();
+      const isCommand = t.startsWith('/');
+      if (!isCommand && !msg.callbackData && !msg.attachments?.length) {
+        this.hybridMirrorChatId = msg.address.chatId;
+        if (!msg.deliverySource) msg.deliverySource = 'runner';
+        const binding = router.resolve(msg.address);
+        // Check if slave is busy before pushing to master
+        void this.autoModeRedis.isSlaveBusy().then((busy) => {
+          if (busy) {
+            void callTelegramApi(this.botToken!, 'sendMessage', {
+              chat_id: msg.address.chatId,
+              text: '⏳ Slave 正在处理中，已排队等待...',
+            }).catch(() => {});
+          }
+          void this.autoModeRedis!.pushMasterInput(
+            t,
+            binding.runnerProfileId ?? getBridgeContext().getDefaultRunnerIdForChannelType?.(this.channelType) ?? 'default',
+            msg.address.chatId,
+          );
+        });
+        return;
+      }
+    }
+    if (this.hybridAutoMode) {
       this.hybridMirrorChatId = msg.address.chatId;
       if (!msg.deliverySource) {
         msg.deliverySource = 'runner';
-      }
-      if (
-        this.redisLocal &&
-        msg.deliverySource === 'runner' &&
-        msg.text?.trim()
-      ) {
-        void this.redisLocal.pushUserInput(msg.text.trim());
       }
     }
     const waiter = this.waiters.shift();
@@ -504,20 +640,66 @@ export class TelegramAdapter extends BaseChannelAdapter {
     }
   }
 
-  /** Redis inbound loop for Local Agent mode (no Telegram polling). */
-  private async redisLocalPollLoop(): Promise<void> {
-    const rt = this.redisLocal;
+  /** Redis inbound loop for Auto mode slave (no Telegram polling when Redis-only). */
+  private async autoModeRedisPollLoop(): Promise<void> {
+    const rt = this.autoModeRedis;
     if (!rt) return;
-    await runRedisLocalInboundLoop(
+    await runAutoModeRedisInboundLoop(
       rt,
       this.channelType,
       (msg) => this.enqueue(msg),
       () => this.running,
       async () => {
-        console.log(`[telegram-adapter] Local agent max turns (${this.instanceId})`);
+        console.log(`[telegram-adapter] Auto mode max turns/responses (${this.instanceId})`);
+        await this.stop();
+      },
+      (msg) => {
+        // Send typing indicator when slave receives a task
+        const chatId = msg.address?.chatId || this.hybridMirrorChatId;
+        if (chatId && this.botToken) {
+          void callTelegramApi(this.botToken, 'sendChatAction', {
+            chat_id: chatId,
+            action: 'typing',
+          }).catch(() => {});
+          void callTelegramApi(this.botToken, 'sendMessage', {
+            chat_id: chatId,
+            text: '🤖 [Slave] 正在处理中...',
+          }).catch(() => {});
+        }
+      },
+    );
+  }
+
+  /** Mirror master Redis fetch to Telegram, then enqueue master pipeline message. */
+  private async autoModeMasterRedisPollLoop(): Promise<void> {
+    const rt = this.autoModeRedis;
+    if (!rt || !this.hybridAutoMode) return;
+    await runAutoModeMasterRedisInboundLoop(
+      rt,
+      this.channelType,
+      (msg) => this.notifyTelegramMasterRedisFetch(msg),
+      (msg) => this.enqueue(msg),
+      () => this.running,
+      async () => {
+        console.log(`[telegram-adapter] Auto mode master max turns (${this.instanceId})`);
         await this.stop();
       },
     );
+  }
+
+  private async notifyTelegramMasterRedisFetch(msg: InboundMessage): Promise<void> {
+    const chatId = msg.outboundChatId || this.hybridMirrorChatId || this.imGet('telegram_chat_id');
+    const token = this.botToken;
+    if (!token || !chatId) return;
+    const fetchedText = msg.text;
+    const preview =
+      fetchedText.length > 3500 ? `${fetchedText.slice(0, 3500)}…` : fetchedText;
+    await callTelegramApi(token, 'sendMessage', {
+      chat_id: chatId,
+      text: `<b>[master·Redis→]</b>\n${escapeHtml(preview)}`,
+      parse_mode: 'HTML',
+      disable_web_page_preview: true,
+    }).catch(() => {});
   }
 
   /**

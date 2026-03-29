@@ -52,13 +52,28 @@ interface StatusInfo {
 function writeStatus(info: StatusInfo): void {
   fs.mkdirSync(runtimeDir(), { recursive: true });
   const sf = statusFile();
-  // Merge with existing status to preserve fields like lastExitReason
   let existing: Record<string, unknown> = {};
   try { existing = JSON.parse(fs.readFileSync(sf, 'utf-8')); } catch { /* first write */ }
-  const merged = { ...existing, ...info };
-  const tmp = sf + '.tmp';
-  fs.writeFileSync(tmp, JSON.stringify(merged, null, 2), 'utf-8');
-  fs.renameSync(tmp, sf);
+
+  if (process.env.CTI_SLAVE_BRIDGE === '1') {
+    // Slave writes to `slave.*` fields so it doesn't clobber master status
+    const slave: Record<string, unknown> = {};
+    if (info.running !== undefined) slave.running = info.running;
+    if (info.pid !== undefined) slave.pid = info.pid;
+    if (info.runId !== undefined) slave.runId = info.runId;
+    if (info.startedAt !== undefined) slave.startedAt = info.startedAt;
+    if (info.channels !== undefined) slave.channels = info.channels;
+    if (info.lastExitReason !== undefined) slave.lastExitReason = info.lastExitReason;
+    const merged = { ...existing, slave: { ...(existing.slave as Record<string, unknown> ?? {}), ...slave } };
+    const tmp = sf + '.tmp';
+    fs.writeFileSync(tmp, JSON.stringify(merged, null, 2), 'utf-8');
+    fs.renameSync(tmp, sf);
+  } else {
+    const merged = { ...existing, ...info };
+    const tmp = sf + '.tmp';
+    fs.writeFileSync(tmp, JSON.stringify(merged, null, 2), 'utf-8');
+    fs.renameSync(tmp, sf);
+  }
 }
 
 async function main(): Promise<void> {
@@ -116,9 +131,11 @@ async function main(): Promise<void> {
     permissions: gateway,
     lifecycle: {
       onBridgeStart: async () => {
-        // Write authoritative PID from the actual process (not shell $!)
         fs.mkdirSync(runtimeDir(), { recursive: true });
-        fs.writeFileSync(pidFile(), String(process.pid), 'utf-8');
+        // Only master writes the PID file (used by isBridgeManagedByApp)
+        if (process.env.CTI_SLAVE_BRIDGE !== '1') {
+          fs.writeFileSync(pidFile(), String(process.pid), 'utf-8');
+        }
         writeStatus({
           running: true,
           pid: process.pid,

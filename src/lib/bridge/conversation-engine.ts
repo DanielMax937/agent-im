@@ -40,6 +40,12 @@ export type OnPermissionRequest = (perm: PermissionRequestInfo) => Promise<void>
  */
 export type OnPartialText = (fullText: string) => void;
 
+export interface ProcessMessageOptions {
+  disableLlmStreaming?: boolean;
+  /** `runner` = IM chat; `master` = Redis master coordinator; `slave` = Redis slave (tools). */
+  deliverySource?: 'runner' | 'master' | 'slave';
+}
+
 export interface ConversationResult {
   responseText: string;
   tokenUsage: TokenUsage | null;
@@ -62,6 +68,7 @@ export async function processMessage(
   abortSignal?: AbortSignal,
   files?: FileAttachment[],
   onPartialText?: OnPartialText,
+  options?: ProcessMessageOptions,
 ): Promise<ConversationResult> {
     const {
       store,
@@ -186,12 +193,19 @@ export async function processMessage(
       }
     }
 
+    let systemPrompt = session?.system_prompt || undefined;
+    if (options?.deliverySource === 'master') {
+      const masterCoord =
+        'You coordinate work for a Telegram user. A worker with tools runs after you. Restate the user goal clearly and give concrete, actionable direction so that worker can complete the task as thoroughly as possible.';
+      systemPrompt = systemPrompt ? `${systemPrompt}\n\n${masterCoord}` : masterCoord;
+    }
+
     const stream = effectiveLlm.streamChat({
       prompt: text,
       sessionId,
       sdkSessionId: binding.sdkSessionId || undefined,
       model: effectiveModel,
-      systemPrompt: session?.system_prompt || undefined,
+      systemPrompt,
       workingDirectory: binding.workingDirectory || session?.working_directory || undefined,
       abortController,
       permissionMode,
@@ -201,6 +215,7 @@ export async function processMessage(
       onRuntimeStatusChange: (status: string) => {
         try { store.setSessionRuntimeStatus(sessionId, status); } catch { /* best effort */ }
       },
+      disableLlmStreaming: options?.disableLlmStreaming,
     });
 
     // Consume the stream server-side (replicate collectStreamResponse pattern).

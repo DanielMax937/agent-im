@@ -26,12 +26,13 @@ import type {
 import type { FileAttachment } from '../types';
 import { BaseChannelAdapter, registerAdapterFactory } from '../channel-adapter';
 import { getBridgeContext } from '../context';
-import { imScopedGet } from '../im-instance-settings';
+import { imScopedGet, resolveAutoSlaveRunnerId } from '../im-instance-settings';
+import { loadConfig, normalizeRunnersForChannelType, resolveAutoRedisBridgeSlug } from '../../../config';
 import {
-  readLocalAgentSettings,
-  isLocalAgentIntentEnabled,
-  RedisLocalTransport,
-  runRedisLocalInboundLoop,
+  readAutoModeSettings,
+  isAutoModeIntentEnabled,
+  AutoModeRedisTransport,
+  runAutoModeRedisInboundLoop,
 } from '../redis-local-transport';
 import {
   htmlToFeishuMarkdown,
@@ -101,7 +102,7 @@ export class FeishuAdapter extends BaseChannelAdapter {
   /** Track active typing reaction IDs per chat for cleanup. */
   private typingReactions = new Map<string, string>();
 
-  private redisLocal: RedisLocalTransport | null = null;
+  private autoModeRedis: AutoModeRedisTransport | null = null;
 
   constructor(instanceId = 'default') {
     super('feishu', instanceId);
@@ -116,27 +117,44 @@ export class FeishuAdapter extends BaseChannelAdapter {
   async start(): Promise<void> {
     if (this.running) return;
 
-    const la = readLocalAgentSettings(getBridgeContext().store, 'feishu', this.instanceId);
+    const store = getBridgeContext().store;
+    const la = readAutoModeSettings(store, 'feishu', this.instanceId);
     if (la) {
       const configError = this.validateConfig();
       if (configError) {
-        console.warn('[feishu-adapter] Cannot start (local agent):', configError);
+        console.warn('[feishu-adapter] Cannot start (auto mode):', configError);
         return;
       }
-      this.redisLocal = new RedisLocalTransport('feishu', this.instanceId, la);
+      const defaultRunner = getBridgeContext().getDefaultRunnerIdForChannelType?.(this.channelType);
+      const cfg = loadConfig();
+      const masterIds = normalizeRunnersForChannelType(cfg, this.channelType).map((r) => r.id);
+      const masterRunnerIds = masterIds.length > 0 ? masterIds : ['default'];
+      const slaveRunnerId = resolveAutoSlaveRunnerId(
+        store,
+        this.channelType,
+        defaultRunner,
+        cfg.imBot?.autoSlaveRunner?.id,
+      );
+      this.autoModeRedis = new AutoModeRedisTransport(
+        this.channelType,
+        la,
+        resolveAutoRedisBridgeSlug(cfg),
+        masterRunnerIds,
+        slaveRunnerId,
+      );
       try {
-        await this.redisLocal.connect();
-        await this.redisLocal.seedFirstPromptIfNeeded();
+        await this.autoModeRedis.connect();
+        await this.autoModeRedis.seedFirstPromptIfNeeded();
       } catch (err) {
-        console.error('[feishu-adapter] Local agent Redis failed:', err);
-        this.redisLocal = null;
+        console.error('[feishu-adapter] Auto mode Redis failed:', err);
+        this.autoModeRedis = null;
         return;
       }
       this.running = true;
-      this.redisLocalPollLoop().catch((err) => {
+      this.autoModeRedisPollLoop().catch((err) => {
         console.error('[feishu-adapter] Redis poll loop error:', err);
       });
-      console.log(`[feishu-adapter] Local Agent mode (Redis-only), instance=${this.instanceId}`);
+      console.log(`[feishu-adapter] Auto mode (Redis-only), instance=${this.instanceId}`);
       return;
     }
 
@@ -190,9 +208,9 @@ export class FeishuAdapter extends BaseChannelAdapter {
     if (!this.running) return;
     this.running = false;
 
-    if (this.redisLocal) {
-      await this.redisLocal.disconnect();
-      this.redisLocal = null;
+    if (this.autoModeRedis) {
+      await this.autoModeRedis.disconnect();
+      this.autoModeRedis = null;
     }
 
     // Close WebSocket connection (SDK exposes close())
@@ -246,10 +264,10 @@ export class FeishuAdapter extends BaseChannelAdapter {
     }
   }
 
-  private async redisLocalPollLoop(): Promise<void> {
-    const rt = this.redisLocal;
+  private async autoModeRedisPollLoop(): Promise<void> {
+    const rt = this.autoModeRedis;
     if (!rt) return;
-    await runRedisLocalInboundLoop(
+    await runAutoModeRedisInboundLoop(
       rt,
       this.channelType,
       (msg) => this.enqueue(msg),
@@ -261,6 +279,11 @@ export class FeishuAdapter extends BaseChannelAdapter {
     );
   }
 
+  override async recordAutoModeSlaveTurnCompleted(): Promise<void> {
+    if (!this.autoModeRedis) return;
+    await this.autoModeRedis.incrSlaveResponseCount();
+  }
+
   // ── Typing indicator (Openclaw-style reaction) ─────────────
 
   /**
@@ -268,7 +291,7 @@ export class FeishuAdapter extends BaseChannelAdapter {
    * Called by bridge-manager via onMessageStart().
    */
   onMessageStart(chatId: string): void {
-    if (this.redisLocal) return;
+    if (this.autoModeRedis) return;
     const messageId = this.lastIncomingMessageId.get(chatId);
     if (!messageId || !this.restClient) return;
 
@@ -311,8 +334,8 @@ export class FeishuAdapter extends BaseChannelAdapter {
   // ── Send ────────────────────────────────────────────────────
 
   async send(message: OutboundMessage): Promise<SendResult> {
-    if (this.redisLocal) {
-      const r = await this.redisLocal.deliverClaudeReply(message.text);
+    if (this.autoModeRedis) {
+      const r = await this.autoModeRedis.deliverClaudeReply(message.text);
       return r.ok ? { ok: true, messageId: crypto.randomUUID() } : { ok: false, error: r.error };
     }
 
@@ -529,9 +552,9 @@ export class FeishuAdapter extends BaseChannelAdapter {
     if (enabled !== 'true') return 'bridge_feishu_enabled is not true';
 
     const store = getBridgeContext().store;
-    if (isLocalAgentIntentEnabled(store, 'feishu', this.instanceId)) {
-      if (!readLocalAgentSettings(store, 'feishu', this.instanceId)) {
-        return 'local agent enabled but bridge_feishu_local_agent_redis_url is required';
+    if (isAutoModeIntentEnabled(store, 'feishu', this.instanceId)) {
+      if (!readAutoModeSettings(store, 'feishu', this.instanceId)) {
+        return 'auto mode enabled but bridge_feishu_auto_redis_url is required';
       }
       return null;
     }
@@ -546,7 +569,7 @@ export class FeishuAdapter extends BaseChannelAdapter {
   }
 
   isAuthorized(userId: string, chatId: string): boolean {
-    if (this.redisLocal) return true;
+    if (this.autoModeRedis) return true;
     const allowedUsers = this.f('bridge_feishu_allowed_users') || '';
     if (!allowedUsers) {
       // No restriction configured — allow all

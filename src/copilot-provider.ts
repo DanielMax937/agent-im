@@ -12,7 +12,7 @@ import { createInterface } from 'node:readline';
 
 import type { LLMProvider, StreamChatParams } from './lib/bridge/host';
 import { sseEvent } from './sse-utils';
-import { buildSubprocessEnv } from './llm-provider';
+import { buildSubprocessEnv, mergeRunnerSubprocessEnv } from './llm-provider';
 
 export type CopilotSpawnFn = (cmd: string, args: string[], opts: SpawnOptions) => ChildProcess;
 
@@ -33,6 +33,7 @@ function copilotKillGraceMs(): number {
 export interface CopilotProviderOptions {
   copilotExecutable?: string;
   defaultModel?: string;
+  subprocessEnv?: Record<string, string>;
 }
 
 function stringifyContent(value: unknown): string {
@@ -49,11 +50,13 @@ export class CopilotProvider implements LLMProvider {
   private spawnFn: CopilotSpawnFn;
   private copilotExecutable?: string;
   private defaultModel?: string;
+  private subprocessEnv?: Record<string, string>;
 
   constructor(spawnFn?: CopilotSpawnFn, opts?: CopilotProviderOptions) {
     this.spawnFn = spawnFn ?? spawn;
     this.copilotExecutable = opts?.copilotExecutable;
     this.defaultModel = opts?.defaultModel;
+    this.subprocessEnv = opts?.subprocessEnv;
   }
 
   streamChat(params: StreamChatParams): ReadableStream<string> {
@@ -65,7 +68,7 @@ export class CopilotProvider implements LLMProvider {
             const bin = resolveCopilotPath(self.copilotExecutable);
             const args: string[] = [
               '--output-format', 'json',
-              '--stream', 'on',
+              '--stream', params.disableLlmStreaming ? 'off' : 'on',
               '--yolo',
             ];
 
@@ -86,7 +89,9 @@ export class CopilotProvider implements LLMProvider {
             args.push('-p', params.prompt);
 
             const child = self.spawnFn(bin, args, {
-              env: buildSubprocessEnv(),
+              env: mergeRunnerSubprocessEnv(buildSubprocessEnv(), {
+                subprocessEnv: self.subprocessEnv,
+              }),
               cwd: params.workingDirectory || process.cwd(),
               stdio: ['pipe', 'pipe', 'pipe'],
             });

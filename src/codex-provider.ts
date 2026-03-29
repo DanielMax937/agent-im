@@ -21,6 +21,11 @@ import { fileURLToPath } from 'node:url';
 import type { LLMProvider, StreamChatParams } from './lib/bridge/host';
 import type { PendingPermissions } from './permission-gateway';
 import { sseEvent } from './sse-utils';
+import {
+  buildSubprocessEnvForRuntime,
+  coerceProcessEnvToStringRecord,
+  mergeRunnerSubprocessEnv,
+} from './llm-provider';
 
 /** MIME → file extension for temp image files. */
 const MIME_EXT: Record<string, string> = {
@@ -57,6 +62,8 @@ export interface CodexProviderConfig {
   logPrefix: string;
   /** When set, overrides `CTI_CODEX_USE_LOGIN` for this provider instance. */
   useLogin?: boolean;
+  /** Merged into Codex CLI subprocess env (and API key lookup). */
+  subprocessEnv?: Record<string, string>;
 }
 
 export const DEFAULT_CODEX_CONFIG: CodexProviderConfig = {
@@ -128,24 +135,31 @@ export class CodexProvider implements LLMProvider {
         ? this.cfg.useLogin
         : process.env.CTI_CODEX_USE_LOGIN === 'true';
 
+    const mergedEnv = mergeRunnerSubprocessEnv(
+      buildSubprocessEnvForRuntime({ runtime: 'codex' }),
+      this.cfg.subprocessEnv ? { subprocessEnv: this.cfg.subprocessEnv } : undefined,
+    );
+
     let apiKey: string | undefined;
     if (!useLogin) {
       for (const envVar of this.cfg.apiKeyEnvVars) {
-        if (process.env[envVar]) { apiKey = process.env[envVar]; break; }
+        if (mergedEnv[envVar]) { apiKey = mergedEnv[envVar]; break; }
       }
     }
-    const baseUrl = useLogin ? undefined : (process.env[this.cfg.baseUrlEnvVar] || undefined);
+    const baseUrl = useLogin ? undefined : (mergedEnv[this.cfg.baseUrlEnvVar] || undefined);
 
     if (useLogin) {
       console.log(`[${this.cfg.logPrefix}] Using CLI login token (CTI_CODEX_USE_LOGIN=true)`);
     }
 
     const CodexClass = this.sdk.Codex;
-    this.codex = new CodexClass({
+    const codexOptions: Record<string, unknown> = {
       codexPathOverride: this.cfg.wrapperPath,
+      env: coerceProcessEnvToStringRecord(mergedEnv),
       ...(apiKey ? { apiKey } : {}),
       ...(baseUrl ? { baseUrl } : {}),
-    });
+    };
+    this.codex = new CodexClass(codexOptions);
 
     return { sdk: this.sdk, codex: this.codex };
   }

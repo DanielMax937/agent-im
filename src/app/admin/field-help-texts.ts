@@ -77,6 +77,11 @@ export const FIELD_HELP = {
     detail: 'Cursor agent 可执行文件路径；不填则用环境或内置查找。',
     def: '空',
   },
+  runner_subprocessEnv: {
+    detail:
+      '合并进该 Runner 启动的 CLI/SDK 子进程环境（在桥接进程继承的环境之上；后写覆盖）。用于 Auto slave 等与 master 不同 ANTHROPIC_* / 各厂商 Key 而仍共用一个桥与一份 config.env。',
+    def: '空',
+  },
   runner_copilotExecutable: {
     detail: 'GitHub Copilot CLI（copilot）可执行文件路径；不填则用 CTI_COPILOT_EXECUTABLE 或 PATH 中的 copilot。默认模型使用上方 Runner 的「默认模型」字段。',
     def: '空',
@@ -145,29 +150,28 @@ export const FIELD_HELP = {
     detail: '允许处理的最大图片字节数；超过可能忽略或报错。',
     def: '依适配器默认',
   },
-  localAgentEnabled: {
-    detail: '开启后该 bot 不经由平台 HTTP，而通过 Redis 队列与 Runner 本地循环通信。',
+  autoMode: {
+    detail:
+      'Auto 模式（Telegram + Redis 混合）：用户文本 LPUSH 到 master input，桥从 Redis 拉取后回显并跑 master LLM，再 handoff 到 slave（工具）执行。需同时填写 Telegram Bot Token 和 Redis URL。',
     def: 'false',
   },
-  localAgentRedisUrl: {
-    detail: 'Local Agent 专用 Redis；键前缀形如 cti:localagent:{平台 slug}:{实例 id}:。',
-    def: '空（开启 Local Agent 时必填）',
+  autoRedisUrl: {
+    detail:
+      'Auto 模式专用 Redis；master 键 cti:auto:…:input|out（无 :slave），slave 键 …:slave:input|out|…。',
+    def: '空（开启 Auto 模式时必填）',
   },
-  localAgentFirstPrompt: {
-    detail: '启动时 LPUSH 到 input 队列的首条文本，用于触发首轮对话。',
-    def: '空',
-  },
-  localAgentMaxTurns: {
-    detail: '本地代理循环的最大轮次上限，防止死循环。',
+  autoMaxTurns: {
+    detail: 'Auto 模式循环的最大轮次上限，防止死循环。',
     def: '空（使用内置默认）',
   },
-  localAgentPeerInstanceId: {
-    detail: '同平台另一 bot 的 slug；可将一端输出转发到对方 input，做多智能体串联。',
+  autoSlaveRunner: {
+    detail:
+      'Auto 模式专用：与上方 Runners 表单字段一致；仅用于 Redis slave 管线。留空 Runner ID 则与默认 Runner 相同；master 仍用各聊天当前所选 Runner（/runner）。混合模式（Telegram + Redis）下可点击「保存 config.slave.env」将配置导出，供独立 slave 桥接进程加载。',
     def: '空',
   },
-  localAgentRunnerId: {
+  autoRedisNamespace: {
     detail:
-      'Local Agent（Redis pipeline）使用的 Runner 配置 id，须与上方「Runner」列表中某项的 id 一致；未填则沿用该 bot 的默认 Runner。混合模式（IM + Redis）时用于为 la:… 会话单独绑定会话与模型。',
+      '覆盖 Redis 键里的桥接段 `cti:auto:{namespace}:…`。两个独立桥接目录要对齐同一命名空间，主从才能共用同一组队列；留空则各桥用自己的目录名。',
     def: '空',
   },
   action_currentBridge: {

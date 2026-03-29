@@ -239,6 +239,7 @@ The bridge manager, channel adapters, permission flow, and session persistence r
 ```text
 ~/.claude-to-im/
 ├── config.env
+├── config.slave.env
 ├── data/
 │   ├── sessions.json
 │   ├── bindings.json

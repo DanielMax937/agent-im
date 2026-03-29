@@ -215,6 +215,12 @@ export interface StreamChatParams {
   conversationHistory?: Array<{ role: 'user' | 'assistant'; content: string }>;
   files?: FileAttachment[];
   onRuntimeStatusChange?: (status: string) => void;
+  /**
+   * When true, avoid token-level streaming from the runtime (Claude: SDK
+   * `includePartialMessages: false`; Cursor/Copilot: non-partial CLI output).
+   * IM streaming previews should also be disabled by the caller when this is on.
+   */
+  disableLlmStreaming?: boolean;
 }
 
 export interface LLMProvider {

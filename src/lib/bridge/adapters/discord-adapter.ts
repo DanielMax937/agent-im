@@ -22,12 +22,13 @@ import type {
 import type { FileAttachment } from '../types';
 import { BaseChannelAdapter, registerAdapterFactory } from '../channel-adapter';
 import { getBridgeContext } from '../context';
-import { imScopedGet } from '../im-instance-settings';
+import { imScopedGet, resolveAutoSlaveRunnerId } from '../im-instance-settings';
+import { loadConfig, normalizeRunnersForChannelType, resolveAutoRedisBridgeSlug } from '../../../config';
 import {
-  isLocalAgentIntentEnabled,
-  readLocalAgentSettings,
-  RedisLocalTransport,
-  runRedisLocalInboundLoop,
+  isAutoModeIntentEnabled,
+  readAutoModeSettings,
+  AutoModeRedisTransport,
+  runAutoModeRedisInboundLoop,
 } from '../redis-local-transport';
 
 /** Max number of message IDs to keep for dedup. */
@@ -85,34 +86,51 @@ export class DiscordAdapter extends BaseChannelAdapter {
   /** Chats where preview has permanently failed. */
   private previewDegraded = new Set<string>();
 
-  private redisLocal: RedisLocalTransport | null = null;
+  private autoModeRedis: AutoModeRedisTransport | null = null;
 
   // ── Lifecycle ───────────────────────────────────────────────
 
   async start(): Promise<void> {
     if (this.running) return;
 
-    const la = readLocalAgentSettings(getBridgeContext().store, 'discord', this.instanceId);
+    const store = getBridgeContext().store;
+    const la = readAutoModeSettings(store, 'discord', this.instanceId);
     if (la) {
       const configError = this.validateConfig();
       if (configError) {
-        console.warn('[discord-adapter] Cannot start (local agent):', configError);
+        console.warn('[discord-adapter] Cannot start (auto mode):', configError);
         return;
       }
-      this.redisLocal = new RedisLocalTransport('discord', this.instanceId, la);
+      const defaultRunner = getBridgeContext().getDefaultRunnerIdForChannelType?.(this.channelType);
+      const cfg = loadConfig();
+      const masterIds = normalizeRunnersForChannelType(cfg, this.channelType).map((r) => r.id);
+      const masterRunnerIds = masterIds.length > 0 ? masterIds : ['default'];
+      const slaveRunnerId = resolveAutoSlaveRunnerId(
+        store,
+        this.channelType,
+        defaultRunner,
+        cfg.imBot?.autoSlaveRunner?.id,
+      );
+      this.autoModeRedis = new AutoModeRedisTransport(
+        this.channelType,
+        la,
+        resolveAutoRedisBridgeSlug(cfg),
+        masterRunnerIds,
+        slaveRunnerId,
+      );
       try {
-        await this.redisLocal.connect();
-        await this.redisLocal.seedFirstPromptIfNeeded();
+        await this.autoModeRedis.connect();
+        await this.autoModeRedis.seedFirstPromptIfNeeded();
       } catch (err) {
-        console.error('[discord-adapter] Local agent Redis failed:', err);
-        this.redisLocal = null;
+        console.error('[discord-adapter] Auto mode Redis failed:', err);
+        this.autoModeRedis = null;
         return;
       }
       this.running = true;
-      this.redisLocalPollLoop().catch((err) => {
+      this.autoModeRedisPollLoop().catch((err) => {
         console.error('[discord-adapter] Redis poll loop error:', err);
       });
-      console.log(`[discord-adapter] Local Agent mode (Redis-only), instance=${this.instanceId}`);
+      console.log(`[discord-adapter] Auto mode (Redis-only), instance=${this.instanceId}`);
       return;
     }
 
@@ -175,9 +193,9 @@ export class DiscordAdapter extends BaseChannelAdapter {
     if (!this.running) return;
     this.running = false;
 
-    if (this.redisLocal) {
-      await this.redisLocal.disconnect();
-      this.redisLocal = null;
+    if (this.autoModeRedis) {
+      await this.autoModeRedis.disconnect();
+      this.autoModeRedis = null;
     }
 
     // Destroy client
@@ -237,10 +255,10 @@ export class DiscordAdapter extends BaseChannelAdapter {
     }
   }
 
-  private async redisLocalPollLoop(): Promise<void> {
-    const rt = this.redisLocal;
+  private async autoModeRedisPollLoop(): Promise<void> {
+    const rt = this.autoModeRedis;
     if (!rt) return;
-    await runRedisLocalInboundLoop(
+    await runAutoModeRedisInboundLoop(
       rt,
       this.channelType,
       (msg) => this.enqueue(msg),
@@ -255,7 +273,7 @@ export class DiscordAdapter extends BaseChannelAdapter {
   // ── Typing indicator ───────────────────────────────────────
 
   onMessageStart(chatId: string): void {
-    if (this.redisLocal) return;
+    if (this.autoModeRedis) return;
     this.stopTyping(chatId);
     if (!this.client) return;
 
@@ -289,8 +307,8 @@ export class DiscordAdapter extends BaseChannelAdapter {
   // ── Send ────────────────────────────────────────────────────
 
   async send(message: OutboundMessage): Promise<SendResult> {
-    if (this.redisLocal) {
-      const r = await this.redisLocal.deliverClaudeReply(message.text);
+    if (this.autoModeRedis) {
+      const r = await this.autoModeRedis.deliverClaudeReply(message.text);
       return r.ok ? { ok: true, messageId: crypto.randomUUID() } : { ok: false, error: r.error };
     }
 
@@ -377,7 +395,7 @@ export class DiscordAdapter extends BaseChannelAdapter {
   // ── Streaming preview ──────────────────────────────────────
 
   getPreviewCapabilities(chatId: string): PreviewCapabilities | null {
-    if (readLocalAgentSettings(getBridgeContext().store, 'discord', this.instanceId)) return null;
+    if (readAutoModeSettings(getBridgeContext().store, 'discord', this.instanceId)) return null;
     // Global kill switch
     if (this.d('bridge_discord_stream_enabled') === 'false') return null;
 
@@ -388,7 +406,7 @@ export class DiscordAdapter extends BaseChannelAdapter {
   }
 
   async sendPreview(chatId: string, text: string, _draftId: number): Promise<'sent' | 'skip' | 'degrade'> {
-    if (this.redisLocal) return 'skip';
+    if (this.autoModeRedis) return 'skip';
     if (!this.client) return 'skip';
 
     const existingMsgId = this.previewMessages.get(chatId);
@@ -434,6 +452,11 @@ export class DiscordAdapter extends BaseChannelAdapter {
     this.previewMessages.delete(chatId);
   }
 
+  override async recordAutoModeSlaveTurnCompleted(): Promise<void> {
+    if (!this.autoModeRedis) return;
+    await this.autoModeRedis.incrSlaveResponseCount();
+  }
+
   // ── Config & Auth ───────────────────────────────────────────
 
   validateConfig(): string | null {
@@ -441,9 +464,9 @@ export class DiscordAdapter extends BaseChannelAdapter {
     if (enabled !== 'true') return 'bridge_discord_enabled is not true';
 
     const store = getBridgeContext().store;
-    if (isLocalAgentIntentEnabled(store, 'discord', this.instanceId)) {
-      if (!readLocalAgentSettings(store, 'discord', this.instanceId)) {
-        return 'local agent enabled but bridge_discord_local_agent_redis_url is required';
+    if (isAutoModeIntentEnabled(store, 'discord', this.instanceId)) {
+      if (!readAutoModeSettings(store, 'discord', this.instanceId)) {
+        return 'auto mode enabled but bridge_discord_auto_redis_url is required';
       }
       return null;
     }
@@ -455,7 +478,7 @@ export class DiscordAdapter extends BaseChannelAdapter {
   }
 
   isAuthorized(userId: string, chatId: string): boolean {
-    if (this.redisLocal) return true;
+    if (this.autoModeRedis) return true;
     const allowedUsers = this.d('bridge_discord_allowed_users') || '';
     const allowedChannels = this.d('bridge_discord_allowed_channels') || '';
 

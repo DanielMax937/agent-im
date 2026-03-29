@@ -11,6 +11,8 @@ import {
   listBridgeSlugs,
   loadConfig,
   saveConfig,
+  saveSlaveEnv,
+  buildSlaveEnvFromRunner,
   mergeConfigPatch,
   configForAdminResponse,
   syncConfigFileToProcessEnv,
@@ -82,10 +84,30 @@ export async function GET(): Promise<Response> {
 
 export async function PUT(request: Request): Promise<Response> {
   try {
-    const body = (await request.json()) as Partial<Config> & { targetBridge?: string };
-    const { targetBridge, ...patch } = body;
+    const body = (await request.json()) as Partial<Config> & { targetBridge?: string; saveSlaveEnv?: boolean };
+    const { targetBridge, saveSlaveEnv: doSaveSlaveEnv, ...patch } = body;
     const slug = typeof targetBridge === 'string' ? targetBridge.trim() : '';
     const home = slug ? getCtiHomeForBridgeSlug(slug) : undefined;
+
+    // Save slave env from current slave runner config
+    if (doSaveSlaveEnv) {
+      const cfg = home ? loadConfig(home) : loadConfig();
+      const spec = cfg.imBot;
+      const slaveRunner = spec?.autoSlaveRunner;
+      if (!spec || !slaveRunner?.id?.trim()) {
+        return Response.json(
+          { ok: false, error: 'No slave runner configured in imBot' },
+          { status: 400 },
+        );
+      }
+      const env = buildSlaveEnvFromRunner(slaveRunner, spec, cfg);
+      saveSlaveEnv(env, home);
+      return Response.json({
+        ok: true,
+        configPath: home ? path.join(home, 'config.slave.env') : path.join(getCtiHome(), 'config.slave.env'),
+      });
+    }
+
     const prev = home ? loadConfig(home) : loadConfig();
     const next = mergeConfigPatch(prev, patch);
     if (next.imBot && slug) {

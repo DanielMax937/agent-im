@@ -162,6 +162,25 @@ export function buildSubprocessEnvForRuntime(
   return out;
 }
 
+/** Merge runner-specific `subprocessEnv` on top of `buildSubprocessEnv*` output (CLI child env). */
+export function mergeRunnerSubprocessEnv(
+  base: NodeJS.ProcessEnv,
+  runner?: { subprocessEnv?: Record<string, string> },
+): NodeJS.ProcessEnv {
+  const extra = runner?.subprocessEnv;
+  if (!extra || Object.keys(extra).length === 0) return base;
+  return { ...base, ...extra };
+}
+
+/** Codex SDK `env` option is `Record<string, string>` (no undefined values). */
+export function coerceProcessEnvToStringRecord(env: NodeJS.ProcessEnv): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const [k, v] of Object.entries(env)) {
+    if (v !== undefined) out[k] = v;
+  }
+  return out;
+}
+
 // ── Claude CLI preflight check ──
 
 /** Minimum major version of Claude CLI required by the SDK. */
@@ -251,8 +270,11 @@ export function checkCliCompatibility(cliPath: string, env?: NodeJS.ProcessEnv):
  * and supports the flags required by the SDK.
  * Returns { ok, version?, error? }.
  */
-export function preflightCheck(cliPath: string): { ok: boolean; version?: string; error?: string } {
-  const cleanEnv = buildSubprocessEnv();
+export function preflightCheck(
+  cliPath: string,
+  childEnv?: NodeJS.ProcessEnv,
+): { ok: boolean; version?: string; error?: string } {
+  const cleanEnv = childEnv ?? buildSubprocessEnv();
   const compat = checkCliCompatibility(cliPath, cleanEnv);
   if (!compat) {
     return { ok: false, error: `claude CLI at "${cliPath}" failed to execute` };
@@ -468,16 +490,19 @@ export class SDKLLMProvider implements LLMProvider {
   private cliPath: string | undefined;
   private autoApprove: boolean;
   private useLogin: boolean;
+  private subprocessEnv?: Record<string, string>;
 
   constructor(
     private pendingPerms: PendingPermissions,
     cliPath?: string,
     autoApprove = false,
     useLogin = false,
+    subprocessEnv?: Record<string, string>,
   ) {
     this.cliPath = cliPath;
     this.autoApprove = autoApprove;
     this.useLogin = useLogin;
+    this.subprocessEnv = subprocessEnv;
   }
 
   streamChat(params: StreamChatParams): ReadableStream<string> {
@@ -485,6 +510,7 @@ export class SDKLLMProvider implements LLMProvider {
     const cliPath = this.cliPath;
     const autoApprove = this.autoApprove;
     const useLogin = this.useLogin;
+    const subprocessEnv = this.subprocessEnv;
 
     return new ReadableStream({
       start(controller) {
@@ -495,10 +521,13 @@ export class SDKLLMProvider implements LLMProvider {
           const state: StreamState = { hasReceivedResult: false, hasStreamedText: false, lastAssistantText: '' };
 
           try {
-            const cleanEnv = buildSubprocessEnvForRuntime({
-              runtime: 'claude',
-              useLogin,
-            });
+            const cleanEnv = mergeRunnerSubprocessEnv(
+              buildSubprocessEnvForRuntime({
+                runtime: 'claude',
+                useLogin,
+              }),
+              subprocessEnv ? { subprocessEnv } : undefined,
+            );
 
             // Cross-runtime migration safety: drop non-Claude model names
             // that may linger in session data from a previous Codex runtime.
@@ -514,7 +543,7 @@ export class SDKLLMProvider implements LLMProvider {
               resume: params.sdkSessionId || undefined,
               abortController: params.abortController,
               permissionMode: (params.permissionMode as 'default' | 'acceptEdits' | 'plan') || undefined,
-              includePartialMessages: true,
+              includePartialMessages: !(params.disableLlmStreaming ?? false),
               env: cleanEnv,
               stderr: (data: string) => {
                 stderrBuf += data;
@@ -565,8 +594,9 @@ export class SDKLLMProvider implements LLMProvider {
               options: queryOptions as Parameters<typeof query>[0]['options'],
             });
 
+            const handleOpts = { disableLlmStreaming: params.disableLlmStreaming ?? false };
             for await (const msg of q) {
-              handleMessage(msg, controller, state);
+              handleMessage(msg, controller, state, handleOpts);
             }
 
             controller.close();
@@ -655,6 +685,7 @@ export function handleMessage(
   msg: SDKMessage,
   controller: ReadableStreamDefaultController<string>,
   state: StreamState,
+  opts?: { disableLlmStreaming?: boolean },
 ): void {
   switch (msg.type) {
     case 'stream_event': {
@@ -663,6 +694,7 @@ export function handleMessage(
         event.type === 'content_block_delta' &&
         event.delta.type === 'text_delta'
       ) {
+        if (opts?.disableLlmStreaming) break;
         // Emit delta text — the bridge accumulates on its side
         controller.enqueue(sseEvent('text', event.delta.text));
         state.hasStreamedText = true;
@@ -691,7 +723,35 @@ export function handleMessage(
       // errors (e.g. "Your organization does not have access") that the
       // CLI returned as assistant text without prior streaming deltas.
       if (msg.message?.content) {
-        for (const block of msg.message.content) {
+        const blocks = msg.message.content;
+        if (opts?.disableLlmStreaming) {
+          let pendingText = '';
+          for (const block of blocks) {
+            if (block.type === 'text' && block.text) {
+              pendingText += (pendingText ? '\n\n' : '') + block.text;
+              state.lastAssistantText += (state.lastAssistantText ? '\n' : '') + block.text;
+            } else if (block.type === 'tool_use') {
+              if (pendingText && !state.hasStreamedText) {
+                controller.enqueue(sseEvent('text', pendingText));
+                state.hasStreamedText = true;
+                pendingText = '';
+              }
+              controller.enqueue(
+                sseEvent('tool_use', {
+                  id: block.id,
+                  name: block.name,
+                  input: block.input,
+                }),
+              );
+            }
+          }
+          if (pendingText && !state.hasStreamedText) {
+            controller.enqueue(sseEvent('text', pendingText));
+            state.hasStreamedText = true;
+          }
+          break;
+        }
+        for (const block of blocks) {
           if (block.type === 'text' && block.text) {
             state.lastAssistantText += (state.lastAssistantText ? '\n' : '') + block.text;
           } else if (block.type === 'tool_use') {

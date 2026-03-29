@@ -19,12 +19,13 @@ import type {
 import type { FileAttachment } from '../types';
 import { BaseChannelAdapter, registerAdapterFactory } from '../channel-adapter';
 import { getBridgeContext } from '../context';
-import { imScopedGet } from '../im-instance-settings';
+import { imScopedGet, resolveAutoSlaveRunnerId } from '../im-instance-settings';
+import { loadConfig, normalizeRunnersForChannelType, resolveAutoRedisBridgeSlug } from '../../../config';
 import {
-  isLocalAgentIntentEnabled,
-  readLocalAgentSettings,
-  RedisLocalTransport,
-  runRedisLocalInboundLoop,
+  isAutoModeIntentEnabled,
+  readAutoModeSettings,
+  AutoModeRedisTransport,
+  runAutoModeRedisInboundLoop,
 } from '../redis-local-transport';
 import {
   getAccessToken,
@@ -53,7 +54,7 @@ export class QQAdapter extends BaseChannelAdapter {
   private maxReconnectAttempts = 10;
   private shouldReconnect = false;
 
-  private redisLocal: RedisLocalTransport | null = null;
+  private autoModeRedis: AutoModeRedisTransport | null = null;
 
   constructor(instanceId = 'default') {
     super('qq', instanceId);
@@ -68,27 +69,44 @@ export class QQAdapter extends BaseChannelAdapter {
   async start(): Promise<void> {
     if (this._running) return;
 
-    const la = readLocalAgentSettings(getBridgeContext().store, 'qq', this.instanceId);
+    const store = getBridgeContext().store;
+    const la = readAutoModeSettings(store, 'qq', this.instanceId);
     if (la) {
       const configError = this.validateConfig();
       if (configError) {
-        console.warn('[qq-adapter] Cannot start (local agent):', configError);
+        console.warn('[qq-adapter] Cannot start (auto mode):', configError);
         return;
       }
-      this.redisLocal = new RedisLocalTransport('qq', this.instanceId, la);
+      const defaultRunner = getBridgeContext().getDefaultRunnerIdForChannelType?.(this.channelType);
+      const cfg = loadConfig();
+      const masterIds = normalizeRunnersForChannelType(cfg, this.channelType).map((r) => r.id);
+      const masterRunnerIds = masterIds.length > 0 ? masterIds : ['default'];
+      const slaveRunnerId = resolveAutoSlaveRunnerId(
+        store,
+        this.channelType,
+        defaultRunner,
+        cfg.imBot?.autoSlaveRunner?.id,
+      );
+      this.autoModeRedis = new AutoModeRedisTransport(
+        this.channelType,
+        la,
+        resolveAutoRedisBridgeSlug(cfg),
+        masterRunnerIds,
+        slaveRunnerId,
+      );
       try {
-        await this.redisLocal.connect();
-        await this.redisLocal.seedFirstPromptIfNeeded();
+        await this.autoModeRedis.connect();
+        await this.autoModeRedis.seedFirstPromptIfNeeded();
       } catch (err) {
-        console.error('[qq-adapter] Local agent Redis failed:', err);
-        this.redisLocal = null;
+        console.error('[qq-adapter] Auto mode Redis failed:', err);
+        this.autoModeRedis = null;
         return;
       }
       this._running = true;
-      this.redisLocalPollLoop().catch((err) => {
+      this.autoModeRedisPollLoop().catch((err) => {
         console.error('[qq-adapter] Redis poll loop error:', err);
       });
-      console.log(`[qq-adapter] Local Agent mode (Redis-only), instance=${this.instanceId}`);
+      console.log(`[qq-adapter] Auto mode (Redis-only), instance=${this.instanceId}`);
       return;
     }
 
@@ -120,9 +138,9 @@ export class QQAdapter extends BaseChannelAdapter {
     this._running = false;
     this.shouldReconnect = false;
 
-    if (this.redisLocal) {
-      await this.redisLocal.disconnect();
-      this.redisLocal = null;
+    if (this.autoModeRedis) {
+      await this.autoModeRedis.disconnect();
+      this.autoModeRedis = null;
     }
 
     this.stopHeartbeat();
@@ -171,26 +189,31 @@ export class QQAdapter extends BaseChannelAdapter {
     }
   }
 
-  private async redisLocalPollLoop(): Promise<void> {
-    const rt = this.redisLocal;
+  private async autoModeRedisPollLoop(): Promise<void> {
+    const rt = this.autoModeRedis;
     if (!rt) return;
-    await runRedisLocalInboundLoop(
+    await runAutoModeRedisInboundLoop(
       rt,
       this.channelType,
       (msg) => this.enqueue(msg),
       () => this._running,
       async () => {
-        console.log(`[qq-adapter] Local agent max turns (${this.instanceId})`);
+        console.log(`[qq-adapter] Auto mode max turns/responses (${this.instanceId})`);
         await this.stop();
       },
     );
   }
 
+  override async recordAutoModeSlaveTurnCompleted(): Promise<void> {
+    if (!this.autoModeRedis) return;
+    await this.autoModeRedis.incrSlaveResponseCount();
+  }
+
   // ── Send ────────────────────────────────────────────────────
 
   async send(message: OutboundMessage): Promise<SendResult> {
-    if (this.redisLocal) {
-      const r = await this.redisLocal.deliverClaudeReply(message.text);
+    if (this.autoModeRedis) {
+      const r = await this.autoModeRedis.deliverClaudeReply(message.text);
       return r.ok ? { ok: true, messageId: crypto.randomUUID() } : { ok: false, error: r.error };
     }
 
@@ -226,9 +249,9 @@ export class QQAdapter extends BaseChannelAdapter {
 
   validateConfig(): string | null {
     const store = getBridgeContext().store;
-    if (isLocalAgentIntentEnabled(store, 'qq', this.instanceId)) {
-      if (!readLocalAgentSettings(store, 'qq', this.instanceId)) {
-        return 'local agent enabled but bridge_qq_local_agent_redis_url is required';
+    if (isAutoModeIntentEnabled(store, 'qq', this.instanceId)) {
+      if (!readAutoModeSettings(store, 'qq', this.instanceId)) {
+        return 'auto mode enabled but bridge_qq_auto_redis_url is required';
       }
       const enabled = this.q('bridge_qq_enabled');
       if (enabled !== 'true') return 'bridge_qq_enabled is not true';
@@ -245,7 +268,7 @@ export class QQAdapter extends BaseChannelAdapter {
   }
 
   isAuthorized(userId: string, _chatId: string): boolean {
-    if (this.redisLocal) return true;
+    if (this.autoModeRedis) return true;
     const allowedUsers = this.q('bridge_qq_allowed_users') || '';
     if (!allowedUsers) return true;
 

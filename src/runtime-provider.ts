@@ -1,6 +1,12 @@
 import type { Config, RunnerConfig } from './config';
 import type { LLMProvider } from './lib/bridge/host';
-import { SDKLLMProvider, preflightCheck, resolveClaudeCliPathFromRunner } from './llm-provider';
+import {
+  SDKLLMProvider,
+  mergeRunnerSubprocessEnv,
+  preflightCheck,
+  resolveClaudeCliPathFromRunner,
+  buildSubprocessEnvForRuntime,
+} from './llm-provider';
 import { PendingPermissions } from './permission-gateway';
 
 export interface ResolveProviderOptions {
@@ -41,6 +47,7 @@ export async function resolveProvider({
       ...DEFAULT_CODEX_CONFIG,
       wrapperPath,
       useLogin: runner?.codexUseLogin,
+      subprocessEnv: runner?.subprocessEnv,
     });
   }
 
@@ -49,6 +56,7 @@ export async function resolveProvider({
     return new CursorProvider(undefined, {
       agentPath: runner?.cursorExecutable,
       defaultModel: runner?.cursorDefaultModel ?? runner?.defaultModel,
+      subprocessEnv: runner?.subprocessEnv,
     });
   }
 
@@ -57,6 +65,7 @@ export async function resolveProvider({
     return new CopilotProvider(undefined, {
       copilotExecutable: runner?.copilotExecutable,
       defaultModel: runner?.defaultModel,
+      subprocessEnv: runner?.subprocessEnv,
     });
   }
 
@@ -68,7 +77,15 @@ export async function resolveProvider({
     );
   }
 
-  const check = preflightCheck(cliPath);
+  const claudeChildEnv = mergeRunnerSubprocessEnv(
+    buildSubprocessEnvForRuntime({
+      runtime: 'claude',
+      useLogin: runner?.claudeUseLogin === true,
+    }),
+    runner,
+  );
+
+  const check = preflightCheck(cliPath, claudeChildEnv);
   if (!check.ok) {
     throw new Error(
       `Claude CLI preflight check failed for ${cliPath}: ${check.error}. ` +
@@ -82,5 +99,6 @@ export async function resolveProvider({
     cliPath,
     autoApprove,
     runner?.claudeUseLogin === true,
+    runner?.subprocessEnv,
   );
 }

@@ -27,15 +27,21 @@ function resolveShutdownProxy(config: Config): string | undefined {
   return config.proxy?.trim() || undefined;
 }
 
+function roleTag(): string {
+  if (process.env.CTI_SLAVE_BRIDGE !== '1') return '[master]';
+  const runner = process.env.CTI_DEFAULT_RUNNER;
+  return runner ? `[slave:${runner}]` : '[slave]';
+}
+
 function buildShutdownText(reason: string): string {
   const bot = getCtiBotDisplayName();
-  return `[claude-to-im] 桥接已关闭（${reason}）。当前桥接：${bot}`;
+  return `${roleTag()} 桥接已关闭（${reason}）。当前桥接：${bot}`;
 }
 
 function buildStartupText(pid: number, channels: string[]): string {
   const bot = getCtiBotDisplayName();
   const ch = channels.length ? channels.join(', ') : '—';
-  return `[claude-to-im] 桥接已启动（PID: ${pid}，频道: ${ch}）。当前桥接：${bot}`;
+  return `${roleTag()} 桥接已启动（PID: ${pid}，频道: ${ch}）。当前桥接：${bot}`;
 }
 
 async function fetchWithOptionalProxy(

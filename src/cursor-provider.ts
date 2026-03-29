@@ -14,7 +14,7 @@ import { createInterface } from 'node:readline';
 
 import type { LLMProvider, StreamChatParams } from './lib/bridge/host';
 import { sseEvent } from './sse-utils';
-import { buildSubprocessEnv } from './llm-provider';
+import { buildSubprocessEnv, mergeRunnerSubprocessEnv } from './llm-provider';
 
 export type SpawnFn = (cmd: string, args: string[], opts: SpawnOptions) => ChildProcess;
 
@@ -27,6 +27,8 @@ export interface CursorProviderOptions {
   agentPath?: string;
   /** Default model when binding omits one (overrides env for this runner). */
   defaultModel?: string;
+  /** Merged into `agent` subprocess env after `buildSubprocessEnv`. */
+  subprocessEnv?: Record<string, string>;
 }
 
 /**
@@ -131,11 +133,13 @@ export class CursorProvider implements LLMProvider {
   private spawnFn: SpawnFn;
   private agentPath?: string;
   private defaultModel?: string;
+  private subprocessEnv?: Record<string, string>;
 
   constructor(spawnFn?: SpawnFn, opts?: CursorProviderOptions) {
     this.spawnFn = spawnFn ?? spawn;
     this.agentPath = opts?.agentPath;
     this.defaultModel = opts?.defaultModel;
+    this.subprocessEnv = opts?.subprocessEnv;
   }
 
   streamChat(params: StreamChatParams): ReadableStream<string> {
@@ -148,7 +152,7 @@ export class CursorProvider implements LLMProvider {
             const args = [
               '--print',
               '--output-format', 'stream-json',
-              '--stream-partial-output',
+              ...(params.disableLlmStreaming ? [] : ['--stream-partial-output']),
               '--yolo',
               '--trust',
             ];
@@ -173,7 +177,9 @@ export class CursorProvider implements LLMProvider {
 
             args.push('--', params.prompt);
 
-            const env = buildSubprocessEnv();
+            const env = mergeRunnerSubprocessEnv(buildSubprocessEnv(), {
+              subprocessEnv: self.subprocessEnv,
+            });
             
             // Only pass API key if explicitly configured for Cursor.
             // Don't fallback to OPENAI_API_KEY as it might be invalid for Cursor.

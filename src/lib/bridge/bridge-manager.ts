@@ -45,7 +45,7 @@ import {
   parseImBaseAndInstanceId,
   type ImBaseChannel,
 } from './im-instance-settings';
-import { isHybridLocalAgentEnabled } from './redis-local-transport';
+import { isHybridAutoModeEnabled, readAutoModeSettings } from './redis-local-transport';
 const GLOBAL_KEY = '__bridge_manager__';
 
 function effectiveInboundAddress(msg: InboundMessage): ChannelAddress {
@@ -63,10 +63,10 @@ function applyHybridDeliveryPrefix(adapter: BaseChannelAdapter, msg: InboundMess
   if (!msg.deliverySource) return text;
   const parsed = parseImBaseAndInstanceId(adapter.channelType);
   if (!parsed) return text;
-  if (!isHybridLocalAgentEnabled(getBridgeContext().store, parsed.base, parsed.instanceId)) {
+  if (!isHybridAutoModeEnabled(getBridgeContext().store, parsed.base, parsed.instanceId)) {
     return text;
   }
-  const prefix = msg.deliverySource === 'local-agent' ? '[local-agent]' : '[runner]';
+  const prefix = msg.deliverySource === 'slave' ? '[slave]' : '[master]';
   return `${prefix}\n\n${text}`;
 }
 
@@ -189,11 +189,18 @@ async function deliverResponse(
   responseText: string,
   sessionId: string,
   replyToMessageId?: string,
-  deliverySource?: 'runner' | 'local-agent',
+  deliverySource?: 'runner' | 'master' | 'slave',
+  masterRunnerId?: string,
 ): Promise<SendResult> {
   if (adapter.channelType === 'telegram') {
-    if (deliverySource && adapter.hybridDuplicateAssistantToRedis) {
+    if (deliverySource === 'slave' && adapter.hybridDuplicateAssistantToRedis) {
       await adapter.hybridDuplicateAssistantToRedis(responseText, deliverySource);
+    }
+    if (deliverySource === 'master' && adapter.hybridDuplicateMasterAssistantToRedis) {
+      await adapter.hybridDuplicateMasterAssistantToRedis(
+        responseText,
+        masterRunnerId ?? 'default',
+      );
     }
     const chunks = markdownToTelegramChunks(responseText, 4096);
     if (chunks.length > 0) {
@@ -549,6 +556,8 @@ async function handleMessage(
       textLen: raw.length,
       attachmentCount: msg.attachments?.length ?? 0,
       preview,
+      /** Auto mode: `master` / `slave` from Redis; plain IM is usually `runner` or omitted. */
+      deliverySource: msg.deliverySource,
     },
     '[bridge] inbound message',
   );
@@ -678,6 +687,33 @@ async function handleMessage(
   // Regular message — route to conversation engine
   const binding = router.resolve(msg.address);
 
+  const parsedLa = parseImBaseAndInstanceId(adapter.channelType);
+  const autoModeSettings = parsedLa
+    ? readAutoModeSettings(store, parsedLa.base, parsedLa.instanceId)
+    : null;
+  const autoModePipelineActive = autoModeSettings !== null;
+
+  /** Hybrid Auto mode is Telegram-only: plain IM text is forwarded to Redis master input, then handled by the master loop. */
+  const hybridImForwardOnly =
+    parsedLa &&
+    autoModeSettings &&
+    isHybridAutoModeEnabled(store, parsedLa.base, parsedLa.instanceId) &&
+    msg.deliverySource === 'runner' &&
+    !hasAttachments;
+
+  if (hybridImForwardOnly) {
+    getLogger().info(
+      {
+        event: 'auto_mode_hybrid_forward',
+        channel: adapter.channelType,
+        chatId: msg.address.chatId,
+      },
+      '[bridge] auto mode hybrid: plain Telegram text queued to Redis master:input only (handled by master loop)',
+    );
+    ack();
+    return;
+  }
+
   // Notify adapter that message processing is starting (e.g., typing indicator)
   adapter.onMessageStart?.(outChat);
 
@@ -689,7 +725,7 @@ async function handleMessage(
   // ── Streaming preview setup ──────────────────────────────────
   let previewState: StreamingPreviewState | null = null;
   const caps = adapter.getPreviewCapabilities?.(outChat) ?? null;
-  if (caps?.supported) {
+  if (caps?.supported && !(autoModePipelineActive && msg.deliverySource === 'slave')) {
     previewState = {
       draftId: generateDraftId(),
       chatId: outChat,
@@ -753,18 +789,34 @@ async function handleMessage(
     // Use text or empty string for image-only messages (prompt is still required by streamClaude)
     const promptText = text || (hasAttachments ? 'Describe this image.' : '');
 
-    const result = await engine.processMessage(binding, promptText, async (perm) => {
-      await broker.forwardPermissionRequest(
-        adapter,
-        msg.address,
-        perm.permissionRequestId,
-        perm.toolName,
-        perm.toolInput,
-        binding.codepilotSessionId,
-        perm.suggestions,
-        msg.messageId,
-      );
-    }, taskAbort.signal, hasAttachments ? msg.attachments : undefined, onPartialText);
+    const result = await engine.processMessage(
+      binding,
+      promptText,
+      async (perm) => {
+        await broker.forwardPermissionRequest(
+          adapter,
+          msg.address,
+          perm.permissionRequestId,
+          perm.toolName,
+          perm.toolInput,
+          binding.codepilotSessionId,
+          perm.suggestions,
+          msg.messageId,
+        );
+      },
+      taskAbort.signal,
+      hasAttachments ? msg.attachments : undefined,
+      onPartialText,
+      {
+        disableLlmStreaming:
+          msg.deliverySource === 'slave' && Boolean(autoModePipelineActive),
+        deliverySource: msg.deliverySource,
+      },
+    );
+
+    if (msg.deliverySource === 'slave' && !result.hasError) {
+      await adapter.recordAutoModeSlaveTurnCompleted?.();
+    }
 
     // Send response text — render via channel-appropriate format
     if (result.responseText) {
@@ -775,7 +827,15 @@ async function handleMessage(
         binding.codepilotSessionId,
         msg.messageId,
         msg.deliverySource,
+        msg.deliverySource === 'master' ? binding.runnerProfileId : undefined,
       );
+      if (msg.deliverySource === 'master' && !result.hasError) {
+        await adapter.afterAutoModeMasterTurn?.({
+          userPrompt: promptText,
+          responseText: result.responseText,
+          outboundChatId: msg.outboundChatId,
+        });
+      }
     } else if (result.hasError) {
       const errorResponse: OutboundMessage = {
         address: outAddr,

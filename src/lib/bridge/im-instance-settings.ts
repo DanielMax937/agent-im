@@ -96,9 +96,10 @@ export function parseImBaseAndInstanceId(channelType: string): { base: ImBaseCha
 }
 
 /**
- * Runner profile id configured for the Local Agent Redis pipeline (`imBot.localAgentRunnerId`).
+ * Legacy store-only override for Auto mode slave runner id (migration from `local_agent_runner_id`).
+ * Otherwise the bot default runner is used.
  */
-export function getLocalAgentRunnerIdFromStore(
+export function getAutoSlaveRunnerIdFromStore(
   store: BridgeStore,
   channelType: string,
 ): string | undefined {
@@ -111,6 +112,31 @@ export function getLocalAgentRunnerIdFromStore(
     `bridge_${parsed.base}_local_agent_runner_id`,
   )?.trim();
   return v || undefined;
+}
+
+export function resolveAutoSlaveRunnerId(
+  store: BridgeStore,
+  channelType: string,
+  fallbackRunnerId: string | undefined,
+  imBotSlaveRunnerId?: string | null,
+): string {
+  const fromCfg = imBotSlaveRunnerId?.trim();
+  if (fromCfg) return fromCfg;
+  return getAutoSlaveRunnerIdFromStore(store, channelType) ?? fallbackRunnerId ?? 'default';
+}
+
+/**
+ * Parse runner id from synthetic master chat id:
+ * `auto:master:{bridgeSlug}:{channelType}:{runnerId}` (channelType may contain `:`).
+ */
+export function parseAutoMasterRunnerIdFromChatId(chatId: string): string | undefined {
+  const prefix = 'auto:master:';
+  if (!chatId.startsWith(prefix)) return undefined;
+  const rest = chatId.slice(prefix.length);
+  const parts = rest.split(':');
+  if (parts.length < 3) return undefined;
+  const runnerId = parts[parts.length - 1]?.trim();
+  return runnerId || undefined;
 }
 
 /**

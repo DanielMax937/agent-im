@@ -120,13 +120,30 @@ export abstract class BaseChannelAdapter {
   endPreview?(_chatId: string, _draftId: number): void;
 
   /**
-   * Hybrid Local Agent: duplicate the full assistant reply to Redis `out` once before Telegram send.
-   * Default no-op; Telegram overrides for `deliverySource === 'local-agent'`.
+   * Hybrid Auto mode: duplicate the full assistant reply to Redis slave `out` once before Telegram send.
+   * Default no-op; Telegram overrides for `deliverySource === 'slave'`.
    */
   hybridDuplicateAssistantToRedis?(
     _text: string,
-    _deliverySource: 'runner' | 'local-agent',
+    _deliverySource: 'runner' | 'slave',
   ): Promise<void>;
+
+  /** After a master assistant reply in hybrid Auto mode, LPUSH `master:out` (before Telegram send). */
+  hybridDuplicateMasterAssistantToRedis?(_text: string, _masterRunnerId: string): Promise<void>;
+
+  /**
+   * After master reply is delivered to Telegram: hand off to slave `input` and increment master turns.
+   */
+  afterAutoModeMasterTurn?(_payload: {
+    userPrompt: string;
+    responseText: string;
+    outboundChatId?: string;
+  }): Promise<void>;
+
+  /** After a successful LLM turn for `deliverySource: slave`, increment Redis `resp` cap. */
+  async recordAutoModeSlaveTurnCompleted(): Promise<void> {
+    return;
+  }
 }
 
 // ── Adapter Registry ────────────────────────────────────────────

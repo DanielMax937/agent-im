@@ -18,6 +18,14 @@ export interface BridgeDaemonDiskStatus {
   runId?: string;
   channels?: string[];
   lastExitReason?: string;
+  /** Slave bridge status (written to `slave.*` fields in the same file). */
+  slave?: {
+    running: boolean;
+    effectiveRunning: boolean;
+    pid?: number;
+    startedAt?: string;
+    lastExitReason?: string;
+  };
 }
 
 function isPidAlive(pid: number): boolean {
@@ -70,6 +78,24 @@ export function readBridgeDaemonDiskStatus(ctiHomeOverride?: string): BridgeDaem
       }
     }
 
+    // Parse slave status from nested `slave` object
+    let slave: BridgeDaemonDiskStatus['slave'];
+    if (raw.slave && typeof raw.slave === 'object') {
+      const s = raw.slave as Record<string, unknown>;
+      const sRunning = s.running === true;
+      const sPid = typeof s.pid === 'number' && s.pid > 0 ? s.pid : undefined;
+      let sEffective = false;
+      if (sRunning && sPid != null && isPidAlive(sPid)) sEffective = true;
+      else if (sRunning && sPid == null) sEffective = true;
+      slave = {
+        running: sRunning,
+        effectiveRunning: sEffective,
+        pid: sPid,
+        startedAt: typeof s.startedAt === 'string' ? s.startedAt : undefined,
+        lastExitReason: typeof s.lastExitReason === 'string' ? s.lastExitReason : undefined,
+      };
+    }
+
     return {
       statusFilePresent: true,
       fileSaysRunning,
@@ -80,6 +106,7 @@ export function readBridgeDaemonDiskStatus(ctiHomeOverride?: string): BridgeDaem
       runId,
       channels,
       lastExitReason,
+      slave,
     };
   } catch {
     return {
