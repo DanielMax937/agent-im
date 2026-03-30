@@ -308,8 +308,8 @@ export class DiscordAdapter extends BaseChannelAdapter {
 
   async send(message: OutboundMessage): Promise<SendResult> {
     if (this.autoModeRedis) {
-      const r = await this.autoModeRedis.deliverClaudeReply(message.text);
-      return r.ok ? { ok: true, messageId: crypto.randomUUID() } : { ok: false, error: r.error };
+      // Redis-only slave: skip duplicate Redis write — hybridDuplicateAssistantToRedis handles it
+      return { ok: true, messageId: crypto.randomUUID() };
     }
 
     if (!this.client) {

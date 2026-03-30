@@ -311,8 +311,7 @@ export class TelegramAdapter extends BaseChannelAdapter {
 
   async send(message: OutboundMessage): Promise<SendResult> {
     if (this.autoModeRedis && !this.hybridAutoMode) {
-      const r = await this.autoModeRedis.deliverClaudeReply(message.text);
-      // Mirror slave response to Telegram (text already has [slave] prefix from bridge-manager)
+      // Redis-only slave: mirror response to Telegram (skip Redis write — hybridDuplicateAssistantToRedis handles it)
       const realChatId = message.address.chatId.startsWith('auto:')
         ? (this.hybridMirrorChatId ?? this.imGet('telegram_chat_id'))
         : message.address.chatId;
@@ -321,10 +320,11 @@ export class TelegramAdapter extends BaseChannelAdapter {
         await callTelegramApi(token, 'sendMessage', {
           chat_id: realChatId,
           text: message.text,
+          parse_mode: message.parseMode === 'HTML' ? 'HTML' : undefined,
           disable_web_page_preview: true,
         }).catch(() => {});
       }
-      return r.ok ? { ok: true, messageId: crypto.randomUUID() } : { ok: false, error: r.error };
+      return { ok: true, messageId: crypto.randomUUID() };
     }
 
     const token = this.botToken;
