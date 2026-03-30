@@ -45,6 +45,11 @@ import {
   truncateSessionSummaryAfterGIfNeeded,
 } from '../kanban-redis-supplement';
 import {
+  MASTER_VERIFICATION_WALKTHROUGH_PREFIX,
+  buildMasterVerificationWalkthroughPrompt,
+  parseVerificationOutcome,
+} from '../master-verification-walkthrough';
+import {
   isImageEnabled,
   downloadPhoto,
   downloadDocumentImage,
@@ -587,15 +592,65 @@ export class TelegramAdapter extends BaseChannelAdapter {
     if (!this.autoModeRedis) return;
     writeRunnerStatus({ masterBusy: false, masterSince: undefined });
 
-    // afterAutoModeMasterTurn is now ONLY called after master LLM evaluates
-    // a slave execution report. User messages bypass master LLM entirely.
+    // afterAutoModeMasterTurn runs after (1) slave execution report evaluation, or (2) verification walkthrough.
+    // User messages from Telegram bypass master LLM (forwarded to slave in handleMasterRedisMessage).
 
-    // Rolling summary shape must stay aligned with `slave-report-goal.ts`
-    // (`MASTER_EVAL_BLOCK_RE`, `truncateMasterEvaluationsForRollingDisplay`): sections are separated by
-    // `\n---\n`, and master rounds use the literal prefix `Master evaluation:` (see also `handleMasterRedisMessage` → `User goal:`).
-
-    // Update session summary
     const prevSummary = await this.autoModeRedis.getSessionSummary().catch(() => null);
+    const isVerificationRound = payload.userPrompt.startsWith(MASTER_VERIFICATION_WALKTHROUGH_PREFIX);
+
+    if (isVerificationRound) {
+      const newSummary = prevSummary
+        ? `${prevSummary}\n---\nMaster verification: ${payload.responseText.slice(0, 300)}`
+        : `Master verification: ${payload.responseText.slice(0, 300)}`;
+      const trimmed = newSummary.length > 2000
+        ? '...' + newSummary.slice(newSummary.length - 1997)
+        : newSummary;
+      await this.autoModeRedis.setSessionSummary(trimmed).catch(() => {});
+
+      const outcome = parseVerificationOutcome(payload.responseText);
+      if (outcome === 'passed') {
+        console.log(
+          `[telegram-adapter] Master verification: PASSED. ` +
+            `responseLen=${payload.responseText.length}`,
+        );
+        await this.autoModeRedis.setReverifyPending(false).catch(() => {});
+        await this.autoModeRedis.incrMasterTurns().catch(() => {});
+        await this.sendAutoModeTaskFinishedNotice(payload.outboundChatId);
+        return;
+      }
+
+      console.log(
+        `[telegram-adapter] Master verification: ${outcome === 'failed' ? 'FAILED' : 'UNKNOWN (treat as failed)'}. ` +
+          `responseLen=${payload.responseText.length}, preview=${JSON.stringify(payload.responseText.slice(0, 150))}`,
+      );
+      await this.autoModeRedis.setSlaveBusy(600).catch(() => {});
+      writeRunnerStatus({ slaveBusy: true, slaveSince: Date.now() });
+
+      const unknownNote =
+        outcome === 'unknown'
+          ? '**Note:** No clear `VERIFICATION_OUTCOME: PASSED` line — treat as failed verification until fixed.\n\n'
+          : '';
+      const handoff =
+        `## Follow-up from Master (verification)\n\n` +
+        `### Session Context\n${trimmed}\n\n` +
+        unknownNote +
+        `### Verification findings & bugs to fix\n${payload.responseText.slice(0, 4000)}\n\n` +
+        `### Your Mission (Slave Runner)\n` +
+        `The master ran frontend (Chrome DevTools MCP + screenshots) and/or API (curl) checks and found issues.\n\n` +
+        `**Requirements:**\n` +
+        `1. Fix every issue listed above.\n` +
+        `2. Re-verify (tests, manual checks).\n` +
+        `3. Reply with a **Slave Execution Report** when done.\n\n` +
+        `Do better this time.`;
+      await this.autoModeRedis
+        .pushSlaveHandoff(handoff, payload.outboundChatId)
+        .catch(() => {});
+      await this.autoModeRedis.setReverifyPending(true).catch(() => {});
+      await this.autoModeRedis.incrMasterTurns().catch(() => {});
+      return;
+    }
+
+    // Rolling summary — aligned with `slave-report-goal.ts` (`Master evaluation:` blocks).
     const newSummary = prevSummary
       ? `${prevSummary}\n---\nMaster evaluation: ${payload.responseText.slice(0, 300)}`
       : `Master evaluation: ${payload.responseText.slice(0, 300)}`;
@@ -604,7 +659,6 @@ export class TelegramAdapter extends BaseChannelAdapter {
       : newSummary;
     await this.autoModeRedis.setSessionSummary(trimmed).catch(() => {});
 
-    // Check if master wants to send follow-up work to slave
     const resp = payload.responseText.toLowerCase();
     const needsFollowUp =
       resp.includes('follow-up') || resp.includes('follow up') ||
@@ -622,20 +676,25 @@ export class TelegramAdapter extends BaseChannelAdapter {
       resp.includes('## follow-up instructions');
 
     if (!needsFollowUp) {
-      // Master accepted slave's work — done
+      // Static review OK → schedule verification walkthrough (Chrome DevTools MCP, curl, screenshots) before final acceptance
       console.log(
-        `[telegram-adapter] Master evaluation: ACCEPTED slave work. ` +
-        `responseLen=${payload.responseText.length}, preview=${JSON.stringify(payload.responseText.slice(0, 150))}`,
+        `[telegram-adapter] Master evaluation: ACCEPTED on review — enqueueing verification walkthrough. ` +
+          `responseLen=${payload.responseText.length}, preview=${JSON.stringify(payload.responseText.slice(0, 150))}`,
       );
       await this.autoModeRedis.incrMasterTurns().catch(() => {});
-      await this.sendAutoModeTaskFinishedNotice(payload.outboundChatId);
+      const isReverify = await this.autoModeRedis.isReverifyPending();
+      const verificationPrompt = buildMasterVerificationWalkthroughPrompt(trimmed, {
+        isReverify,
+      });
+      await this.autoModeRedis
+        .pushMasterInput(verificationPrompt, 'default', payload.outboundChatId)
+        .catch(() => {});
       return;
     }
 
-    // Master found issues — send follow-up to slave
     console.log(
       `[telegram-adapter] Master evaluation: NEEDS FOLLOW-UP. ` +
-      `responseLen=${payload.responseText.length}, preview=${JSON.stringify(payload.responseText.slice(0, 150))}`,
+        `responseLen=${payload.responseText.length}, preview=${JSON.stringify(payload.responseText.slice(0, 150))}`,
     );
     await this.autoModeRedis.setSlaveBusy(600).catch(() => {});
     writeRunnerStatus({ slaveBusy: true, slaveSince: Date.now() });
@@ -655,6 +714,7 @@ export class TelegramAdapter extends BaseChannelAdapter {
     await this.autoModeRedis
       .pushSlaveHandoff(handoff, payload.outboundChatId)
       .catch(() => {});
+    await this.autoModeRedis.setReverifyPending(true).catch(() => {});
     await this.autoModeRedis.incrMasterTurns().catch(() => {});
   }
 
@@ -669,7 +729,7 @@ export class TelegramAdapter extends BaseChannelAdapter {
     await callTelegramApi(token, 'sendMessage', {
       chat_id: chatId,
       text:
-        '✅ <b>Task finished</b>\nMaster accepted the assistant\'s work. No follow-up was queued.',
+        '✅ <b>Task finished</b>\nMaster verification passed (Chrome DevTools / curl checks). No follow-up was queued.',
       parse_mode: 'HTML',
       disable_web_page_preview: true,
     }).catch(() => {});
@@ -860,17 +920,18 @@ export class TelegramAdapter extends BaseChannelAdapter {
    * Master message routing:
    * - User messages from Telegram → forward directly to slave (no LLM)
    * - Slave execution reports → enqueue for LLM evaluation
+   * - Verification walkthrough → enqueue for second master turn (tools + VERIFICATION_OUTCOME)
    */
   private async handleMasterRedisMessage(msg: InboundMessage): Promise<void> {
     const rt = this.autoModeRedis;
     if (!rt) return;
     const isSlaveReport = msg.text.startsWith('## Slave Execution Report');
+    const isVerificationWalkthrough = msg.text.startsWith(MASTER_VERIFICATION_WALKTHROUGH_PREFIX);
 
-    if (isSlaveReport) {
-      // Slave report → master LLM evaluates
+    if (isSlaveReport || isVerificationWalkthrough) {
       console.log(
-        `[telegram-adapter] Master received slave report, enqueueing for LLM evaluation. ` +
-        `len=${msg.text.length}, preview=${JSON.stringify(msg.text.slice(0, 120))}`,
+        `[telegram-adapter] Master received ${isSlaveReport ? 'slave report' : 'verification walkthrough'}, ` +
+          `enqueueing for LLM. len=${msg.text.length}, preview=${JSON.stringify(msg.text.slice(0, 120))}`,
       );
       writeRunnerStatus({ masterBusy: true, masterSince: Date.now() });
       this.enqueue(msg);
@@ -890,6 +951,7 @@ export class TelegramAdapter extends BaseChannelAdapter {
       const finalSummary = truncateSessionSummaryAfterGIfNeeded(withG);
       await rt.setSessionSummary(finalSummary).catch(() => {});
       await rt.setLastUserRequest(msg.text.trim()).catch(() => {});
+      await rt.setReverifyPending(false).catch(() => {});
 
       // Set slave busy
       await rt.setSlaveBusy(600).catch(() => {});
@@ -923,8 +985,9 @@ export class TelegramAdapter extends BaseChannelAdapter {
   }
 
   private async notifyTelegramMasterRedisFetch(msg: InboundMessage): Promise<void> {
-    // Don't show internal slave execution reports or follow-up instructions to the user
+    // Don't show internal slave execution reports, verification prompts, or follow-up instructions to the user
     if (msg.text.startsWith('## Slave Execution Report') ||
+        msg.text.startsWith(MASTER_VERIFICATION_WALKTHROUGH_PREFIX) ||
         msg.text.startsWith('## Follow-up Instructions from Master')) return;
     const chatId = msg.outboundChatId || this.hybridMirrorChatId || this.imGet('telegram_chat_id');
     const token = this.botToken;

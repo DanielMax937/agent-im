@@ -20,6 +20,7 @@ import {
   buildAutoRedisKey,
   type AutoRedisQueueSuffix,
 } from './auto-redis-keys';
+import { MASTER_VERIFICATION_WALKTHROUGH_PREFIX } from './master-verification-walkthrough';
 
 interface RedisClient {
   connect(): Promise<void>;
@@ -342,6 +343,26 @@ export class AutoModeRedisTransport {
     await this.client.set(this.keyMaster('last_user'), text.slice(0, 4000));
   }
 
+  /**
+   * When set, the slave was asked to fix something (review or failed verification).
+   * After the next acceptable static review, master must run the verification walkthrough again;
+   * loop until {@link clearReverifyPending} (verification PASSED) or user resets the task.
+   */
+  async setReverifyPending(pending: boolean): Promise<void> {
+    if (!this.client) return;
+    if (pending) {
+      await this.client.set(this.keyMaster('reverify'), '1');
+    } else {
+      await this.client.del(this.keyMaster('reverify'));
+    }
+  }
+
+  async isReverifyPending(): Promise<boolean> {
+    if (!this.client) return false;
+    const v = await this.client.get(this.keyMaster('reverify'));
+    return v === '1';
+  }
+
   // ── Slave busy lock (prevents concurrent handoffs) ──
 
   /** Check if slave is currently processing a task. */
@@ -369,7 +390,9 @@ export class AutoModeRedisTransport {
    */
   async resetAll(): Promise<void> {
     if (!this.client) return;
-    const suffixes: AutoRedisQueueSuffix[] = ['input', 'out', 'turns', 'resp', 'summary', 'busy', 'last_user'];
+    const suffixes: AutoRedisQueueSuffix[] = [
+      'input', 'out', 'turns', 'resp', 'summary', 'busy', 'last_user', 'reverify',
+    ];
     for (const suffix of suffixes) {
       await this.client.del(this.keyMaster(suffix));
       await this.client.del(this.keySlave(suffix));
@@ -617,9 +640,11 @@ export async function runAutoModeMasterRedisInboundLoop(
         continue;
       }
       const isReport = msg.text.startsWith('## Slave Execution Report');
+      const isVerification = msg.text.startsWith(MASTER_VERIFICATION_WALKTHROUGH_PREFIX);
+      const masterType = isReport ? 'slave-report' : isVerification ? 'verification' : 'user-message';
       console.log(
         `[auto-mode-redis] Master got message from Redis (${transport.bridgeSlug}), ` +
-        `type=${isReport ? 'slave-report' : 'user-message'}, ` +
+        `type=${masterType}, ` +
         `len=${msg.text.length}, preview=${JSON.stringify(msg.text.slice(0, 120))}`,
       );
       await onMasterFetchFromRedis(msg);

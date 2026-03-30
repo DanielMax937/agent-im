@@ -18,7 +18,9 @@ export type AutoRedisQueueSuffix =
   | 'summary'
   | 'busy'
   /** Latest plain Telegram→master user text (fallback when session summary lacks `User goal:`). */
-  | 'last_user';
+  | 'last_user'
+  /** Set when slave was sent back to fix issues; cleared when verification PASSED or user starts a new task. */
+  | 'reverify';
 
 export type AutoRedisRole = 'master' | 'slave';
 
