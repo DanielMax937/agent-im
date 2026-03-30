@@ -14,7 +14,16 @@ type MonitorEntry = {
 type MonitorData = {
   masterOut: MonitorEntry[];
   slaveOut: MonitorEntry[];
+  runnerStatus?: Record<string, RunnerStatusEntry>;
   error?: string;
+};
+
+type RunnerStatusEntry = {
+  masterBusy: boolean;
+  slaveBusy: boolean;
+  masterSince?: number;
+  slaveSince?: number;
+  updatedAt: number;
 };
 
 type DaemonDiskStatus = {
@@ -120,6 +129,7 @@ export default function MonitorPage() {
       <div className="ui-bridge-accordion" role="list">
         {(bridges.length > 0 ? bridges : ['default']).map((b) => {
           const dm = daemonStatus[b];
+          const rs = monitorData?.runnerStatus?.[b];
           const bridgeMaster = (monitorData?.masterOut ?? []).filter(
             (e) => e.homeBridge === b || (!e.homeBridge && bridges.length <= 1),
           );
@@ -140,6 +150,9 @@ export default function MonitorPage() {
 
               {isExpanded(b) && (
                 <div style={{ padding: '1rem 0' }}>
+                  {/* Runner working status */}
+                  <RunnerStatusBar status={rs} />
+
                   <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '1rem' }}>
                     <div>
                       <h3 style={{ margin: '0 0 0.75rem', fontSize: '1rem', color: '#38bdf8' }}>
@@ -188,6 +201,80 @@ function StatCard({ label, value }: { label: string; value: string | number }) {
 
 function formatTime(ts: number): string {
   return new Date(ts).toLocaleTimeString('zh-CN', { hour12: false });
+}
+
+function formatElapsed(since: number | undefined): string {
+  if (!since) return '';
+  const sec = Math.floor((Date.now() - since) / 1000);
+  if (sec < 60) return `${sec}s`;
+  const min = Math.floor(sec / 60);
+  const remSec = sec % 60;
+  return `${min}m${remSec}s`;
+}
+
+function RunnerStatusBar({ status }: { status?: RunnerStatusEntry }) {
+  const hasStatus = !!status?.updatedAt;
+
+  return (
+    <div style={{
+      display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0.75rem',
+      marginBottom: '1rem',
+    }}>
+      <RunnerChip
+        label="Master"
+        busy={status?.masterBusy ?? false}
+        since={status?.masterSince}
+        hasStatus={hasStatus}
+        color="#38bdf8"
+      />
+      <RunnerChip
+        label="Slave"
+        busy={status?.slaveBusy ?? false}
+        since={status?.slaveSince}
+        hasStatus={hasStatus}
+        color="#a78bfa"
+      />
+    </div>
+  );
+}
+
+function RunnerChip({ label, busy, since, hasStatus, color }: {
+  label: string;
+  busy: boolean;
+  since?: number;
+  hasStatus: boolean;
+  color: string;
+}) {
+  // A busy runner with a valid `since` is never stale — long tasks are normal.
+  // Only show "Unknown" when no status file has ever been written.
+  const unknown = !hasStatus;
+  const bg = busy ? '#1a2e1a' : '#151f30';
+  const border = busy ? '#4ade80' : '#1e3a5f';
+  const statusText = unknown ? 'Unknown' : busy ? 'Working' : 'Idle';
+  const icon = unknown ? '❓' : busy ? '⚡' : '💤';
+  const elapsed = busy ? formatElapsed(since) : '';
+
+  return (
+    <div style={{
+      background: bg, border: `1px solid ${border}`, borderRadius: 8,
+      padding: '0.5rem 0.75rem', display: 'flex', alignItems: 'center', gap: '0.5rem',
+    }}>
+      <span style={{ fontSize: '1.1rem' }}>{icon}</span>
+      <div style={{ flex: 1 }}>
+        <div style={{ fontWeight: 600, fontSize: '0.8rem', color }}>{label} Runner</div>
+        <div style={{ fontSize: '0.75rem', color: busy ? '#4ade80' : '#94a3b8' }}>
+          {statusText}{elapsed ? ` · ${elapsed}` : ''}
+        </div>
+      </div>
+      {busy && (
+        <span style={{
+          width: 8, height: 8, borderRadius: '50%',
+          background: '#4ade80', display: 'inline-block',
+          animation: 'pulse 1.5s infinite',
+        }} />
+      )}
+    </div>
+  );
 }
 
 function MessageList({ entries, emptyText, roleTag }: {

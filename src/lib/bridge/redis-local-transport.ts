@@ -226,7 +226,8 @@ export class AutoModeRedisTransport {
   /** Seed first user message once; skip if Redis already has state (restart-safe). */
   async seedFirstPromptIfNeeded(): Promise<void> {
     if (!this.client || this.initialized) return;
-    if (this.settings.hybridMode) {
+    // Slave bridges wait for master to forward real user input — never self-seed.
+    if (this.settings.hybridMode || process.env.CTI_SLAVE_BRIDGE === '1') {
       this.initialized = true;
       return;
     }
@@ -330,6 +331,17 @@ export class AutoModeRedisTransport {
     await this.client.set(this.keyMaster('summary'), summary);
   }
 
+  /** Last user message forwarded from Telegram→slave (hybrid path), for Slave report goal fallback. */
+  async getLastUserRequest(): Promise<string | null> {
+    if (!this.client) return null;
+    return this.client.get(this.keyMaster('last_user'));
+  }
+
+  async setLastUserRequest(text: string): Promise<void> {
+    if (!this.client) return;
+    await this.client.set(this.keyMaster('last_user'), text.slice(0, 4000));
+  }
+
   // ── Slave busy lock (prevents concurrent handoffs) ──
 
   /** Check if slave is currently processing a task. */
@@ -349,6 +361,27 @@ export class AutoModeRedisTransport {
   async clearSlaveBusy(): Promise<void> {
     if (!this.client) return;
     await this.client.del(this.keySlave('busy'));
+  }
+
+  /**
+   * Delete all master + slave Redis keys, resetting auto mode to a clean state.
+   * Includes `last_user` and `summary` — use after deploy if rolling summary still contains pre-fix placeholders.
+   */
+  async resetAll(): Promise<void> {
+    if (!this.client) return;
+    const suffixes: AutoRedisQueueSuffix[] = ['input', 'out', 'turns', 'resp', 'summary', 'busy', 'last_user'];
+    for (const suffix of suffixes) {
+      await this.client.del(this.keyMaster(suffix));
+      await this.client.del(this.keySlave(suffix));
+    }
+    this.initialized = false;
+  }
+
+  /** Drain master and slave input queues (discard pending work without resetting counters). */
+  async drainInputQueues(): Promise<void> {
+    if (!this.client) return;
+    await this.client.del(this.keyMaster('input'));
+    await this.client.del(this.keySlave('input'));
   }
 
   // ── Monitor peek methods (read without consuming) ──

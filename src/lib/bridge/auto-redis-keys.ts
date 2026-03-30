@@ -10,7 +10,15 @@
 
 import { getImBotInstanceId, loadConfig, resolveAutoRedisBridgeSlug } from '../../config';
 
-export type AutoRedisQueueSuffix = 'input' | 'out' | 'turns' | 'resp' | 'summary' | 'busy';
+export type AutoRedisQueueSuffix =
+  | 'input'
+  | 'out'
+  | 'turns'
+  | 'resp'
+  | 'summary'
+  | 'busy'
+  /** Latest plain Telegram→master user text (fallback when session summary lacks `User goal:`). */
+  | 'last_user';
 
 export type AutoRedisRole = 'master' | 'slave';
 

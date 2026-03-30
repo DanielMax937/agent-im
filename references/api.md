@@ -109,6 +109,13 @@
 |------|------|------|
 | `CTI_AUTO_APPROVE` | bool | 自动批准所有工具权限（仅可信环境） |
 
+### Hybrid 自动模式 / Slave Execution Report（可选）
+
+| 变量 | 类型 | 说明 |
+|------|------|------|
+| `CTI_SLAVE_REPORT_GOAL` | string | 可选，固定 `## Slave Execution Report` 的 canonical goal 行（测试或部署用） |
+| `CTI_SLAVE_REPORT_MASTER_EVAL_KEEP_LAST` | number | Session context **展示**时保留最近几轮 `Master evaluation`；**默认 1**（未设置时）；**0** = 不截断；Redis 仍保存完整摘要 |
+
 ---
 
 ## 三、桥接 Host 接口（扩展用）

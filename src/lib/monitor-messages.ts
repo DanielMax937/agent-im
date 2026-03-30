@@ -85,3 +85,47 @@ export function appendSlaveMessage(text: string, bridgeSlug?: string, ctiHomeOve
 export function readMonitorMessages(ctiHomeOverride?: string): MonitorFile {
   return readFile(ctiHomeOverride);
 }
+
+// ── Runner working status (separate file to avoid contention) ──
+
+export interface RunnerStatus {
+  masterBusy: boolean;
+  slaveBusy: boolean;
+  masterSince?: number;  // timestamp when master started working
+  slaveSince?: number;   // timestamp when slave started working
+  updatedAt: number;
+}
+
+function statusFilePath(ctiHomeOverride?: string): string {
+  const base = ctiHomeOverride ?? getCtiHome();
+  return path.join(base, 'runtime', 'runner-status.json');
+}
+
+/** Read runner working status. */
+export function readRunnerStatus(ctiHomeOverride?: string): RunnerStatus {
+  try {
+    const raw = fs.readFileSync(statusFilePath(ctiHomeOverride), 'utf-8');
+    return JSON.parse(raw);
+  } catch {
+    return { masterBusy: false, slaveBusy: false, updatedAt: 0 };
+  }
+}
+
+/** Update runner working status (partial merge). */
+export function writeRunnerStatus(
+  update: Partial<Omit<RunnerStatus, 'updatedAt'>>,
+  ctiHomeOverride?: string,
+): void {
+  try {
+    const current = readRunnerStatus(ctiHomeOverride);
+    const merged = { ...current, ...update, updatedAt: Date.now() };
+    const fp = statusFilePath(ctiHomeOverride);
+    const dir = path.dirname(fp);
+    fs.mkdirSync(dir, { recursive: true });
+    const tmp = fp + '.tmp';
+    fs.writeFileSync(tmp, JSON.stringify(merged));
+    fs.renameSync(tmp, fp);
+  } catch {
+    // best-effort
+  }
+}

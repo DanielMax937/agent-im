@@ -16,7 +16,7 @@ import {
 } from '../lib/bridge-app-child';
 import { readBridgeDaemonDiskStatus } from '../lib/bridge-daemon-status';
 import { getCtiHomeForBridgeSlug, getSlaveEnvPath, listBridgeSlugs, loadConfig } from '../config';
-import { readMonitorMessages } from '../lib/monitor-messages';
+import { readMonitorMessages, readRunnerStatus } from '../lib/monitor-messages';
 import { getLogger } from '../logger';
 import type {
   PendingApprovalRecord,
@@ -43,6 +43,7 @@ export interface PlatformStoreApi {
 
 export interface WorkflowServiceApi {
   startSprint(input: unknown): Promise<Sprint>;
+  createTask(input: unknown): Promise<TaskSession>;
   assignTask(input: unknown): Promise<TaskSession>;
   submitTaskForReview(input: {
     taskSessionId: string;
@@ -51,10 +52,14 @@ export interface WorkflowServiceApi {
     prBody: string;
   }): Promise<unknown>;
   startTesting(taskSessionId: string): Promise<TaskSession>;
+  startRegressionTesting(taskSessionId: string): Promise<TaskSession>;
+  refreshRegressionIfMasterAdvanced(taskSessionId: string): Promise<TaskSession>;
+  rejectReview(taskSessionId: string, comment: string): Promise<TaskSession>;
   handleTestFailure(input: { taskSessionId: string; summary: string; log: string }): Promise<TaskSession>;
   closeTask(taskSessionId: string): Promise<TaskSession>;
   resolveApproval(approvalId: string, input: unknown): boolean;
   handleJiraWebhook(payload: unknown): Promise<unknown>;
+  getKanbanStatus(): unknown;
   ensureAgentInstance(
     taskSessionId: string,
     role: AgentRole,
@@ -253,7 +258,8 @@ export function createPlatformApp(options: CreatePlatformAppOptions): PlatformAp
       }
 
       if (request.method === 'GET' && pathname === '/api/tasks') {
-        return jsonResponse(options.store.listTaskSessions());
+        const filterProjectId = searchParams.get('projectId')?.trim();
+        return jsonResponse(options.store.listTaskSessions(filterProjectId || undefined));
       }
 
       const taskParams = matchPath('/api/tasks/:taskSessionId', pathname);
@@ -318,6 +324,17 @@ export function createPlatformApp(options: CreatePlatformAppOptions): PlatformAp
         );
       }
 
+      if (request.method === 'POST' && pathname === '/api/workflows/tasks/create') {
+        return jsonResponse(
+          await options.workflowService.createTask(await readRequestBody<unknown>(request)),
+          201,
+        );
+      }
+
+      if (request.method === 'GET' && pathname === '/api/kanban/status') {
+        return jsonResponse(options.workflowService.getKanbanStatus());
+      }
+
       if (request.method === 'POST' && pathname === '/api/workflows/tasks/assign') {
         return jsonResponse(
           await options.workflowService.assignTask(await readRequestBody<unknown>(request)),
@@ -342,6 +359,31 @@ export function createPlatformApp(options: CreatePlatformAppOptions): PlatformAp
       if (request.method === 'POST' && testingStartParams) {
         return jsonResponse(
           await options.workflowService.startTesting(testingStartParams.taskSessionId),
+        );
+      }
+
+      const regressionStartParams = matchPath('/api/workflows/tasks/:taskSessionId/start-regression', pathname);
+      if (request.method === 'POST' && regressionStartParams) {
+        return jsonResponse(
+          await options.workflowService.startRegressionTesting(regressionStartParams.taskSessionId),
+        );
+      }
+
+      const regressionRefreshParams = matchPath('/api/workflows/tasks/:taskSessionId/regression/refresh', pathname);
+      if (request.method === 'POST' && regressionRefreshParams) {
+        return jsonResponse(
+          await options.workflowService.refreshRegressionIfMasterAdvanced(regressionRefreshParams.taskSessionId),
+        );
+      }
+
+      const rejectReviewParams = matchPath('/api/workflows/tasks/:taskSessionId/reject-review', pathname);
+      if (request.method === 'POST' && rejectReviewParams) {
+        const payload = await readRequestBody<{ comment: string }>(request);
+        if (!payload.comment?.trim()) {
+          return jsonResponse({ error: 'comment is required' }, 400);
+        }
+        return jsonResponse(
+          await options.workflowService.rejectReview(rejectReviewParams.taskSessionId, payload.comment.trim()),
         );
       }
 
@@ -491,14 +533,16 @@ export function createPlatformApp(options: CreatePlatformAppOptions): PlatformAp
           if (slug) {
             const home = getCtiHomeForBridgeSlug(slug);
             const data = readMonitorMessages(home);
+            const status = readRunnerStatus(home);
             // Tag entries with source bridge
             const tag = (e: { text: string; ts: number; bridgeSlug?: string }) => ({ ...e, homeBridge: slug });
-            return jsonResponse({ masterOut: data.master.map(tag), slaveOut: data.slave.map(tag) });
+            return jsonResponse({ masterOut: data.master.map(tag), slaveOut: data.slave.map(tag), runnerStatus: { [slug]: status } });
           }
           // No slug — merge from all bridges, tag with source
           const allSlugs = listBridgeSlugs();
           let masterOut: { text: string; ts: number; bridgeSlug?: string; homeBridge?: string }[] = [];
           let slaveOut: { text: string; ts: number; bridgeSlug?: string; homeBridge?: string }[] = [];
+          const runnerStatus: Record<string, { masterBusy: boolean; slaveBusy: boolean; masterSince?: number; slaveSince?: number; updatedAt: number }> = {};
           for (const s of allSlugs) {
             try {
               const home = getCtiHomeForBridgeSlug(s);
@@ -506,16 +550,18 @@ export function createPlatformApp(options: CreatePlatformAppOptions): PlatformAp
               const tag = (e: { text: string; ts: number; bridgeSlug?: string }) => ({ ...e, homeBridge: s });
               masterOut = masterOut.concat(data.master.map(tag));
               slaveOut = slaveOut.concat(data.slave.map(tag));
+              runnerStatus[s] = readRunnerStatus(home);
             } catch { /* skip */ }
           }
           if (allSlugs.length === 0) {
             const data = readMonitorMessages();
             masterOut = data.master;
             slaveOut = data.slave;
+            runnerStatus['default'] = readRunnerStatus();
           }
           masterOut.sort((a, b) => a.ts - b.ts);
           slaveOut.sort((a, b) => a.ts - b.ts);
-          return jsonResponse({ masterOut, slaveOut });
+          return jsonResponse({ masterOut, slaveOut, runnerStatus });
         } catch (err) {
           return jsonResponse({ error: err instanceof Error ? err.message : String(err) }, 500);
         }

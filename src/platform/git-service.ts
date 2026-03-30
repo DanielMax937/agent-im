@@ -71,6 +71,27 @@ export class GitService {
     return input.nextBranch;
   }
 
+  /**
+   * Adds a linked worktree for isolated developer work.
+   * When `CTI_KANBAN_USE_WORKTREE=1`, WorkflowService uses this for new dev assignments.
+   */
+  async createTaskWorktree(input: {
+    repoPath: string;
+    baseBranch: string;
+    worktreePath: string;
+    branchName: string;
+  }): Promise<void> {
+    await this.runGit(input.repoPath, ['fetch', 'origin', input.baseBranch]);
+    await this.runGit(input.repoPath, [
+      'worktree',
+      'add',
+      '-B',
+      input.branchName,
+      input.worktreePath,
+      input.baseBranch,
+    ]);
+  }
+
   async commitAll(input: CommitChangesInput): Promise<{ committed: boolean }> {
     await this.runGit(input.repoPath, ['add', '.']);
     const diffResult = await this.runGit(
@@ -93,6 +114,17 @@ export class GitService {
 
   async getHeadSha(repoPath: string): Promise<string> {
     const result = await this.runGit(repoPath, ['rev-parse', 'HEAD']);
+    return result.stdout.trim();
+  }
+
+  /** `git fetch origin` — updates remote refs before comparing regression baseline to master. */
+  async fetchOrigin(repoPath: string): Promise<void> {
+    await this.runGit(repoPath, ['fetch', 'origin']);
+  }
+
+  /** Resolves a ref such as `origin/master` to a full SHA. */
+  async resolveRefSha(repoPath: string, ref: string): Promise<string> {
+    const result = await this.runGit(repoPath, ['rev-parse', ref]);
     return result.stdout.trim();
   }
 

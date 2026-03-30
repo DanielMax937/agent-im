@@ -178,6 +178,33 @@ describe('Platform app integration', () => {
     }
   });
 
+  it('exposes kanban aggregate status and creates todo tasks', async () => {
+    const { app, store } = createHarness();
+    const project = createProject(store);
+    const sprint = createSprint(store, project.id);
+    const server = await startHttpApp(app);
+    try {
+      const status = await fetchJson(server.baseUrl, '/api/kanban/status');
+      assert.equal(status.status, 200);
+      assert.ok((status.body as { tasksByState: { todo: number } }).tasksByState);
+
+      const created = await fetchJson(server.baseUrl, '/api/workflows/tasks/create', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          projectId: project.id,
+          sprintId: sprint.id,
+          issueId: 'ISSUE-KANBAN-API',
+          title: 'API create',
+        }),
+      });
+      assert.equal(created.status, 201);
+      assert.equal((created.body as { workflowState: string }).workflowState, 'todo');
+    } finally {
+      await server.close();
+    }
+  });
+
   it('assigns a task through the workflow API', async () => {
     const { app, store, instanceManager } = createHarness();
     const project = createProject(store);

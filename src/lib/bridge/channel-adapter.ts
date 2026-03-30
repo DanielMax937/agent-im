@@ -144,6 +144,18 @@ export abstract class BaseChannelAdapter {
   async recordAutoModeSlaveTurnCompleted(): Promise<void> {
     return;
   }
+
+  /**
+   * Reset auto mode Redis state and restart slave process.
+   * Returns a human-readable status message.  `null` means auto mode is not active.
+   */
+  async resetAutoModeState?(): Promise<string | null>;
+
+  /**
+   * Stop in-flight tasks for both master and slave runners without tearing down the bridge.
+   * Returns a human-readable status message.  `null` means auto mode is not active.
+   */
+  async stopAutoModeTasks?(activeTasks: Map<string, AbortController>): Promise<string | null>;
 }
 
 // ── Adapter Registry ────────────────────────────────────────────

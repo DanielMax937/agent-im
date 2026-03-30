@@ -926,6 +926,8 @@ async function handleCommand(
         '',
         '<b>Commands:</b>',
         '/new [path] - Start new session',
+        '/autonew - Reset auto mode session (Redis + slave)',
+        '/autostop - Stop both master and slave tasks',
         '/bind &lt;session_id&gt; - Bind to existing session',
         '/cwd /path - Change working directory',
         '/mode plan|code|ask - Change mode',
@@ -952,6 +954,54 @@ async function handleCommand(
       // Clear sdkSessionId to force a fresh Cursor/Claude session (not resume)
       router.updateBinding(binding.id, { sdkSessionId: '' });
       response = `New session created.\nSession: <code>${binding.codepilotSessionId.slice(0, 8)}...</code>\nCWD: <code>${escapeHtml(binding.workingDirectory || '~')}</code>`;
+      break;
+    }
+
+    case '/autonew': {
+      const parsedChannel = parseImBaseAndInstanceId(adapter.channelType);
+      const autoActive = parsedChannel
+        ? readAutoModeSettings(store, parsedChannel.base, parsedChannel.instanceId)
+        : null;
+      if (!autoActive) {
+        response = 'Auto mode is not enabled. Nothing to reset.';
+        break;
+      }
+      if (typeof adapter.resetAutoModeState !== 'function') {
+        response = 'Auto mode reset is not supported for this channel.';
+        break;
+      }
+      const result = await adapter.resetAutoModeState();
+      if (!result) {
+        response = 'Auto mode is not enabled. Nothing to reset.';
+        break;
+      }
+      // Also create a fresh IM-side binding (like /new)
+      const autoBinding = router.createBinding(msg.address);
+      router.updateBinding(autoBinding.id, { sdkSessionId: '' });
+      response = `${result}\n• New IM session: <code>${autoBinding.codepilotSessionId.slice(0, 8)}...</code>`;
+      break;
+    }
+
+    case '/autostop': {
+      const parsedChannel = parseImBaseAndInstanceId(adapter.channelType);
+      const autoActive = parsedChannel
+        ? readAutoModeSettings(store, parsedChannel.base, parsedChannel.instanceId)
+        : null;
+      if (!autoActive) {
+        response = 'Auto mode is not enabled. Nothing to stop.';
+        break;
+      }
+      if (typeof adapter.stopAutoModeTasks !== 'function') {
+        response = 'Auto mode stop is not supported for this channel.';
+        break;
+      }
+      const st = getState();
+      const result = await adapter.stopAutoModeTasks(st.activeTasks);
+      if (!result) {
+        response = 'Auto mode is not enabled. Nothing to stop.';
+        break;
+      }
+      response = result;
       break;
     }
 
@@ -1169,6 +1219,8 @@ async function handleCommand(
         '<b>CodePilot Bridge Commands</b>',
         '',
         '/new [path] - Start new session',
+        '/autonew - Reset auto mode session (Redis + slave)',
+        '/autostop - Stop both master and slave tasks',
         '/bind &lt;session_id&gt; - Bind to existing session',
         '/cwd /path - Change working directory',
         '/mode plan|code|ask - Change mode',

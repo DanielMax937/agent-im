@@ -234,6 +234,10 @@ Use the bridge when you want direct chat-based access to the runtime:
 
 The bridge manager, channel adapters, permission flow, and session persistence remain part of the codebase.
 
+### Hybrid auto mode / Slave Execution Report (optional)
+
+Telegram + Redis hybrid mode stores a rolling **session summary** and renders `## Slave Execution Report` for the master model. **Display-only** truncation of stacked `Master evaluation:` lines in Session context uses **`CTI_SLAVE_REPORT_MASTER_EVAL_KEEP_LAST`**: the code default is **1** round (omit the variable to use it). Set **`0`** to disable truncation (show all). Optional **`CTI_SLAVE_REPORT_GOAL`** pins the canonical goal line. See `config.env.example`. Older pasted Session context may still say “default **2** rounds” from historical Master evaluations — that is **stacked history**, not the current default.
+
 ## Data layout
 
 ```text

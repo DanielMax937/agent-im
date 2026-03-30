@@ -224,6 +224,141 @@ describe('WorkflowService', () => {
     assert.deepEqual(instanceManager.started, [`developer:${taskSession.id}`]);
   });
 
+  it('creates a task in todo without starting a runner', async () => {
+    const { workflowService, project, store, instanceManager } = createHarness();
+    const sprint = createSprint(store, project.id);
+    const task = await workflowService.createTask({
+      projectId: project.id,
+      sprintId: sprint.id,
+      issueId: 'ISSUE-TODO',
+      title: 'Kanban card',
+    });
+    assert.equal(task.workflowState, 'todo');
+    assert.equal(instanceManager.started.length, 0);
+  });
+
+  it('escalates to codex-senior from todo when reviewRejectionCount >= 2 even if lane is agent-dev', async () => {
+    const { workflowService, project, store, instanceManager } = createHarness();
+    const sprint = createSprint(store, project.id);
+    const created = await workflowService.createTask({
+      projectId: project.id,
+      sprintId: sprint.id,
+      issueId: 'ISSUE-ESC',
+      title: 'Escalate me',
+    });
+    const s = store.getTaskSession(created.id)!;
+    store.upsertTaskSession({ ...s, reviewRejectionCount: 2 });
+    const assigned = await workflowService.assignTask({
+      projectId: project.id,
+      sprintId: sprint.id,
+      issueId: 'ISSUE-ESC',
+      title: '',
+      taskSessionId: created.id,
+      kanbanAgent: 'agent-dev',
+      handoffComment: 'fix again',
+    });
+    assert.equal(assigned.kanbanAgent, 'codex-senior');
+    assert.equal(assigned.runtime, 'codex');
+    assert.ok(instanceManager.started.some((x) => x.startsWith('developer:')));
+  });
+
+  it('assigns from todo with kanban lane and creates branch', async () => {
+    const { workflowService, project, store, instanceManager, gitService } = createHarness();
+    const sprint = createSprint(store, project.id);
+    const created = await workflowService.createTask({
+      projectId: project.id,
+      sprintId: sprint.id,
+      issueId: 'ISSUE-PICK',
+      title: 'Pick me',
+    });
+    const assigned = await workflowService.assignTask({
+      projectId: project.id,
+      sprintId: sprint.id,
+      issueId: 'ISSUE-PICK',
+      title: '',
+      taskSessionId: created.id,
+      kanbanAgent: 'agent-dev',
+      handoffComment: 'Do X then hand to review',
+    });
+    assert.equal(assigned.workflowState, 'in_progress');
+    assert.equal(assigned.kanbanAgent, 'agent-dev');
+    assert.deepEqual(gitService.calls, ['createTaskBranch']);
+    assert.ok(instanceManager.started.some((s) => s.startsWith('developer:')));
+    const hist = store.getTaskSession(created.id)!;
+    assert.ok(
+      hist.conversationHistory.some(
+        (e) => e.source === 'workflow' && e.content.includes('Handoff (read before running):'),
+      ),
+    );
+  });
+
+  it('rejects review and re-queues developer with escalation count', async () => {
+    const { workflowService, project, store, instanceManager } = createHarness();
+    const sprint = createSprint(store, project.id);
+    const taskSession = createTaskSession(store, project.id, sprint.id, {
+      workflowState: 'review',
+      kanbanAgent: 'claude-review',
+    });
+    const updated = await workflowService.rejectReview(taskSession.id, 'needs types');
+    assert.equal(updated.workflowState, 'in_progress');
+    assert.equal(updated.reviewRejectionCount, 1);
+    assert.ok(instanceManager.started.some((s) => s.startsWith('developer:')));
+  });
+
+  it('moves testing to regression_testing', async () => {
+    const { workflowService, project, store, instanceManager, gitService } = createHarness();
+    const sprint = createSprint(store, project.id);
+    const taskSession = createTaskSession(store, project.id, sprint.id, {
+      workflowState: 'testing',
+    });
+    const next = await workflowService.startRegressionTesting(taskSession.id);
+    assert.equal(next.workflowState, 'regression_testing');
+    assert.equal(next.regressionMasterSha, 'sha-default');
+    assert.ok(instanceManager.started.some((s) => s.startsWith('tester:')));
+    assert.ok(gitService.calls.includes('fetchOrigin'));
+    assert.ok(gitService.calls.some((c) => c.startsWith('resolveRefSha:')));
+  });
+
+  it('detects master advance during regression and refreshes tester', async () => {
+    const { workflowService, project, store, instanceManager, gitService } = createHarness();
+    gitService.resolveRefShaResults = ['sha-old', 'sha-new'];
+    const sprint = createSprint(store, project.id);
+    const taskSession = createTaskSession(store, project.id, sprint.id, {
+      workflowState: 'testing',
+    });
+    const reg = await workflowService.startRegressionTesting(taskSession.id);
+    assert.equal(reg.regressionMasterSha, 'sha-old');
+    const refreshed = await workflowService.refreshRegressionIfMasterAdvanced(reg.id);
+    assert.equal(refreshed.regressionMasterSha, 'sha-new');
+    assert.ok(refreshed.handoffComment?.includes('sha-old'));
+    assert.ok(instanceManager.started.filter((s) => s.startsWith('tester:')).length >= 2);
+  });
+
+  it('aggregates kanban status', () => {
+    const { workflowService, project, store } = createHarness();
+    const sprint = createSprint(store, project.id);
+    createTaskSession(store, project.id, sprint.id, {
+      workflowState: 'todo',
+      id: 'ts-todo',
+      issueId: 'ISSUE-A',
+      taskId: 'ISSUE-A',
+    });
+    createTaskSession(store, project.id, sprint.id, {
+      workflowState: 'in_progress',
+      id: 'ts-ip',
+      issueId: 'ISSUE-B',
+      taskId: 'ISSUE-B',
+    });
+    const snap = workflowService.getKanbanStatus();
+    assert.equal(snap.tasksByState.todo, 1);
+    assert.equal(snap.tasksByState.in_progress, 1);
+    assert.ok(snap.projects.length >= 1);
+    const row = snap.tasksByProject.find((r) => r.projectId === project.id);
+    assert.ok(row);
+    assert.equal(row!.tasksByState.todo, 1);
+    assert.equal(row!.tasksByState.in_progress, 1);
+  });
+
   it('handles Jira webhook transitions for review, testing, and close', async () => {
     const { workflowService, project, store } = createHarness();
     const sprint = createSprint(store, project.id);

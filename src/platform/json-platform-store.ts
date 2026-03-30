@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 
 import { getCtiHome } from '../config';
+import { scheduleConversationEntryTelegram } from './kanban-notify';
 import type {
   AgentInstanceRecord,
   PendingApprovalRecord,
@@ -188,6 +189,7 @@ export class JsonPlatformStore {
     session.updatedAt = now();
     this.taskSessions.set(session.id, session);
     this.persistTaskSessions();
+    scheduleConversationEntryTelegram(session.issueId, nextEntry);
     return nextEntry;
   }
 

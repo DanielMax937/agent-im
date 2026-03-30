@@ -32,7 +32,18 @@ import {
 } from '../redis-local-transport';
 import { callTelegramApi, escapeHtml, sendMessageDraft } from './telegram-utils';
 import { startSlaveProcess, stopSlaveProcess } from '../slave-process';
-import { appendMasterMessage } from '../../monitor-messages';
+import { appendMasterMessage, writeRunnerStatus } from '../../monitor-messages';
+import {
+  buildSlaveReportSessionContextBlock,
+  resolveSlaveReportGoalWithFallbacks,
+  SLAVE_REPORT_GOAL_MISSING,
+  SLAVE_REPORT_GOAL_MISSING_ASSISTANT_BODY,
+} from '../slave-report-goal';
+import {
+  appendKanbanRequirementGIfMissing,
+  truncateRollingSessionSummary,
+  truncateSessionSummaryAfterGIfNeeded,
+} from '../kanban-redis-supplement';
 import {
   isImageEnabled,
   downloadPhoto,
@@ -505,29 +516,54 @@ export class TelegramAdapter extends BaseChannelAdapter {
     const body = text.startsWith(prefix) ? text.slice(prefix.length) : text;
     await this.autoModeRedis.deliverClaudeReply(body).catch(() => {});
 
-    // Get original user goal from session summary
+    // Session summary may embed stale text from pre-fix reports; goal resolution sanitizes that.
+    // `last_user` is written when Telegram forwards to the slave path, before the slave run — always read here for one canonical string.
     const summary = await this.autoModeRedis.getSessionSummary().catch(() => null);
-    const goalMatch = summary?.match(/User goal: (.+?)(\n|$)/);
-    const userGoal = goalMatch ? goalMatch[1] : '(unknown — see session context)';
+    const lastUser = await this.autoModeRedis.getLastUserRequest().catch(() => null);
+    const canonicalGoal = resolveSlaveReportGoalWithFallbacks({
+      sessionSummary: summary,
+      lastUserRequest: lastUser,
+    });
+
+    const reportBody =
+      canonicalGoal === SLAVE_REPORT_GOAL_MISSING
+        ? SLAVE_REPORT_GOAL_MISSING_ASSISTANT_BODY.slice(0, 3000)
+        : body.slice(0, 3000);
 
     console.log(
       `[telegram-adapter] Slave completed task, feeding report to master. ` +
-      `goal=${JSON.stringify(userGoal)}, replyLen=${body.length}`,
+      `goal=${JSON.stringify(canonicalGoal)}, replyLen=${body.length}, ` +
+      `reportBodyReplaced=${canonicalGoal === SLAVE_REPORT_GOAL_MISSING}`,
     );
 
-    // Feed slave's result back to master for evaluation
+    // Bold headline and Session context **Canonical goal** line must use the same value.
+    const sessionContextBlock = buildSlaveReportSessionContextBlock(summary, canonicalGoal);
     const slaveReport =
       `## Slave Execution Report\n\n` +
-      `You asked your assistant to achieve the following goal:\n` +
-      `**${userGoal}**\n\n` +
+      `You asked your assistant to achieve the following goal (**latest user request**):\n` +
+      `**${canonicalGoal}**\n\n` +
       `Your assistant has reported back:\n\n` +
-      `---\n${body.slice(0, 3000)}\n---\n\n` +
-      (summary ? `### Session Context\n${summary}\n\n` : '') +
+      `---\n${reportBody}\n---\n\n` +
+      sessionContextBlock +
       `### Your Decision\n` +
-      `Based on the original goal and the assistant's report:\n` +
-      `- If the result is satisfactory and there is nothing to improve, write a clear summary for the user.\n` +
-      `- If the result needs improvement, write specific follow-up instructions for your assistant. ` +
-      `Include phrases like "please fix" or "needs improvement" so the system knows to forward your response.\n\n` +
+      `You are a strict quality gate. Evaluate the assistant's work against the original goal.\n\n` +
+      `**Your standard: pursue perfection.** If there is ANY possible improvement — even small, optional, or cosmetic — ` +
+      `you MUST send follow-up instructions. This includes but is not limited to:\n` +
+      `- Missing edge cases or error handling\n` +
+      `- Code that works but could be cleaner, faster, or more robust\n` +
+      `- Missing or incomplete tests\n` +
+      `- Documentation or comments that could be added\n` +
+      `- Any TODO, FIXME, or "nice to have" the assistant mentioned but skipped\n\n` +
+      `**A task is ONLY truly finished when ALL of the following are true:**\n` +
+      `1. Every aspect of the goal is fully implemented with no shortcuts\n` +
+      `2. You have explicitly asked the assistant to run tests/verification AND the assistant has confirmed tests pass\n` +
+      `3. There is genuinely ZERO remaining improvement possible — not even a tiny one\n\n` +
+      `**If tests have not been run yet**, your follow-up MUST include: "please run tests to verify your changes".\n\n` +
+      `**Output format:**\n` +
+      `- If ANY improvement is possible: write specific follow-up instructions. ` +
+      `Include the phrase "needs improvement" so the system forwards your response to the assistant.\n` +
+      `- ONLY if the task is truly 100% complete with verified tests and zero possible improvements: ` +
+      `write a clear summary for the user. Do NOT include "needs improvement" or "please fix" in this case.\n\n` +
       `Keep it concise — your response goes directly to the user via Telegram.`;
     const chatId = this.hybridMirrorChatId || this.imGet('telegram_chat_id') || undefined;
     await this.autoModeRedis.pushMasterInput(slaveReport, 'default', chatId).catch(() => {});
@@ -549,9 +585,14 @@ export class TelegramAdapter extends BaseChannelAdapter {
     outboundChatId?: string;
   }): Promise<void> {
     if (!this.autoModeRedis) return;
+    writeRunnerStatus({ masterBusy: false, masterSince: undefined });
 
     // afterAutoModeMasterTurn is now ONLY called after master LLM evaluates
     // a slave execution report. User messages bypass master LLM entirely.
+
+    // Rolling summary shape must stay aligned with `slave-report-goal.ts`
+    // (`MASTER_EVAL_BLOCK_RE`, `truncateMasterEvaluationsForRollingDisplay`): sections are separated by
+    // `\n---\n`, and master rounds use the literal prefix `Master evaluation:` (see also `handleMasterRedisMessage` → `User goal:`).
 
     // Update session summary
     const prevSummary = await this.autoModeRedis.getSessionSummary().catch(() => null);
@@ -568,10 +609,16 @@ export class TelegramAdapter extends BaseChannelAdapter {
     const needsFollowUp =
       resp.includes('follow-up') || resp.includes('follow up') ||
       resp.includes('please fix') || resp.includes('please improve') ||
+      resp.includes('please run') || resp.includes('please test') ||
+      resp.includes('please verify') || resp.includes('please check') ||
+      resp.includes('please add') || resp.includes('please update') ||
       resp.includes('try again') || resp.includes('redo') ||
       resp.includes('not complete') || resp.includes('incomplete') ||
       resp.includes('needs improvement') || resp.includes('need improvement') ||
+      resp.includes('could be improved') || resp.includes('should be improved') ||
       resp.includes('missing') || resp.includes('incorrect') ||
+      resp.includes('run tests') || resp.includes('run the tests') ||
+      resp.includes('verify your') || resp.includes('test your') ||
       resp.includes('## follow-up instructions');
 
     if (!needsFollowUp) {
@@ -581,6 +628,7 @@ export class TelegramAdapter extends BaseChannelAdapter {
         `responseLen=${payload.responseText.length}, preview=${JSON.stringify(payload.responseText.slice(0, 150))}`,
       );
       await this.autoModeRedis.incrMasterTurns().catch(() => {});
+      await this.sendAutoModeTaskFinishedNotice(payload.outboundChatId);
       return;
     }
 
@@ -590,6 +638,7 @@ export class TelegramAdapter extends BaseChannelAdapter {
       `responseLen=${payload.responseText.length}, preview=${JSON.stringify(payload.responseText.slice(0, 150))}`,
     );
     await this.autoModeRedis.setSlaveBusy(600).catch(() => {});
+    writeRunnerStatus({ slaveBusy: true, slaveSince: Date.now() });
 
     const handoff =
       `## Follow-up Instructions from Master\n\n` +
@@ -609,10 +658,75 @@ export class TelegramAdapter extends BaseChannelAdapter {
     await this.autoModeRedis.incrMasterTurns().catch(() => {});
   }
 
+  /**
+   * After master accepts slave work, send a short Telegram notice so the user sees an explicit
+   * “task finished” line in addition to the master’s evaluation message (already delivered above).
+   */
+  private async sendAutoModeTaskFinishedNotice(outboundChatId?: string): Promise<void> {
+    const chatId = outboundChatId || this.hybridMirrorChatId || this.imGet('telegram_chat_id');
+    const token = this.botToken;
+    if (!chatId || !token) return;
+    await callTelegramApi(token, 'sendMessage', {
+      chat_id: chatId,
+      text:
+        '✅ <b>Task finished</b>\nMaster accepted the assistant\'s work. No follow-up was queued.',
+      parse_mode: 'HTML',
+      disable_web_page_preview: true,
+    }).catch(() => {});
+  }
+
   override async recordAutoModeSlaveTurnCompleted(): Promise<void> {
     if (!this.autoModeRedis) return;
     await this.autoModeRedis.incrSlaveResponseCount();
     await this.autoModeRedis.clearSlaveBusy().catch(() => {});
+    writeRunnerStatus({ slaveBusy: false, slaveSince: undefined });
+  }
+
+  override async resetAutoModeState(): Promise<string | null> {
+    if (!this.autoModeRedis) return null;
+
+    // 1. Clear all Redis keys (turns, summary, queues, busy flags)
+    await this.autoModeRedis.resetAll();
+    writeRunnerStatus({ masterBusy: false, slaveBusy: false, masterSince: undefined, slaveSince: undefined });
+
+    // 2. Restart slave child process
+    await stopSlaveProcess(this.instanceId);
+    if (this.hybridAutoMode) {
+      startSlaveProcess(this.instanceId);
+    }
+
+    console.log(`[telegram-adapter] Auto mode state reset for ${this.instanceId}`);
+    return (
+      'Auto mode session reset.\n' +
+      '• Redis cleared: turns, summary, queues, busy, last_user, etc.\n' +
+      '• Slave process restarted\n' +
+      'After deploy: use this if Slave reports still show stale goals until a new Telegram message is sent.'
+    );
+  }
+
+  override async stopAutoModeTasks(activeTasks: Map<string, AbortController>): Promise<string | null> {
+    if (!this.autoModeRedis) return null;
+
+    // Abort all in-flight tasks whose session keys match auto mode synthetic chatIds
+    const slug = this.autoModeRedis.bridgeSlug;
+    let aborted = 0;
+    for (const [sessionId, controller] of activeTasks) {
+      if (sessionId.includes(slug) || sessionId.includes('auto:')) {
+        controller.abort();
+        activeTasks.delete(sessionId);
+        aborted++;
+      }
+    }
+
+    // Clear slave busy flag so the master loop doesn't stay blocked
+    await this.autoModeRedis.clearSlaveBusy().catch(() => {});
+    writeRunnerStatus({ masterBusy: false, slaveBusy: false, masterSince: undefined, slaveSince: undefined });
+
+    // Drain pending input queues so no queued work fires after stop
+    await this.autoModeRedis.drainInputQueues().catch(() => {});
+
+    console.log(`[telegram-adapter] Auto mode tasks stopped for ${this.instanceId}, aborted=${aborted}`);
+    return `Auto mode tasks stopped.\n• ${aborted} in-flight task(s) aborted\n• Slave busy flag cleared\n• Input queues drained`;
   }
 
   // ── Lifecycle hooks (called generically by bridge-manager) ───
@@ -637,6 +751,8 @@ export class TelegramAdapter extends BaseChannelAdapter {
     await callTelegramApi(token, 'setMyCommands', {
       commands: [
         { command: 'new', description: 'Start new session (optionally specify path)' },
+        { command: 'autonew', description: 'Reset auto mode session (clears Redis state + restarts slave)' },
+        { command: 'autostop', description: 'Stop both master and slave tasks' },
         { command: 'bind', description: 'Bind to existing session' },
         { command: 'cwd', description: 'Change working directory' },
         { command: 'mode', description: 'Switch mode: plan / code / ask' },
@@ -756,23 +872,28 @@ export class TelegramAdapter extends BaseChannelAdapter {
         `[telegram-adapter] Master received slave report, enqueueing for LLM evaluation. ` +
         `len=${msg.text.length}, preview=${JSON.stringify(msg.text.slice(0, 120))}`,
       );
+      writeRunnerStatus({ masterBusy: true, masterSince: Date.now() });
       this.enqueue(msg);
     } else {
       // User message from Telegram → forward directly to slave, no LLM call
       const chatId = msg.outboundChatId || this.hybridMirrorChatId || this.imGet('telegram_chat_id') || undefined;
 
-      // Store user's original goal in session summary for later evaluation
+      // Store user's original goal in session summary for later evaluation.
+      // Truncate the rolling `User goal` block first, then append Kanban (g) supplement — otherwise a
+      // 2000-char tail cut could strip the supplement (see kanban-redis-supplement).
       const prevSummary = await rt.getSessionSummary().catch(() => null);
-      const newSummary = prevSummary
+      const base = prevSummary
         ? `${prevSummary}\n---\nUser goal: ${msg.text.slice(0, 500)}`
         : `User goal: ${msg.text.slice(0, 500)}`;
-      const trimmed = newSummary.length > 2000
-        ? '...' + newSummary.slice(newSummary.length - 1997)
-        : newSummary;
-      await rt.setSessionSummary(trimmed).catch(() => {});
+      const trimmedBase = truncateRollingSessionSummary(base);
+      const withG = appendKanbanRequirementGIfMissing(trimmedBase);
+      const finalSummary = truncateSessionSummaryAfterGIfNeeded(withG);
+      await rt.setSessionSummary(finalSummary).catch(() => {});
+      await rt.setLastUserRequest(msg.text.trim()).catch(() => {});
 
       // Set slave busy
       await rt.setSlaveBusy(600).catch(() => {});
+      writeRunnerStatus({ slaveBusy: true, slaveSince: Date.now() });
 
       // Build slave handoff with user's original text
       const handoff =
@@ -786,6 +907,10 @@ export class TelegramAdapter extends BaseChannelAdapter {
         `3. If the task involves code, run tests/linting to confirm correctness.\n` +
         `4. If ambiguous, interpret in the way most helpful to the user.\n` +
         `5. Provide a clear, concise summary of what you did and the result.\n\n` +
+        `### Reporting & idle rules\n` +
+        `- Your reply becomes a **Slave Execution Report** to Master. The report **goal** line is recovered from session history and/or this User's Request — do **not** reply with only greetings.\n` +
+        `- If the user gave **no actionable work** (no repo path, feature, or acceptance criteria), **say exactly what is missing** (e.g. directory, scope, how to verify) instead of only asking "what would you like?".\n` +
+        `- If this turn is **heartbeat / no new instruction**, state clearly: **无新指令，等待 Master 下发** and reference the last concrete task from context if known.\n\n` +
         `Do your best work. The user is waiting.`;
       await rt.pushSlaveHandoff(handoff, chatId).catch(() => {});
       await rt.incrMasterTurns().catch(() => {});

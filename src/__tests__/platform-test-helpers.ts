@@ -28,6 +28,26 @@ export class FakeGitService {
     return this.createTaskBranchResult;
   }
 
+  async createTaskWorktree(): Promise<string> {
+    this.calls.push('createTaskWorktree');
+    return this.createTaskBranchResult;
+  }
+
+  async fetchOrigin(): Promise<void> {
+    this.calls.push('fetchOrigin');
+  }
+
+  /** Incrementing index into `resolveRefShaResults` (simulate master SHA changes between calls). */
+  public resolveRefShaCounter = 0;
+  public resolveRefShaResults: string[] = ['sha-default'];
+
+  async resolveRefSha(_repoPath: string, ref: string): Promise<string> {
+    this.calls.push(`resolveRefSha:${ref}`);
+    const sha = this.resolveRefShaResults[this.resolveRefShaCounter] ?? 'sha-default';
+    this.resolveRefShaCounter += 1;
+    return sha;
+  }
+
   async commitAll(): Promise<{ committed: boolean }> {
     this.calls.push('commitAll');
     return this.commitResult;

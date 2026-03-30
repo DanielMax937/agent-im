@@ -169,6 +169,15 @@ bash ~/code/Claude-to-IM-skill/scripts/install-codex.sh --link
 4. `CTI_QQ_ALLOWED_USERS` 填写 `user_openid`（不是 QQ 号）— 可先留空
 5. 如果底层 provider 不支持图片输入，设置 `CTI_QQ_IMAGE_ENABLED=false`
 
+### Hybrid 自动模式 / Slave Execution Report（可选）
+
+使用 Telegram + Redis 混合自动模式时，可在 `config.env` 中配置（详见 `config.env.example`）：
+
+- **`CTI_SLAVE_REPORT_MASTER_EVAL_KEEP_LAST`**：在 Slave 报告的 Session context **展示**中保留最近几轮 `Master evaluation`。**代码默认 1**（未设置该变量时）；**`0`** = 不截断、显示全部；设为 **`2`** 等可多看历史。
+- **`CTI_SLAVE_REPORT_GOAL`**：可选，固定报告标题中的 canonical goal 行。
+
+说明：滚动区里若仍出现「默认 **2** 轮」等字样，多为 **历史 Master evaluation 叠字**，不代表当前代码默认；部署新构建并重启 bridge 后，新报告应对齐 **默认 1 轮**（除非显式配置了更大值或 `0`）。
+
 ## 架构
 
 ```
