@@ -7,6 +7,7 @@ import Database from 'better-sqlite3';
 import { getCtiHome } from '../config';
 import { scheduleConversationEntryTelegram } from './kanban-notify';
 import { allocateNextIssueId, resolveIssueIdPrefix } from './issue-id';
+import { assertValidLocalRepositoryPath } from './repository-path';
 import type {
   AgentInstanceRecord,
   KanbanAgentTurnRecord,
@@ -18,9 +19,22 @@ import type {
   TaskSession,
 } from './types';
 
-/** Directory for platform DB and legacy JSON migration (`$CTI_HOME/data/platform`). */
+/**
+ * Directory for platform DB and legacy JSON migration.
+ *
+ * Default: `<cwd>/data/platform` (project-local).
+ * Override: `CTI_KANBAN_PLATFORM_DIR` — absolute path, or relative to `process.cwd()`.
+ * Legacy (under bridge home): `CTI_KANBAN_PLATFORM_DIR=cti-home` → `$CTI_HOME/data/platform`.
+ */
 export function platformDataDir(): string {
-  return path.join(getCtiHome(), 'data', 'platform');
+  const raw = process.env.CTI_KANBAN_PLATFORM_DIR?.trim();
+  if (raw === 'cti-home' || raw === 'legacy') {
+    return path.join(getCtiHome(), 'data', 'platform');
+  }
+  if (raw) {
+    return path.isAbsolute(raw) ? raw : path.join(process.cwd(), raw);
+  }
+  return path.join(process.cwd(), 'data', 'platform');
 }
 
 function defaultDbPath(): string {
@@ -52,7 +66,7 @@ export function createApprovalQueueKey(taskId: string): string {
 }
 
 export type JsonPlatformStoreOptions = {
-  /** Defaults to `$CTI_HOME/data/platform/platform.db`. Use `:memory:` for isolated tests. */
+  /** Defaults to `<cwd>/data/platform/platform.db`. Use `:memory:` for isolated tests. */
   dbPath?: string;
 };
 
@@ -365,6 +379,8 @@ export class JsonPlatformStore {
   }
 
   upsertProject(project: Project): Project {
+    assertValidLocalRepositoryPath(project.repository.localPath);
+
     const existing = this.projects.get(project.id);
     const nextProject: Project = {
       ...project,
@@ -635,6 +651,13 @@ export class JsonPlatformStore {
         record.streamError ?? null,
       );
     return record;
+  }
+
+  /** Called after `streamChat` completes; records stream failure if any. */
+  updateKanbanAgentTurnStreamError(id: string, streamError: string | null): void {
+    this.db
+      .prepare('UPDATE kanban_agent_turns SET stream_error = ? WHERE id = ?')
+      .run(streamError, id);
   }
 
   getKanbanAgentTurn(id: string): KanbanAgentTurnRecord | null {

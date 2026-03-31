@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 
 import type { Project, ProjectAgentProfile, ProjectRepository } from '../../platform/types';
+import { LOCAL_REPOSITORY_PATH_HINT, looksLikeRemoteRepositoryUrl } from '../../platform/repository-path';
 
 const PROJECT_ID_RE = /^[a-zA-Z0-9_-]+$/;
 
@@ -159,6 +160,9 @@ export default function ProjectsPage() {
       }
       if (!form.name.trim()) throw new Error('请填写项目名称');
       if (!form.remoteUrl.trim() || !form.localPath.trim()) throw new Error('请填写远程仓库 URL 与本地路径');
+      if (looksLikeRemoteRepositoryUrl(form.localPath)) {
+        throw new Error(LOCAL_REPOSITORY_PATH_HINT);
+      }
       if (!form.scmProject.trim()) throw new Error('请填写 SCM 项目路径（如 org/repo）');
 
       let agents: ProjectAgentProfile[];
@@ -352,11 +356,14 @@ export default function ProjectsPage() {
           </label>
           <label style={{ gridColumn: '1 / -1' }}>
             本地路径 *
+            <span className="ui-muted ui-small" style={{ display: 'block', marginBottom: '0.35rem', fontWeight: 'normal' }}>
+              填本机已 clone 的仓库根目录（绝对路径）。勿填 git@… / https://…（那些填在「远程 URL」）。
+            </span>
             <input
               className="ui-input"
               value={form.localPath}
               onChange={(e) => setForm((f) => ({ ...f, localPath: e.target.value }))}
-              placeholder="/path/to/checkout"
+              placeholder="/Users/you/workspace/todolist"
             />
           </label>
           <label>

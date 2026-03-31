@@ -1,4 +1,45 @@
 import { spawn } from 'node:child_process';
+import path from 'node:path';
+
+const PATH_SEP = process.platform === 'win32' ? ';' : ':';
+
+function pathParts(p: string): string[] {
+  return p.split(PATH_SEP).filter(Boolean);
+}
+
+function prependPathDir(env: NodeJS.ProcessEnv, dir: string): void {
+  const parts = pathParts(env.PATH ?? '');
+  if (parts.includes(dir)) return;
+  env.PATH = parts.length ? `${dir}${PATH_SEP}${parts.join(PATH_SEP)}` : dir;
+}
+
+/**
+ * Child env for git. Optional `CTI_GIT_EXECUTABLE` → prepend that file's directory to `PATH`.
+ * On macOS, merge standard dirs at the front (deduped) so subprocesses behave like a login shell.
+ */
+function envForPlatformCli(): NodeJS.ProcessEnv {
+  const env = { ...process.env };
+
+  const gitExe = process.env.CTI_GIT_EXECUTABLE?.trim();
+  if (gitExe && (gitExe.includes('/') || gitExe.includes('\\'))) {
+    prependPathDir(env, path.dirname(path.resolve(gitExe)));
+  }
+
+  if (process.platform === 'darwin') {
+    const std = ['/opt/homebrew/bin', '/usr/local/bin', '/usr/bin', '/bin', '/usr/sbin', '/sbin'];
+    const existing = pathParts(env.PATH ?? '');
+    const seen = new Set<string>();
+    const merged: string[] = [];
+    for (const d of [...std, ...existing]) {
+      if (seen.has(d)) continue;
+      seen.add(d);
+      merged.push(d);
+    }
+    env.PATH = merged.join(':');
+  }
+
+  return env;
+}
 
 export interface CommandResult {
   stdout: string;
@@ -15,7 +56,7 @@ class ShellCommandRunner implements CommandRunner {
     return new Promise<CommandResult>((resolve, reject) => {
       const child = spawn(command, args, {
         cwd,
-        env: process.env,
+        env: envForPlatformCli(),
         stdio: ['ignore', 'pipe', 'pipe'],
       });
 

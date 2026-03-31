@@ -248,6 +248,9 @@ export interface ApprovalResolutionInput {
 /**
  * One row per queue turn toward a target agent: who handed off, who receives,
  * prior agent’s last reply (empty on first assignment), and the prompt sent to the target.
+ *
+ * Rows are inserted when the target run is **about to start** (prompt known); `streamError`
+ * is updated after the stream finishes.
  */
 export interface KanbanAgentTurnRecord {
   id: string;
@@ -256,14 +259,14 @@ export interface KanbanAgentTurnRecord {
   /** Issue id (board / filter). */
   taskId: string;
   createdAt: string;
-  /** Who handed off (lane/role label); empty on first todo → assign kickoff. */
+  /** Who handed off (lane/role label); empty when none (e.g. first assignment from todo). */
   sourceAgent: string;
   /** Who is prompted this turn (lane/role). */
   targetAgent: string;
-  /** Last assistant message before this turn; empty on first assignment. */
+  /** Last assistant message before this turn; empty on first assignment or no prior reply. */
   sourceAgentResponse: string;
   /** Full prompt bundle sent to the target runtime (system + history + user turn). */
   targetAgentPrompt: string;
-  /** Set when the stream failed. */
+  /** Set after the stream ends if the run failed. */
   streamError?: string;
 }

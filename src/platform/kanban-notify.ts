@@ -1,9 +1,31 @@
+import type { Dispatcher } from 'undici';
+import { fetch, ProxyAgent } from 'undici';
+
+import { getKanbanLogger } from './kanban-logger';
 import type { TaskConversationEntry } from './types';
+
+let memoProxyUrl: string | undefined;
+let memoProxyAgent: ProxyAgent | undefined;
+
+function kanbanTelegramDispatcher(): Dispatcher | undefined {
+  const raw = process.env.CTI_KANBAN_TELEGRAM_PROXY?.trim();
+  if (!raw) {
+    memoProxyUrl = undefined;
+    memoProxyAgent = undefined;
+    return undefined;
+  }
+  if (memoProxyUrl !== raw) {
+    memoProxyUrl = raw;
+    memoProxyAgent = new ProxyAgent(raw);
+  }
+  return memoProxyAgent;
+}
 
 /**
  * Outbound Telegram only (`sendMessage`); no getUpdates / long polling.
  * Optional env: `CTI_KANBAN_TELEGRAM_BOT_TOKEN`, `CTI_KANBAN_TELEGRAM_CHAT_ID`,
- * optional `CTI_KANBAN_TELEGRAM_MESSAGE_THREAD_ID` (forum topic).
+ * optional `CTI_KANBAN_TELEGRAM_MESSAGE_THREAD_ID` (forum topic),
+ * optional `CTI_KANBAN_TELEGRAM_PROXY` (HTTP(S) proxy for this send only; omit = direct).
  */
 export async function notifyKanbanTelegram(message: string): Promise<void> {
   const token = process.env.CTI_KANBAN_TELEGRAM_BOT_TOKEN?.trim();
@@ -21,14 +43,19 @@ export async function notifyKanbanTelegram(message: string): Promise<void> {
     body.message_thread_id = Number(thread);
   }
 
+  const dispatcher = kanbanTelegramDispatcher();
   const res = await fetch(url, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify(body),
+    ...(dispatcher ? { dispatcher } : {}),
   });
   if (!res.ok) {
     const t = await res.text();
-    console.warn(`[kanban-notify] Telegram send failed: ${res.status} ${t}`);
+    getKanbanLogger().warn(
+      { httpStatus: res.status, bodyPreview: t.slice(0, 800) },
+      'Kanban Telegram sendMessage failed',
+    );
   }
 }
 

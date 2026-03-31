@@ -11,8 +11,11 @@ import { query } from '@anthropic-ai/claude-agent-sdk';
 import type { SDKMessage, PermissionResult } from '@anthropic-ai/claude-agent-sdk';
 import type { LLMProvider, StreamChatParams, FileAttachment } from './lib/bridge/host';
 import type { PendingPermissions } from './permission-gateway';
+import { getLogger } from './logger';
 
 import { sseEvent } from './sse-utils';
+
+const llmProviderLog = getLogger().child({ scope: 'llm-provider' });
 
 // ── Environment isolation ──
 
@@ -181,10 +184,7 @@ export function coerceProcessEnvToStringRecord(env: NodeJS.ProcessEnv): Record<s
   return out;
 }
 
-// ── Claude CLI preflight check ──
-
-/** Minimum major version of Claude CLI required by the SDK. */
-const MIN_CLI_MAJOR = 2;
+// ── Claude CLI path resolution ──
 
 /**
  * Parse a version string like "2.3.1" or "claude 2.3.1" into a major number.
@@ -194,111 +194,6 @@ export function parseCliMajorVersion(versionOutput: string): number | undefined 
   const m = versionOutput.match(/(\d+)\.\d+/);
   return m ? parseInt(m[1], 10) : undefined;
 }
-
-/**
- * Run `claude --version` at a given path and return the version string.
- * Returns undefined on failure.
- */
-function getCliVersion(cliPath: string, env?: NodeJS.ProcessEnv): string | undefined {
-  try {
-    return execSync(`"${cliPath}" --version`, {
-      encoding: 'utf-8',
-      timeout: 10_000,
-      env: env || buildSubprocessEnv(),
-      stdio: ['pipe', 'pipe', 'pipe'],
-    }).trim();
-  } catch {
-    return undefined;
-  }
-}
-
-/**
- * Flags that the SDK passes to the CLI subprocess.
- * If `claude --help` doesn't mention these, the CLI build is incompatible.
- */
-const REQUIRED_CLI_FLAGS = ['output-format', 'input-format', 'permission-mode', 'setting-sources'];
-
-/**
- * Check `claude --help` for required flags.
- * Returns the list of missing flags (empty = all present).
- */
-function checkRequiredFlags(cliPath: string, env?: NodeJS.ProcessEnv): string[] {
-  let helpText: string;
-  try {
-    helpText = execSync(`"${cliPath}" --help`, {
-      encoding: 'utf-8',
-      timeout: 10_000,
-      env: env || buildSubprocessEnv(),
-      stdio: ['pipe', 'pipe', 'pipe'],
-    });
-  } catch {
-    // Can't run --help; don't block on this — version check is primary
-    return [];
-  }
-  return REQUIRED_CLI_FLAGS.filter(flag => !helpText.includes(flag));
-}
-
-/**
- * Check if a CLI path points to a compatible (>= 2.x) Claude CLI
- * with the required flags for SDK integration.
- * Returns { compatible, version, ... } or undefined if the CLI cannot run at all.
- */
-export function checkCliCompatibility(cliPath: string, env?: NodeJS.ProcessEnv): {
-  compatible: boolean;
-  version: string;
-  major: number | undefined;
-  missingFlags?: string[];
-} | undefined {
-  const version = getCliVersion(cliPath, env);
-  if (!version) return undefined;
-  const major = parseCliMajorVersion(version);
-  if (major === undefined || major < MIN_CLI_MAJOR) {
-    return { compatible: false, version, major };
-  }
-  // Version OK — verify required flags exist
-  const missing = checkRequiredFlags(cliPath, env);
-  return {
-    compatible: missing.length === 0,
-    version,
-    major,
-    missingFlags: missing.length > 0 ? missing : undefined,
-  };
-}
-
-/**
- * Run a lightweight preflight check to verify the claude CLI can start
- * and supports the flags required by the SDK.
- * Returns { ok, version?, error? }.
- */
-export function preflightCheck(
-  cliPath: string,
-  childEnv?: NodeJS.ProcessEnv,
-): { ok: boolean; version?: string; error?: string } {
-  const cleanEnv = childEnv ?? buildSubprocessEnv();
-  const compat = checkCliCompatibility(cliPath, cleanEnv);
-  if (!compat) {
-    return { ok: false, error: `claude CLI at "${cliPath}" failed to execute` };
-  }
-  if (compat.major !== undefined && compat.major < MIN_CLI_MAJOR) {
-    return {
-      ok: false,
-      version: compat.version,
-      error: `claude CLI version ${compat.version} is too old (need >= ${MIN_CLI_MAJOR}.x). ` +
-        `This is likely an npm-installed 1.x CLI. Install the native CLI: https://docs.anthropic.com/en/docs/claude-code`,
-    };
-  }
-  if (compat.missingFlags) {
-    return {
-      ok: false,
-      version: compat.version,
-      error: `claude CLI ${compat.version} is missing required flags: ${compat.missingFlags.join(', ')}. ` +
-        `Update the CLI: npm update -g @anthropic-ai/claude-code`,
-    };
-  }
-  return { ok: true, version: compat.version };
-}
-
-// ── Claude CLI path resolution ──
 
 function isExecutable(p: string): boolean {
   try {
@@ -331,19 +226,16 @@ function findAllInPath(): string[] {
  * Resolve the path to the `claude` CLI executable.
  *
  * Priority:
- *   1. CTI_CLAUDE_CODE_EXECUTABLE env var (explicit override)
- *   2. All `claude` executables in PATH — pick first compatible (>= 2.x)
- *   3. Common install locations — pick first compatible (>= 2.x)
+ *   1. `CTI_CLAUDE_CODE_EXECUTABLE` — explicit path (must be executable)
+ *   2. Every `claude` on `PATH` (Unix: `which -a claude`)
+ *   3. Common install locations — first match wins
  *
- * This multi-candidate approach handles the common scenario where
- * nvm/npm puts an old 1.x claude in PATH before the native 2.x CLI.
+ * No version or `--help` flag checks at startup; incompatible CLIs fail when a message runs.
  */
 export function resolveClaudeCliPath(): string | undefined {
-  // 1. Explicit env var — trust the user
   const fromEnv = process.env.CTI_CLAUDE_CODE_EXECUTABLE;
   if (fromEnv && isExecutable(fromEnv)) return fromEnv;
 
-  // 2. Gather all candidates
   const isWindows = process.platform === 'win32';
   const pathCandidates = findAllInPath();
   const wellKnown = isWindows
@@ -359,7 +251,6 @@ export function resolveClaudeCliPath(): string | undefined {
         `${process.env.HOME}/.npm-global/bin/claude`,
       ];
 
-  // Deduplicate while preserving order
   const seen = new Set<string>();
   const allCandidates: string[] = [];
   for (const p of [...pathCandidates, ...wellKnown]) {
@@ -369,31 +260,10 @@ export function resolveClaudeCliPath(): string | undefined {
     }
   }
 
-  // 3. Pick the first compatible candidate
-  let firstUnverifiable: string | undefined;
   for (const p of allCandidates) {
-    if (!isExecutable(p)) continue;
-
-    const compat = checkCliCompatibility(p);
-    if (compat?.compatible) {
-      if (p !== pathCandidates[0] && pathCandidates.length > 0) {
-        console.log(`[llm-provider] Skipping incompatible CLI at "${pathCandidates[0]}", using "${p}" (${compat.version})`);
-      }
-      return p;
-    }
-    if (compat) {
-      // Version detected but too old — skip it entirely, do NOT fall back
-      console.warn(`[llm-provider] CLI at "${p}" is version ${compat.version} (need >= ${MIN_CLI_MAJOR}.x), skipping`);
-    } else if (!firstUnverifiable) {
-      // Executable exists but --version failed (timeout, crash, etc.)
-      // Keep as last-resort fallback only if NO candidate had a parseable version
-      firstUnverifiable = p;
-    }
+    if (isExecutable(p)) return p;
   }
-
-  // Only fall back to an unverifiable executable — never to a known-old one.
-  // This avoids silently using a 1.x CLI that will crash on first message.
-  return firstUnverifiable;
+  return undefined;
 }
 
 /**
@@ -533,7 +403,7 @@ export class SDKLLMProvider implements LLMProvider {
             // that may linger in session data from a previous Codex runtime.
             let model = params.model;
             if (isNonClaudeModel(model)) {
-              console.warn(`[llm-provider] Ignoring non-Claude model "${model}", using CLI default`);
+              llmProviderLog.warn({ model }, 'Ignoring non-Claude model name, using CLI default');
               model = undefined;
             }
 
@@ -616,20 +486,18 @@ export class SDKLLMProvider implements LLMProvider {
             // with code 1 after stdin closes even though JSON stream already
             // delivered a `result` — not a failed turn. Avoid level-50 noise.
             if (state.hasReceivedResult && isTransportExit) {
-              const stderrNote = stderrBuf.trim()
-                ? ` CLI stderr (tail): ${stderrBuf.trim().slice(-500)}`
-                : '';
-              console.log(
-                `[llm-provider] Claude CLI exited after successful result (non-zero exit is normal teardown here; turn already completed).${stderrNote}`,
+              llmProviderLog.info(
+                { stderrTail: stderrBuf.trim().slice(-500) || undefined },
+                'Claude CLI exited after successful result (non-zero exit is normal teardown; turn already completed)',
               );
               controller.close();
               return;
             }
 
-            console.error('[llm-provider] SDK query error:', err instanceof Error ? err.stack || err.message : err);
-            if (stderrBuf) {
-              console.error('[llm-provider] stderr from CLI:', stderrBuf.trim());
-            }
+            llmProviderLog.error(
+              { err, stderrFromCli: stderrBuf.trim() || undefined },
+              'SDK query error',
+            );
 
             // ── Case 2: Recognised business error in assistant text ──
             // The CLI returned an assistant message with text that matches

@@ -35,6 +35,26 @@ const KANBAN_AGENT_LABELS: Record<KanbanAgentKind, string> = {
 
 const TODO_ASSIGN_AGENTS: KanbanAgentKind[] = ['agent-dev', 'codex-senior'];
 
+function todoAssigneeOptionValue(kind: KanbanAgentKind, memberId: string): string {
+  return `${kind}:${memberId}`;
+}
+
+function parseTodoAssigneeOptionValue(raw: string): { kind: KanbanAgentKind; memberId: string } | null {
+  const i = raw.indexOf(':');
+  if (i <= 0) return null;
+  const kind = raw.slice(0, i) as KanbanAgentKind;
+  const memberId = raw.slice(i + 1);
+  if (!memberId || !TODO_ASSIGN_AGENTS.includes(kind)) return null;
+  return { kind, memberId };
+}
+
+/** 自动从待办领取时：评审打回次数 &gt; 2 用高级开发 lane，否则普通开发（与后端 `resolveKanbanAgent` 一致）。 */
+function inferKanbanAgentForTodoAuto(task: TaskSession): KanbanAgentKind {
+  const c = task.reviewRejectionCount ?? 0;
+  if (c > 2) return 'codex-senior';
+  return 'agent-dev';
+}
+
 type KanbanStatus = {
   projects: Project[];
   tasksByState: Record<TaskWorkflowState, number>;
@@ -61,27 +81,29 @@ export default function BoardPage() {
   const [createTitle, setCreateTitle] = useState('');
   /** 待办领取弹窗：当前选中的任务；null 表示关闭 */
   const [assignModalTask, setAssignModalTask] = useState<TaskSession | null>(null);
-  const [modalAssignAgent, setModalAssignAgent] = useState<KanbanAgentKind>('agent-dev');
   const [modalHandoff, setModalHandoff] = useState('');
   /** Loaded when assign modal opens — project kanbanRoleMembers from API */
   const [laneMembersByKind, setLaneMembersByKind] = useState<
     Partial<Record<KanbanAgentKind, KanbanRoleMember[]>> | null
   >(null);
   const [modalAssignMode, setModalAssignMode] = useState<'auto' | 'manual'>('auto');
-  const [modalAssigneeMemberId, setModalAssigneeMemberId] = useState('');
+  /** `kind:memberId` for manual pick; lane inferred from which roster the person belongs to */
+  const [modalAssigneeOptionValue, setModalAssigneeOptionValue] = useState('');
   const [kanbanStatus, setKanbanStatus] = useState<KanbanStatus | null>(null);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  useEffect(() => {
-    setModalAssigneeMemberId('');
-  }, [modalAssignAgent]);
-
-  const modalLaneRoster = useMemo(
-    () => laneMembersByKind?.[modalAssignAgent] ?? [],
-    [laneMembersByKind, modalAssignAgent],
-  );
+  const modalTodoAssignOptions = useMemo(() => {
+    if (!laneMembersByKind) return [];
+    const out: { kind: KanbanAgentKind; member: KanbanRoleMember }[] = [];
+    for (const kind of TODO_ASSIGN_AGENTS) {
+      for (const member of laneMembersByKind[kind] ?? []) {
+        out.push({ kind, member });
+      }
+    }
+    return out;
+  }, [laneMembersByKind]);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -230,10 +252,9 @@ export default function BoardPage() {
 
   function openAssignModal(task: TaskSession) {
     setAssignModalTask(task);
-    setModalAssignAgent('agent-dev');
     setModalHandoff('');
     setModalAssignMode('auto');
-    setModalAssigneeMemberId('');
+    setModalAssigneeOptionValue('');
     setLaneMembersByKind(null);
     setError(null);
   }
@@ -265,14 +286,27 @@ export default function BoardPage() {
   async function confirmAssignFromTodo() {
     const task = assignModalTask;
     if (!task) return;
-    const roster = laneMembersByKind?.[modalAssignAgent] ?? [];
-    if (modalAssignMode === 'manual' && roster.length > 0 && !modalAssigneeMemberId.trim()) {
-      setError('已选择「指定人员」时请选择一个人员');
+    if (modalAssignMode === 'manual' && modalTodoAssignOptions.length > 0 && !modalAssigneeOptionValue.trim()) {
+      setError('已选择「指定人员」时请选择一个负责人');
       return;
     }
     setBusy(true);
     setError(null);
     try {
+      let kanbanAgent: KanbanAgentKind = inferKanbanAgentForTodoAuto(task);
+      let assigneeMemberId: string | undefined;
+
+      if (modalTodoAssignOptions.length > 0 && modalAssignMode === 'manual') {
+        const parsed = parseTodoAssigneeOptionValue(modalAssigneeOptionValue.trim());
+        if (!parsed) {
+          setError('请选择一个负责人');
+          setBusy(false);
+          return;
+        }
+        kanbanAgent = parsed.kind;
+        assigneeMemberId = parsed.memberId;
+      }
+
       const res = await fetch('/api/workflows/tasks/assign', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -281,12 +315,9 @@ export default function BoardPage() {
           sprintId: task.sprintId,
           issueId: task.issueId,
           taskSessionId: task.id,
-          kanbanAgent: modalAssignAgent,
+          kanbanAgent,
           handoffComment: modalHandoff.trim() || undefined,
-          assigneeMemberId:
-            modalAssignMode === 'manual' && modalAssigneeMemberId.trim()
-              ? modalAssigneeMemberId.trim()
-              : undefined,
+          assigneeMemberId,
           autoAssign: modalAssignMode === 'auto',
         }),
       });
@@ -623,24 +654,11 @@ export default function BoardPage() {
               从待办分配：{assignModalTask.issueId}
             </h2>
             <p className="ui-muted ui-small" style={{ marginBottom: '1rem' }}>
-              选择开发 lane（仅 <code>agent-开发</code> / <code>codex-高级开发</code>）。评审打回 ≥2 次时选 agent-开发也会按 codex-高级开发执行。评审与测试 lane 由后续步骤自动挂载。
+              负责人决定谁来做，并对应其所在开发 lane（<code>agent-开发</code> / <code>codex-高级开发</code>）与
+              runner。<strong>自动分配</strong>时：评审打回次数<strong>大于 2</strong>（第 3 次及以后打回再开发）固定走高级开发 lane，否则走普通开发。
+              评审与测试 lane 由后续步骤自动挂载。
             </p>
-            <label>
-              分给谁（lane）
-              <select
-                className="ui-input"
-                style={{ width: '100%', marginTop: 4 }}
-                value={modalAssignAgent}
-                onChange={(e) => setModalAssignAgent(e.target.value as KanbanAgentKind)}
-              >
-                {TODO_ASSIGN_AGENTS.map((k) => (
-                  <option key={k} value={k}>
-                    {KANBAN_AGENT_LABELS[k]}
-                  </option>
-                ))}
-              </select>
-            </label>
-            {modalLaneRoster.length > 0 ? (
+            {modalTodoAssignOptions.length > 0 ? (
               <div style={{ marginTop: '0.75rem' }}>
                 <p className="ui-muted ui-small" style={{ marginBottom: '0.35rem' }}>
                   分配方式（已配置多名人员时）
@@ -652,7 +670,7 @@ export default function BoardPage() {
                     checked={modalAssignMode === 'auto'}
                     onChange={() => setModalAssignMode('auto')}
                   />
-                  自动（历史上该任务该 lane 给谁则继续给谁；否则给当前负载最少的人）
+                  自动（按对应 lane：历史上该任务该 lane 给谁则继续给谁；否则给当前负载最少的人）
                 </label>
                 <label style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
                   <input
@@ -661,19 +679,19 @@ export default function BoardPage() {
                     checked={modalAssignMode === 'manual'}
                     onChange={() => setModalAssignMode('manual')}
                   />
-                  指定人员
+                  指定负责人
                 </label>
                 {modalAssignMode === 'manual' ? (
                   <select
                     className="ui-input"
                     style={{ width: '100%', marginTop: '0.5rem' }}
-                    value={modalAssigneeMemberId}
-                    onChange={(e) => setModalAssigneeMemberId(e.target.value)}
+                    value={modalAssigneeOptionValue}
+                    onChange={(e) => setModalAssigneeOptionValue(e.target.value)}
                   >
-                    <option value="">选择人员</option>
-                    {modalLaneRoster.map((m) => (
-                      <option key={m.id} value={m.id}>
-                        {(m.name || m.id).trim()} ({m.id})
+                    <option value="">选择负责人</option>
+                    {modalTodoAssignOptions.map(({ kind, member }) => (
+                      <option key={`${kind}:${member.id}`} value={todoAssigneeOptionValue(kind, member.id)}>
+                        {(member.name || member.id).trim()} · {KANBAN_AGENT_LABELS[kind]}
                       </option>
                     ))}
                   </select>
@@ -681,7 +699,7 @@ export default function BoardPage() {
               </div>
             ) : laneMembersByKind !== null ? (
               <p className="ui-muted ui-small" style={{ marginTop: '0.75rem' }}>
-                该项目该 lane 未配置多人员；将按默认 runner / 会话值自动分配。可在「角色与 Runner」页添加人员。
+                该项目未在「角色与 Runner」配置负责人列表；将使用默认开发 lane（agent-开发）与默认 runner。
               </p>
             ) : (
               <p className="ui-muted ui-small" style={{ marginTop: '0.75rem' }}>

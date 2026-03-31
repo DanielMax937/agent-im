@@ -1,12 +1,6 @@
 import type { Config, RunnerConfig } from './config';
 import type { LLMProvider } from './lib/bridge/host';
-import {
-  SDKLLMProvider,
-  mergeRunnerSubprocessEnv,
-  preflightCheck,
-  resolveClaudeCliPathFromRunner,
-  buildSubprocessEnvForRuntime,
-} from './llm-provider';
+import { SDKLLMProvider, resolveClaudeCliPathFromRunner } from './llm-provider';
 import { PendingPermissions } from './permission-gateway';
 
 export interface ResolveProviderOptions {
@@ -77,23 +71,6 @@ export async function resolveProvider({
     );
   }
 
-  const claudeChildEnv = mergeRunnerSubprocessEnv(
-    buildSubprocessEnvForRuntime({
-      runtime: 'claude',
-      useLogin: runner?.claudeUseLogin === true,
-    }),
-    runner,
-  );
-
-  const check = preflightCheck(cliPath, claudeChildEnv);
-  if (!check.ok) {
-    throw new Error(
-      `Claude CLI preflight check failed for ${cliPath}: ${check.error}. ` +
-        'Install Claude Code CLI >= 2.x, or set CTI_CLAUDE_CODE_EXECUTABLE.',
-    );
-  }
-
-  console.log(`[claude-to-im] CLI preflight OK: ${cliPath} (${check.version})`);
   return new SDKLLMProvider(
     pendingPermissions,
     cliPath,

@@ -138,6 +138,8 @@ Properties:
 - `console.log / warn / error` forwarding into Pino
 - shared logger for daemon and Next.js server
 
+For **where files live**, **`CTI_HOME`**, **`bridge.log` vs `bridge-daemon.log`**, shell **`tail`**, **`grep` / `jq`**, and the **`/api/bridge/logs`** endpoint, see **[docs/LOGS.md](docs/LOGS.md)**.
+
 ## Platform APIs
 
 ### Query APIs

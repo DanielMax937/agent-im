@@ -51,7 +51,7 @@ echo ""
 
 # --- Claude CLI available (claude/auto modes) ---
 if [ "$CTI_RUNTIME" = "claude" ] || [ "$CTI_RUNTIME" = "auto" ]; then
-  # Resolve CLI path matching the daemon's checkCliCompatibility logic:
+  # Stricter than runtime: verify version >= 2.x and required SDK flags (daemon only checks executable exists):
   #   - Version >= 2.x AND all required flags present
   #   - Skip candidates that fail either check (same as resolveClaudeCliPath)
   CLAUDE_PATH=""

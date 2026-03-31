@@ -2,6 +2,7 @@ import crypto from 'node:crypto';
 import path from 'node:path';
 
 import { CompensationService } from './compensation-service';
+import { getKanbanLogger } from './kanban-logger';
 import { resolveKanbanAgent } from './kanban-agents';
 import { parseKanbanAction } from './kanban-workflow-parser';
 import { notifyKanbanTelegram } from './kanban-notify';
@@ -9,6 +10,7 @@ import { notifyWorkflowStateTransition } from './kanban-transition-notify';
 import { mergeKanbanAssignee, resolveKanbanAssignment } from './kanban-role-assign';
 import { createApprovalQueueKey, createTaskQueueKey, JsonPlatformStore } from './json-platform-store';
 import { GitService } from './git-service';
+import { assertValidLocalRepositoryPath } from './repository-path';
 import { InstanceManager } from './instance-manager';
 import type { PullRequestRef, ScmClient } from './scm-client';
 import type {
@@ -39,6 +41,28 @@ const ALLOWED_TRANSITIONS: Record<TaskWorkflowState, TaskWorkflowState[]> = {
 
 function now(): string {
   return new Date().toISOString();
+}
+
+function roleForActiveWorkflowState(state: TaskWorkflowState): AgentRole | null {
+  switch (state) {
+    case 'in_progress':
+      return 'developer';
+    case 'review':
+      return 'reviewer';
+    case 'testing':
+    case 'regression_testing':
+      return 'tester';
+    default:
+      return null;
+  }
+}
+
+function lastAssistantContentForRole(task: TaskSession, role: AgentRole): string | undefined {
+  const entries = task.conversationHistory.filter(
+    (e) => e.role === 'assistant' && e.source === role,
+  );
+  if (entries.length === 0) return undefined;
+  return entries[entries.length - 1]!.content;
 }
 
 function slugify(value: string): string {
@@ -194,8 +218,13 @@ export class WorkflowService {
     return this.deps.store.listTaskSessions(projectId);
   }
 
+  private assertProjectLocalRepositoryPath(project: Project): void {
+    assertValidLocalRepositoryPath(project.repository.localPath);
+  }
+
   async startSprint(input: StartSprintInput): Promise<Sprint> {
     const project = this.requireProject(input.projectId);
+    this.assertProjectLocalRepositoryPath(project);
     const sprintBranchName = `${project.repository.sprintBranchPrefix}${slugify(input.sprintName)}`;
     await this.deps.gitService.createSprintBranch({
       repoPath: project.repository.localPath,
@@ -285,6 +314,7 @@ export class WorkflowService {
     }
 
     const project = this.requireProject(input.projectId);
+    this.assertProjectLocalRepositoryPath(project);
     const sprint = this.requireSprint(input.sprintId);
     const role = input.role ?? 'developer';
     if (role !== 'developer') {
@@ -396,6 +426,7 @@ export class WorkflowService {
     }
 
     const project = this.requireProject(taskSession.projectId);
+    this.assertProjectLocalRepositoryPath(project);
     const sprint = this.requireSprint(taskSession.sprintId);
     const kind: KanbanAgentKind = input.kanbanAgent ?? 'agent-dev';
     if (kind !== 'agent-dev' && kind !== 'codex-senior') {
@@ -538,6 +569,7 @@ export class WorkflowService {
     await this.stopInstancesForTask(taskSession.id, input.deferStopInstanceId);
 
     const project = this.requireProject(taskSession.projectId);
+    this.assertProjectLocalRepositoryPath(project);
     const sprint = this.requireSprint(taskSession.sprintId);
     const repoPath = taskSession.worktreePath ?? project.repository.localPath;
 
@@ -652,6 +684,7 @@ export class WorkflowService {
     await this.stopInstancesForTask(taskSession.id, deferStopInstanceId);
 
     const project = this.requireProject(taskSession.projectId);
+    this.assertProjectLocalRepositoryPath(project);
     const repoPath = project.repository.localPath;
     const base = project.repository.baseBranch;
     const remoteRef = `origin/${base}`;
@@ -717,6 +750,7 @@ export class WorkflowService {
     }
 
     const project = this.requireProject(taskSession.projectId);
+    this.assertProjectLocalRepositoryPath(project);
     const repoPath = project.repository.localPath;
     const base = project.repository.baseBranch;
     const remoteRef = `origin/${base}`;
@@ -773,8 +807,9 @@ export class WorkflowService {
       actionLabel: '标记完成',
     });
 
+    const { kanbanAssignees: _omitAssignees, ...taskRest } = taskSession;
     const updatedTaskSession = this.deps.store.upsertTaskSession({
-      ...taskSession,
+      ...taskRest,
       workflowState: 'closed',
     });
 
@@ -792,6 +827,61 @@ export class WorkflowService {
     this.requireTaskSession(taskSessionId);
     await this.stopInstancesForTask(taskSessionId);
     this.deps.store.removeTaskSession(taskSessionId);
+  }
+
+  /**
+   * After process restart: close tasks where regression tester already emitted `KANBAN_ACTION:CLOSE`
+   * but the workflow did not run; ensure an agent instance exists for every non-todo/non-closed task;
+   * if the task queue is empty, enqueue a resume or kickoff so runners continue. Ends with
+   * `instanceManager.reconcile()`.
+   */
+  async resumeKanbanAfterRestart(): Promise<void> {
+    const tasks = this.deps.store.listTaskSessions();
+    for (const task of tasks) {
+      if (task.workflowState === 'todo' || task.workflowState === 'closed') continue;
+
+      if (task.workflowState === 'regression_testing') {
+        const last = lastAssistantContentForRole(task, 'tester');
+        if (last) {
+          const parsed = parseKanbanAction(last);
+          if (parsed?.action === 'CLOSE') {
+            try {
+              await this.closeTask(task.id);
+            } catch (e) {
+              getKanbanLogger().warn({ err: e, taskId: task.id }, 'resumeKanbanAfterRestart: closeTask failed');
+            }
+            continue;
+          }
+        }
+      }
+
+      const role = roleForActiveWorkflowState(task.workflowState);
+      if (!role) continue;
+
+      let inst = this.deps.store.findAgentInstance(task.id, role);
+      if (!inst) {
+        await this.deps.instanceManager.upsertAndStart(this.buildAgentInstance(task, role));
+      } else if (inst.status === 'stopped' || inst.status === 'error') {
+        this.deps.store.upsertAgentInstance({
+          ...inst,
+          status: 'starting',
+          lastError: undefined,
+          updatedAt: now(),
+        });
+      }
+
+      const t = this.requireTaskSession(task.id);
+      const q = this.deps.store.peekTaskQueue(t.messageQueueKey);
+      if (q.length === 0) {
+        if (t.conversationHistory.length > 0) {
+          this.enqueueResumeAfterRestartPrompt(t);
+        } else {
+          this.enqueueKickoffPrompt(t);
+        }
+      }
+    }
+
+    await this.deps.instanceManager.reconcile();
   }
 
   async handleTestFailure(payload: TaskFailurePayload): Promise<TaskSession> {
@@ -890,6 +980,20 @@ export class WorkflowService {
       content: [
         `Begin work on task ${taskSession.issueId}: ${taskSession.title}.`,
         'Follow your role-specific instructions and the task context in this conversation.',
+      ].join(' '),
+    });
+  }
+
+  /** Nudge runner after platform restart when the queue was drained at shutdown. */
+  private enqueueResumeAfterRestartPrompt(taskSession: TaskSession): void {
+    this.deps.store.enqueueTaskMessage({
+      queueKey: taskSession.messageQueueKey,
+      taskSessionId: taskSession.id,
+      taskId: taskSession.taskId,
+      type: 'directive',
+      content: [
+        'The Kanban platform restarted while this task was active.',
+        'Continue from the current conversation; do not redo work already recorded.',
       ].join(' '),
     });
   }

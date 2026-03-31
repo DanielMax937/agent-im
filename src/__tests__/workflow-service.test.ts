@@ -265,6 +265,33 @@ describe('WorkflowService', () => {
     assert.ok(!sp.taskIds.includes(task.id));
   });
 
+  it('resumeKanbanAfterRestart closes regression task when tester last reply contains CLOSE', async () => {
+    const { workflowService, project, store } = createHarness();
+    const sprint = createSprint(store, project.id);
+    const iso = new Date().toISOString();
+    const taskSession = createTaskSession(store, project.id, sprint.id, {
+      workflowState: 'regression_testing',
+      role: 'tester',
+      kanbanAgent: 'copilot-test',
+      kanbanAssignees: { 'copilot-test': 'm1' },
+      conversationHistory: [
+        {
+          id: 'e1',
+          role: 'assistant',
+          source: 'tester',
+          content: 'Regression passed.\nKANBAN_ACTION:CLOSE',
+          createdAt: iso,
+        },
+      ],
+    });
+
+    await workflowService.resumeKanbanAfterRestart();
+
+    const t = store.getTaskSession(taskSession.id);
+    assert.equal(t?.workflowState, 'closed');
+    assert.equal(t?.kanbanAssignees, undefined);
+  });
+
   it('deleteTask stops every agent instance for the task (same stop path as closeTask)', async () => {
     const { workflowService, project, store, instanceManager } = createHarness();
     const sprint = createSprint(store, project.id);
@@ -312,7 +339,7 @@ describe('WorkflowService', () => {
     assert.equal(instanceManager.started.length, 0);
   });
 
-  it('escalates to codex-senior from todo when reviewRejectionCount >= 2 even if lane is agent-dev', async () => {
+  it('escalates to codex-senior from todo when reviewRejectionCount > 2 even if lane is agent-dev', async () => {
     const { workflowService, project, store, instanceManager } = createHarness();
     const sprint = createSprint(store, project.id);
     const created = await workflowService.createTask({
@@ -322,7 +349,7 @@ describe('WorkflowService', () => {
       title: 'Escalate me',
     });
     const s = store.getTaskSession(created.id)!;
-    store.upsertTaskSession({ ...s, reviewRejectionCount: 2 });
+    store.upsertTaskSession({ ...s, reviewRejectionCount: 3 });
     const assigned = await workflowService.assignTask({
       projectId: project.id,
       sprintId: sprint.id,
@@ -334,6 +361,31 @@ describe('WorkflowService', () => {
     });
     assert.equal(assigned.kanbanAgent, 'codex-senior');
     assert.equal(assigned.runtime, 'codex');
+    assert.ok(instanceManager.started.some((x) => x.startsWith('developer:')));
+  });
+
+  it('keeps agent-dev when reviewRejectionCount is 2 (escalation only after > 2)', async () => {
+    const { workflowService, project, store, instanceManager } = createHarness();
+    const sprint = createSprint(store, project.id);
+    const created = await workflowService.createTask({
+      projectId: project.id,
+      sprintId: sprint.id,
+      issueId: 'ISSUE-NO-ESC',
+      title: 'Two rejects',
+    });
+    const s = store.getTaskSession(created.id)!;
+    store.upsertTaskSession({ ...s, reviewRejectionCount: 2 });
+    const assigned = await workflowService.assignTask({
+      projectId: project.id,
+      sprintId: sprint.id,
+      issueId: 'ISSUE-NO-ESC',
+      title: '',
+      taskSessionId: created.id,
+      kanbanAgent: 'agent-dev',
+      handoffComment: 'round 3 dev',
+    });
+    assert.equal(assigned.kanbanAgent, 'agent-dev');
+    assert.equal(assigned.runtime, 'claude');
     assert.ok(instanceManager.started.some((x) => x.startsWith('developer:')));
   });
 

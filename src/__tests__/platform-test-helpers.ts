@@ -1,16 +1,14 @@
 import assert from 'node:assert/strict';
 import type { Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
-import path from 'node:path';
 
-import { getCtiHome } from '../config';
-import { JsonPlatformStore } from '../platform/json-platform-store';
+import { JsonPlatformStore, platformDataDir } from '../platform/json-platform-store';
 import type { GitService } from '../platform/git-service';
 import type { InstanceManager } from '../platform/instance-manager';
 import type { PullRequestRef, ScmClient } from '../platform/scm-client';
 import type { AgentInstanceRecord, PendingApprovalRecord, Project, Sprint, TaskSession } from '../platform/types';
 
-export const PLATFORM_DIR = path.join(getCtiHome(), 'data', 'platform');
+export const PLATFORM_DIR = platformDataDir();
 
 /** Isolated store for tests (avoids SQLite file locks vs `rmSync` on the default `platform.db`). */
 export function createTestJsonPlatformStore(): JsonPlatformStore {

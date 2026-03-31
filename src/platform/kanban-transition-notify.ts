@@ -10,7 +10,8 @@ const ROLE_CN: Record<AgentRole, string> = {
 /**
  * Uses the **last assistant** line from this role as the handoff summary (proxy for “agent 总结”).
  * Configure Telegram with `CTI_KANBAN_TELEGRAM_BOT_TOKEN` + `CTI_KANBAN_TELEGRAM_CHAT_ID`
- * (optional `CTI_KANBAN_TELEGRAM_MESSAGE_THREAD_ID` for forum topics). No polling / getUpdates.
+ * (optional `CTI_KANBAN_TELEGRAM_MESSAGE_THREAD_ID` for forum topics,
+ * optional `CTI_KANBAN_TELEGRAM_PROXY` for outbound HTTP). No polling / getUpdates.
  */
 export function buildOutgoingAgentSummaryFromConversation(
   taskSession: TaskSession,

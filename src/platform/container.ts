@@ -84,7 +84,7 @@ async function createPlatformContainer(): Promise<PlatformContainer> {
     compensationService: new CompensationService(store, instanceManager),
   });
 
-  await instanceManager.reconcile();
+  await workflowService.resumeKanbanAfterRestart();
   logger.info('Initialized Next.js platform container');
 
   return {

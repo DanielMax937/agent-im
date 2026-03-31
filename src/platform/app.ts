@@ -100,6 +100,7 @@ export interface PlatformStoreApi {
     offset?: number;
   }): { rows: KanbanAgentTurnRecord[]; total: number };
   getKanbanAgentTurn(id: string): KanbanAgentTurnRecord | null;
+  updateKanbanAgentTurnStreamError(id: string, streamError: string | null): void;
 }
 
 export interface WorkflowServiceApi {

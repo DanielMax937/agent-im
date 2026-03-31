@@ -59,8 +59,8 @@ export default function KanbanMonitorPage() {
         <p className="eyebrow">运维</p>
         <h1>Kanban 监控 — Agent 调用记录</h1>
         <p className="lead ui-muted">
-          按项目与 <code>taskId</code>（Issue）筛选。每行表示一次对<strong>目标 Agent</strong>的调用：来源 Agent、其上一轮回复（初次分配为空）、以及发给目标的完整
-          prompt。数据表 <code>kanban_agent_turns</code>。
+          按项目与 <code>taskId</code>（Issue）筛选。每行在<strong>目标 Agent 即将执行</strong>时写入（含完整 prompt）；流式结束后若失败会更新
+          <code>stream_error</code>。初次分配时 source / 上一轮回复为空，target 与 prompt 仍有值。数据表 <code>kanban_agent_turns</code>。
         </p>
         <nav className="ui-nav">
           <a href="/">首页</a>

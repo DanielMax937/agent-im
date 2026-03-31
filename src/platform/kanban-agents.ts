@@ -33,13 +33,13 @@ const SKILL_PRESETS: Record<KanbanAgentKind, string[]> = {
 
 /**
  * Maps UI agent lane → platform role/runtime. Escalation to Codex is handled in WorkflowService
- * when `reviewRejectionCount >= 2` for developer assignments.
+ * when `reviewRejectionCount > 2` (i.e. third reject from review onward) for developer assignments.
  */
 export function resolveKanbanAgent(
   kind: KanbanAgentKind,
   reviewRejectionCount = 0,
 ): KanbanAgentResolution {
-  if (kind === 'agent-dev' && reviewRejectionCount >= 2) {
+  if (kind === 'agent-dev' && reviewRejectionCount > 2) {
     return {
       role: 'developer',
       runtime: 'codex',

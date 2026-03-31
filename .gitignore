@@ -6,3 +6,6 @@ dist/
 .env*.local
 config.env
 .next/
+
+# Kanban platform SQLite + migrated JSON (default: ./data/platform/)
+data/platform/

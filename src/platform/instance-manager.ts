@@ -12,7 +12,7 @@ import {
 import { JsonPlatformStore } from './json-platform-store';
 import { notifyKanbanTelegram } from './kanban-notify';
 import { buildRolePrompt } from './prompts';
-import { consumeAgentStream } from './stream-consumer';
+import { consumeAgentStream, type StreamConsumeResult } from './stream-consumer';
 import type { AgentInstanceRecord, AgentRole, TaskConversationEntry, TaskQueueMessage } from './types';
 
 function delay(ms: number): Promise<void> {
@@ -160,40 +160,68 @@ class TaskAgentRunner implements ManagedRunner {
       )
       .map((entry) => ({ role: entry.role, content: entry.content }));
 
-    const stream = this.provider!.streamChat({
-      prompt,
-      sessionId: currentTaskSession.sessionId,
-      sdkSessionId: currentTaskSession.providerSessionId,
+    const targetAgentPrompt = formatKanbanAgentFullPrompt({
       systemPrompt,
-      workingDirectory: instance.workingDirectory,
       conversationHistory,
+      userPrompt: prompt,
+    });
+    const targetAgent = formatKanbanTurnAgentLabel(currentTaskSession.kanbanAgent, instance.role);
+    const turnId = crypto.randomUUID();
+    const turnCreatedAt = new Date().toISOString();
+
+    this.store.insertKanbanAgentTurn({
+      id: turnId,
+      projectId: taskSession.projectId,
+      taskSessionId: taskSession.id,
+      taskId: taskSession.issueId,
+      createdAt: turnCreatedAt,
+      sourceAgent,
+      targetAgent,
+      sourceAgentResponse,
+      targetAgentPrompt,
     });
 
-    const result = await consumeAgentStream(stream, {
-      onPermissionRequest: async (permission) => {
-        this.store.savePendingApproval({
-          id: permission.permissionRequestId,
-          instanceId: instance.id,
-          taskId: currentTaskSession.taskId,
-          taskSessionId: currentTaskSession.id,
-          toolName: permission.toolName,
-          toolInput: permission.toolInput,
-          queueKey: currentTaskSession.approvalQueueKey,
-          status: 'pending',
-          createdAt: new Date().toISOString(),
-        });
+    let result: StreamConsumeResult;
+    try {
+      const stream = this.provider!.streamChat({
+        prompt,
+        sessionId: currentTaskSession.sessionId,
+        sdkSessionId: currentTaskSession.providerSessionId,
+        systemPrompt,
+        workingDirectory: instance.workingDirectory,
+        conversationHistory,
+      });
 
-        notifyKanbanSideChannel(
-          currentTaskSession.issueId,
-          [
-            `Approval required for ${permission.toolName}.`,
-            `Approval ID: ${permission.permissionRequestId}`,
-            `Tool input: ${permission.toolInput}`,
-            `Approve via POST ${this.getApprovalUrl(permission.permissionRequestId)}`,
-          ].join('\n'),
-        );
-      },
-    });
+      result = await consumeAgentStream(stream, {
+        onPermissionRequest: async (permission) => {
+          this.store.savePendingApproval({
+            id: permission.permissionRequestId,
+            instanceId: instance.id,
+            taskId: currentTaskSession.taskId,
+            taskSessionId: currentTaskSession.id,
+            toolName: permission.toolName,
+            toolInput: permission.toolInput,
+            queueKey: currentTaskSession.approvalQueueKey,
+            status: 'pending',
+            createdAt: new Date().toISOString(),
+          });
+
+          notifyKanbanSideChannel(
+            currentTaskSession.issueId,
+            [
+              `Approval required for ${permission.toolName}.`,
+              `Approval ID: ${permission.permissionRequestId}`,
+              `Tool input: ${permission.toolInput}`,
+              `Approve via POST ${this.getApprovalUrl(permission.permissionRequestId)}`,
+            ].join('\n'),
+          );
+        },
+      });
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      this.store.updateKanbanAgentTurnStreamError(turnId, msg);
+      throw e;
+    }
 
     const nextTaskSession = this.requireTaskSession(instance.taskSessionId);
     this.store.upsertTaskSession({
@@ -202,26 +230,10 @@ class TaskAgentRunner implements ManagedRunner {
       lastError: result.hasError ? result.errorMessage : undefined,
     });
 
-    const targetAgentPrompt = formatKanbanAgentFullPrompt({
-      systemPrompt,
-      conversationHistory,
-      userPrompt: prompt,
-    });
-
-    const targetAgent = formatKanbanTurnAgentLabel(nextTaskSession.kanbanAgent, instance.role);
-
-    this.store.insertKanbanAgentTurn({
-      id: crypto.randomUUID(),
-      projectId: taskSession.projectId,
-      taskSessionId: taskSession.id,
-      taskId: taskSession.issueId,
-      createdAt: new Date().toISOString(),
-      sourceAgent,
-      targetAgent,
-      sourceAgentResponse,
-      targetAgentPrompt,
-      streamError: result.hasError ? result.errorMessage : undefined,
-    });
+    this.store.updateKanbanAgentTurnStreamError(
+      turnId,
+      result.hasError ? (result.errorMessage.trim() ? result.errorMessage : 'Unknown runtime error') : null,
+    );
 
     if (result.hasError) {
       notifyKanbanSideChannel(currentTaskSession.issueId, `Runtime error: ${result.errorMessage}`);

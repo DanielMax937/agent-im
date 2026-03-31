@@ -195,6 +195,8 @@ bash ~/code/Claude-to-IM-skill/scripts/install-codex.sh --link
     └── status.json         ← 当前状态
 ```
 
+**如何查看日志文件**（`CTI_HOME` 解析、`bridge.log` 与 `bridge-daemon.log`、命令行 `tail`/`grep`、`/api/bridge/logs`）：见 **[docs/LOGS.md](docs/LOGS.md)**。
+
 ### 核心组件
 
 | 组件 | 职责 |

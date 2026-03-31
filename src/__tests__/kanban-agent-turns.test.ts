@@ -38,6 +38,27 @@ describe('kanban_agent_turns', () => {
     const missing = store.getKanbanAgentTurn('nope');
     assert.equal(missing, null);
   });
+
+  it('updates stream_error after insert', () => {
+    const store = createTestJsonPlatformStore();
+    store.insertKanbanAgentTurn({
+      id: 'turn-2',
+      projectId: 'p1',
+      taskSessionId: 'ts1',
+      taskId: 'DEMO-1',
+      createdAt: '2026-01-01T00:00:00.000Z',
+      sourceAgent: '',
+      targetAgent: 'agent-dev/developer',
+      sourceAgentResponse: '',
+      targetAgentPrompt: 'prompt',
+    });
+    store.updateKanbanAgentTurnStreamError('turn-2', 'boom');
+    const row = store.getKanbanAgentTurn('turn-2');
+    assert.equal(row?.streamError, 'boom');
+    store.updateKanbanAgentTurnStreamError('turn-2', null);
+    const cleared = store.getKanbanAgentTurn('turn-2');
+    assert.equal(cleared?.streamError, undefined);
+  });
 });
 
 describe('resolveKanbanTurnSource', () => {
