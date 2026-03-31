@@ -2,10 +2,14 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 
+import Database from 'better-sqlite3';
+
 import { getCtiHome } from '../config';
 import { scheduleConversationEntryTelegram } from './kanban-notify';
+import { allocateNextIssueId, resolveIssueIdPrefix } from './issue-id';
 import type {
   AgentInstanceRecord,
+  KanbanAgentTurnRecord,
   PendingApprovalRecord,
   Project,
   Sprint,
@@ -14,8 +18,13 @@ import type {
   TaskSession,
 } from './types';
 
-function platformDir(): string {
+/** Directory for platform DB and legacy JSON migration (`$CTI_HOME/data/platform`). */
+export function platformDataDir(): string {
   return path.join(getCtiHome(), 'data', 'platform');
+}
+
+function defaultDbPath(): string {
+  return path.join(platformDataDir(), 'platform.db');
 }
 
 function ensureDir(dirPath: string): void {
@@ -30,13 +39,6 @@ function readJson<T>(filePath: string, fallback: T): T {
   }
 }
 
-function writeJson(filePath: string, value: unknown): void {
-  ensureDir(path.dirname(filePath));
-  const tempPath = `${filePath}.tmp`;
-  fs.writeFileSync(tempPath, JSON.stringify(value, null, 2), 'utf-8');
-  fs.renameSync(tempPath, filePath);
-}
-
 function now(): string {
   return new Date().toISOString();
 }
@@ -49,7 +51,19 @@ export function createApprovalQueueKey(taskId: string): string {
   return createTaskQueueKey(taskId, 'approvals');
 }
 
+export type JsonPlatformStoreOptions = {
+  /** Defaults to `$CTI_HOME/data/platform/platform.db`. Use `:memory:` for isolated tests. */
+  dbPath?: string;
+};
+
+/**
+ * Platform persistence (projects, sprints, tasks, instances, queues, approvals) in SQLite.
+ * Legacy `*.json` files in the same directory are imported once when the DB is empty, then renamed to `*.migrated.bak`.
+ */
 export class JsonPlatformStore {
+  private readonly db: Database.Database;
+  private readonly baseDir: string;
+
   private projects = new Map<string, Project>();
   private sprints = new Map<string, Sprint>();
   private taskSessions = new Map<string, TaskSession>();
@@ -57,49 +71,289 @@ export class JsonPlatformStore {
   private queues = new Map<string, TaskQueueMessage[]>();
   private approvals = new Map<string, PendingApprovalRecord>();
 
-  constructor(private readonly baseDir = platformDir()) {
+  constructor(options?: JsonPlatformStoreOptions) {
+    const dbPath = options?.dbPath ?? defaultDbPath();
+    this.baseDir = platformDataDir();
     ensureDir(this.baseDir);
-    this.load();
+    if (dbPath !== ':memory:') {
+      ensureDir(path.dirname(dbPath));
+    }
+    this.db = new Database(dbPath);
+    this.db.pragma('journal_mode = WAL');
+    this.db.pragma('foreign_keys = ON');
+    this.initSchema();
+    this.migrateKanbanAgentTurnsIfLegacy();
+    this.migrateFromJsonIfNeeded();
+    this.loadFromDb();
   }
 
-  private load(): void {
-    const projects = readJson<Project[]>(path.join(this.baseDir, 'projects.json'), []);
-    const sprints = readJson<Sprint[]>(path.join(this.baseDir, 'sprints.json'), []);
-    const taskSessions = readJson<TaskSession[]>(path.join(this.baseDir, 'task_sessions.json'), []);
-    const agentInstances = readJson<AgentInstanceRecord[]>(path.join(this.baseDir, 'agent_instances.json'), []);
-    const queueEntries = readJson<Array<[string, TaskQueueMessage[]]>>(path.join(this.baseDir, 'queues.json'), []);
-    const approvals = readJson<PendingApprovalRecord[]>(path.join(this.baseDir, 'approvals.json'), []);
+  /** Replace pre-schema-rename `kanban_agent_turns` (e.g. `full_prompt`) with the handoff-oriented columns. */
+  private migrateKanbanAgentTurnsIfLegacy(): void {
+    const exists = this.db
+      .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='kanban_agent_turns'")
+      .get() as { name: string } | undefined;
+    if (!exists) return;
+    const cols = this.db.prepare('PRAGMA table_info(kanban_agent_turns)').all() as { name: string }[];
+    const hasNew = cols.some((c) => c.name === 'target_agent_prompt');
+    if (hasNew) return;
+    this.db.exec(`
+      DROP TABLE IF EXISTS kanban_agent_turns;
+      CREATE TABLE kanban_agent_turns (
+        id TEXT PRIMARY KEY NOT NULL,
+        project_id TEXT NOT NULL,
+        task_session_id TEXT NOT NULL,
+        task_id TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        source_agent TEXT NOT NULL DEFAULT '',
+        target_agent TEXT NOT NULL,
+        source_agent_response TEXT NOT NULL DEFAULT '',
+        target_agent_prompt TEXT NOT NULL,
+        stream_error TEXT
+      );
+      CREATE INDEX IF NOT EXISTS idx_kanban_turns_project ON kanban_agent_turns(project_id);
+      CREATE INDEX IF NOT EXISTS idx_kanban_turns_project_task ON kanban_agent_turns(project_id, task_id);
+      CREATE INDEX IF NOT EXISTS idx_kanban_turns_session ON kanban_agent_turns(task_session_id);
+      CREATE INDEX IF NOT EXISTS idx_kanban_turns_created ON kanban_agent_turns(created_at);
+    `);
+  }
 
-    for (const item of projects) this.projects.set(item.id, item);
-    for (const item of sprints) this.sprints.set(item.id, item);
-    for (const item of taskSessions) this.taskSessions.set(item.id, item);
-    for (const item of agentInstances) this.agentInstances.set(item.id, item);
-    for (const [queueKey, messages] of queueEntries) this.queues.set(queueKey, messages);
-    for (const item of approvals) this.approvals.set(item.id, item);
+  private initSchema(): void {
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS projects (
+        id TEXT PRIMARY KEY NOT NULL,
+        payload TEXT NOT NULL
+      );
+
+      CREATE TABLE IF NOT EXISTS sprints (
+        id TEXT PRIMARY KEY NOT NULL,
+        project_id TEXT NOT NULL,
+        payload TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_sprints_project_id ON sprints(project_id);
+
+      CREATE TABLE IF NOT EXISTS task_sessions (
+        id TEXT PRIMARY KEY NOT NULL,
+        project_id TEXT NOT NULL,
+        payload TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_task_sessions_project_id ON task_sessions(project_id);
+
+      CREATE TABLE IF NOT EXISTS agent_instances (
+        id TEXT PRIMARY KEY NOT NULL,
+        task_session_id TEXT NOT NULL,
+        payload TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_agent_instances_task_session ON agent_instances(task_session_id);
+
+      CREATE TABLE IF NOT EXISTS queues (
+        queue_key TEXT PRIMARY KEY NOT NULL,
+        payload TEXT NOT NULL
+      );
+
+      CREATE TABLE IF NOT EXISTS approvals (
+        id TEXT PRIMARY KEY NOT NULL,
+        task_session_id TEXT NOT NULL,
+        status TEXT NOT NULL,
+        payload TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_approvals_task_session ON approvals(task_session_id);
+      CREATE INDEX IF NOT EXISTS idx_approvals_status ON approvals(status);
+
+      CREATE TABLE IF NOT EXISTS kanban_agent_turns (
+        id TEXT PRIMARY KEY NOT NULL,
+        project_id TEXT NOT NULL,
+        task_session_id TEXT NOT NULL,
+        task_id TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        source_agent TEXT NOT NULL DEFAULT '',
+        target_agent TEXT NOT NULL,
+        source_agent_response TEXT NOT NULL DEFAULT '',
+        target_agent_prompt TEXT NOT NULL,
+        stream_error TEXT
+      );
+      CREATE INDEX IF NOT EXISTS idx_kanban_turns_project ON kanban_agent_turns(project_id);
+      CREATE INDEX IF NOT EXISTS idx_kanban_turns_project_task ON kanban_agent_turns(project_id, task_id);
+      CREATE INDEX IF NOT EXISTS idx_kanban_turns_session ON kanban_agent_turns(task_session_id);
+      CREATE INDEX IF NOT EXISTS idx_kanban_turns_created ON kanban_agent_turns(created_at);
+    `);
+  }
+
+  private migrateFromJsonIfNeeded(): void {
+    const projectsPath = path.join(this.baseDir, 'projects.json');
+    if (!fs.existsSync(projectsPath)) return;
+
+    const count = (this.db.prepare('SELECT COUNT(*) AS c FROM projects').get() as { c: number }).c;
+    if (count > 0) return;
+
+    const projectRows = readJson<Project[]>(projectsPath, []);
+    const sprintRows = readJson<Sprint[]>(path.join(this.baseDir, 'sprints.json'), []);
+    const taskRows = readJson<TaskSession[]>(path.join(this.baseDir, 'task_sessions.json'), []);
+    const instanceRows = readJson<AgentInstanceRecord[]>(path.join(this.baseDir, 'agent_instances.json'), []);
+    const queueRows = readJson<Array<[string, TaskQueueMessage[]]>>(path.join(this.baseDir, 'queues.json'), []);
+    const approvalRows = readJson<PendingApprovalRecord[]>(path.join(this.baseDir, 'approvals.json'), []);
+
+    const insertProject = this.db.prepare(
+      'INSERT OR REPLACE INTO projects (id, payload) VALUES (?, ?)',
+    );
+    const insertSprint = this.db.prepare(
+      'INSERT OR REPLACE INTO sprints (id, project_id, payload) VALUES (?, ?, ?)',
+    );
+    const insertTask = this.db.prepare(
+      'INSERT OR REPLACE INTO task_sessions (id, project_id, payload) VALUES (?, ?, ?)',
+    );
+    const insertInstance = this.db.prepare(
+      'INSERT OR REPLACE INTO agent_instances (id, task_session_id, payload) VALUES (?, ?, ?)',
+    );
+    const insertQueue = this.db.prepare(
+      'INSERT OR REPLACE INTO queues (queue_key, payload) VALUES (?, ?)',
+    );
+    const insertApproval = this.db.prepare(
+      'INSERT OR REPLACE INTO approvals (id, task_session_id, status, payload) VALUES (?, ?, ?, ?)',
+    );
+
+    const tx = this.db.transaction(() => {
+      for (const p of projectRows) insertProject.run(p.id, JSON.stringify(p));
+      for (const s of sprintRows) insertSprint.run(s.id, s.projectId, JSON.stringify(s));
+      for (const t of taskRows) insertTask.run(t.id, t.projectId, JSON.stringify(t));
+      for (const a of instanceRows) insertInstance.run(a.id, a.taskSessionId, JSON.stringify(a));
+      for (const [queueKey, messages] of queueRows) {
+        insertQueue.run(queueKey, JSON.stringify(messages));
+      }
+      for (const ap of approvalRows) {
+        insertApproval.run(ap.id, ap.taskSessionId, ap.status, JSON.stringify(ap));
+      }
+    });
+    tx();
+
+    for (const name of [
+      'projects.json',
+      'sprints.json',
+      'task_sessions.json',
+      'agent_instances.json',
+      'queues.json',
+      'approvals.json',
+    ]) {
+      const fp = path.join(this.baseDir, name);
+      if (fs.existsSync(fp)) {
+        try {
+          fs.renameSync(fp, `${fp}.migrated.bak`);
+        } catch {
+          /* ignore */
+        }
+      }
+    }
+  }
+
+  private loadFromDb(): void {
+    this.projects.clear();
+    this.sprints.clear();
+    this.taskSessions.clear();
+    this.agentInstances.clear();
+    this.queues.clear();
+    this.approvals.clear();
+
+    for (const row of this.db.prepare('SELECT id, payload FROM projects').all() as { id: string; payload: string }[]) {
+      this.projects.set(row.id, JSON.parse(row.payload) as Project);
+    }
+    for (const row of this.db.prepare('SELECT id, payload FROM sprints').all() as { id: string; payload: string }[]) {
+      this.sprints.set(row.id, JSON.parse(row.payload) as Sprint);
+    }
+    for (const row of this.db.prepare('SELECT id, payload FROM task_sessions').all() as { id: string; payload: string }[]) {
+      this.taskSessions.set(row.id, JSON.parse(row.payload) as TaskSession);
+    }
+    for (const row of this.db.prepare('SELECT id, payload FROM agent_instances').all() as { id: string; payload: string }[]) {
+      this.agentInstances.set(row.id, JSON.parse(row.payload) as AgentInstanceRecord);
+    }
+    for (const row of this.db.prepare('SELECT queue_key, payload FROM queues').all() as {
+      queue_key: string;
+      payload: string;
+    }[]) {
+      this.queues.set(row.queue_key, JSON.parse(row.payload) as TaskQueueMessage[]);
+    }
+    for (const row of this.db.prepare('SELECT id, payload FROM approvals').all() as { id: string; payload: string }[]) {
+      this.approvals.set(row.id, JSON.parse(row.payload) as PendingApprovalRecord);
+    }
   }
 
   private persistProjects(): void {
-    writeJson(path.join(this.baseDir, 'projects.json'), Array.from(this.projects.values()));
+    const stmt = this.db.prepare('INSERT OR REPLACE INTO projects (id, payload) VALUES (?, ?)');
+    const tx = this.db.transaction(() => {
+      for (const p of this.projects.values()) stmt.run(p.id, JSON.stringify(p));
+    });
+    tx();
+    this.pruneByIdColumn('projects', Array.from(this.projects.keys()));
   }
 
   private persistSprints(): void {
-    writeJson(path.join(this.baseDir, 'sprints.json'), Array.from(this.sprints.values()));
+    const stmt = this.db.prepare(
+      'INSERT OR REPLACE INTO sprints (id, project_id, payload) VALUES (?, ?, ?)',
+    );
+    const tx = this.db.transaction(() => {
+      for (const s of this.sprints.values()) stmt.run(s.id, s.projectId, JSON.stringify(s));
+    });
+    tx();
+    this.pruneByIdColumn('sprints', Array.from(this.sprints.keys()));
   }
 
   private persistTaskSessions(): void {
-    writeJson(path.join(this.baseDir, 'task_sessions.json'), Array.from(this.taskSessions.values()));
+    const stmt = this.db.prepare(
+      'INSERT OR REPLACE INTO task_sessions (id, project_id, payload) VALUES (?, ?, ?)',
+    );
+    const tx = this.db.transaction(() => {
+      for (const t of this.taskSessions.values()) stmt.run(t.id, t.projectId, JSON.stringify(t));
+    });
+    tx();
+    this.pruneByIdColumn('task_sessions', Array.from(this.taskSessions.keys()));
   }
 
   private persistAgentInstances(): void {
-    writeJson(path.join(this.baseDir, 'agent_instances.json'), Array.from(this.agentInstances.values()));
+    const stmt = this.db.prepare(
+      'INSERT OR REPLACE INTO agent_instances (id, task_session_id, payload) VALUES (?, ?, ?)',
+    );
+    const tx = this.db.transaction(() => {
+      for (const a of this.agentInstances.values()) stmt.run(a.id, a.taskSessionId, JSON.stringify(a));
+    });
+    tx();
+    this.pruneByIdColumn('agent_instances', Array.from(this.agentInstances.keys()));
   }
 
   private persistQueues(): void {
-    writeJson(path.join(this.baseDir, 'queues.json'), Array.from(this.queues.entries()));
+    const stmt = this.db.prepare('INSERT OR REPLACE INTO queues (queue_key, payload) VALUES (?, ?)');
+    const tx = this.db.transaction(() => {
+      for (const [queueKey, messages] of this.queues.entries()) {
+        stmt.run(queueKey, JSON.stringify(messages));
+      }
+    });
+    tx();
+    const keys = Array.from(this.queues.keys());
+    if (keys.length === 0) {
+      this.db.prepare('DELETE FROM queues').run();
+      return;
+    }
+    const placeholders = keys.map(() => '?').join(',');
+    this.db.prepare(`DELETE FROM queues WHERE queue_key NOT IN (${placeholders})`).run(...keys);
   }
 
   private persistApprovals(): void {
-    writeJson(path.join(this.baseDir, 'approvals.json'), Array.from(this.approvals.values()));
+    const stmt = this.db.prepare(
+      'INSERT OR REPLACE INTO approvals (id, task_session_id, status, payload) VALUES (?, ?, ?, ?)',
+    );
+    const tx = this.db.transaction(() => {
+      for (const a of this.approvals.values()) {
+        stmt.run(a.id, a.taskSessionId, a.status, JSON.stringify(a));
+      }
+    });
+    tx();
+    this.pruneByIdColumn('approvals', Array.from(this.approvals.keys()));
+  }
+
+  private pruneByIdColumn(table: 'projects' | 'sprints' | 'task_sessions' | 'agent_instances' | 'approvals', keepIds: string[]): void {
+    if (keepIds.length === 0) {
+      this.db.prepare(`DELETE FROM ${table}`).run();
+      return;
+    }
+    const placeholders = keepIds.map(() => '?').join(',');
+    this.db.prepare(`DELETE FROM ${table} WHERE id NOT IN (${placeholders})`).run(...keepIds);
   }
 
   listProjects(): Project[] {
@@ -112,14 +366,34 @@ export class JsonPlatformStore {
 
   upsertProject(project: Project): Project {
     const existing = this.projects.get(project.id);
-    const nextProject = {
+    const nextProject: Project = {
       ...project,
       createdAt: existing?.createdAt ?? project.createdAt ?? now(),
       updatedAt: now(),
     };
+    if (!nextProject.issueIdPrefix?.trim()) {
+      delete nextProject.issueIdPrefix;
+    }
     this.projects.set(project.id, nextProject);
     this.persistProjects();
     return nextProject;
+  }
+
+  removeProject(projectId: string): { ok: true } | { ok: false; error: string } {
+    if (!this.projects.has(projectId)) {
+      return { ok: false, error: `Project not found: ${projectId}` };
+    }
+    const sprintCount = this.listSprints(projectId).length;
+    const taskCount = this.listTaskSessions(projectId).length;
+    if (sprintCount > 0 || taskCount > 0) {
+      return {
+        ok: false,
+        error: `Cannot delete project: ${sprintCount} sprint(s) and ${taskCount} task session(s) still reference it. Remove or reassign them first.`,
+      };
+    }
+    this.projects.delete(projectId);
+    this.persistProjects();
+    return { ok: true };
   }
 
   listSprints(projectId?: string): Sprint[] {
@@ -154,11 +428,22 @@ export class JsonPlatformStore {
     return this.taskSessions.get(taskSessionId) ?? null;
   }
 
-  getTaskSessionByIssueId(issueId: string): TaskSession | null {
+  getTaskSessionByProjectIssueId(projectId: string, issueId: string): TaskSession | null {
     for (const session of this.taskSessions.values()) {
-      if (session.issueId === issueId) return session;
+      if (session.projectId === projectId && session.issueId === issueId) return session;
     }
     return null;
+  }
+
+  previewNextIssueId(projectId: string): string {
+    const project = this.getProject(projectId);
+    if (!project) {
+      throw new Error(`Project not found: ${projectId}`);
+    }
+    const prefix = resolveIssueIdPrefix(project);
+    return allocateNextIssueId(projectId, prefix, (pid) =>
+      this.listTaskSessions(pid).map((t) => t.issueId),
+    );
   }
 
   upsertTaskSession(taskSession: TaskSession): TaskSession {
@@ -171,6 +456,44 @@ export class JsonPlatformStore {
     this.taskSessions.set(nextTaskSession.id, nextTaskSession);
     this.persistTaskSessions();
     return nextTaskSession;
+  }
+
+  /**
+   * Remove a task session and related queues, instances, approvals, monitor rows, and sprint link.
+   * Caller should stop/delete agent instances first.
+   */
+  removeTaskSession(taskSessionId: string): void {
+    const task = this.getTaskSession(taskSessionId);
+    if (!task) return;
+
+    const sprint = this.getSprint(task.sprintId);
+    if (sprint?.taskIds.includes(task.id)) {
+      this.upsertSprint({
+        ...sprint,
+        taskIds: sprint.taskIds.filter((tid) => tid !== task.id),
+      });
+    }
+
+    this.queues.delete(task.messageQueueKey);
+    this.persistQueues();
+
+    for (const id of Array.from(this.approvals.keys())) {
+      const a = this.approvals.get(id);
+      if (a?.taskSessionId === taskSessionId) {
+        this.approvals.delete(id);
+      }
+    }
+    this.persistApprovals();
+
+    this.db.prepare('DELETE FROM kanban_agent_turns WHERE task_session_id = ?').run(taskSessionId);
+
+    for (const inst of this.listAgentInstances(taskSessionId)) {
+      this.agentInstances.delete(inst.id);
+    }
+    this.persistAgentInstances();
+
+    this.taskSessions.delete(taskSessionId);
+    this.persistTaskSessions();
   }
 
   appendConversationEntry(taskSessionId: string, entry: Omit<TaskConversationEntry, 'id' | 'createdAt'>): TaskConversationEntry {
@@ -289,5 +612,128 @@ export class JsonPlatformStore {
     this.approvals.set(approvalId, nextRecord);
     this.persistApprovals();
     return nextRecord;
+  }
+
+  insertKanbanAgentTurn(record: KanbanAgentTurnRecord): KanbanAgentTurnRecord {
+    this.db
+      .prepare(
+        `INSERT INTO kanban_agent_turns (
+          id, project_id, task_session_id, task_id, created_at,
+          source_agent, target_agent, source_agent_response, target_agent_prompt, stream_error
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        record.id,
+        record.projectId,
+        record.taskSessionId,
+        record.taskId,
+        record.createdAt,
+        record.sourceAgent,
+        record.targetAgent,
+        record.sourceAgentResponse,
+        record.targetAgentPrompt,
+        record.streamError ?? null,
+      );
+    return record;
+  }
+
+  getKanbanAgentTurn(id: string): KanbanAgentTurnRecord | null {
+    const row = this.db
+      .prepare(
+        `SELECT id, project_id, task_session_id, task_id, created_at,
+          source_agent, target_agent, source_agent_response, target_agent_prompt, stream_error
+        FROM kanban_agent_turns WHERE id = ?`,
+      )
+      .get(id) as
+      | {
+          id: string;
+          project_id: string;
+          task_session_id: string;
+          task_id: string;
+          created_at: string;
+          source_agent: string;
+          target_agent: string;
+          source_agent_response: string;
+          target_agent_prompt: string;
+          stream_error: string | null;
+        }
+      | undefined;
+    if (!row) return null;
+    return {
+      id: row.id,
+      projectId: row.project_id,
+      taskSessionId: row.task_session_id,
+      taskId: row.task_id,
+      createdAt: row.created_at,
+      sourceAgent: row.source_agent,
+      targetAgent: row.target_agent,
+      sourceAgentResponse: row.source_agent_response,
+      targetAgentPrompt: row.target_agent_prompt,
+      streamError: row.stream_error ?? undefined,
+    };
+  }
+
+  listKanbanAgentTurns(filters: {
+    projectId?: string;
+    taskId?: string;
+    taskSessionId?: string;
+    limit?: number;
+    offset?: number;
+  }): { rows: KanbanAgentTurnRecord[]; total: number } {
+    const limit = Math.min(Math.max(filters.limit ?? 100, 1), 500);
+    const offset = Math.max(filters.offset ?? 0, 0);
+    const clauses: string[] = [];
+    const params: unknown[] = [];
+    if (filters.projectId) {
+      clauses.push('project_id = ?');
+      params.push(filters.projectId);
+    }
+    if (filters.taskId) {
+      clauses.push('task_id = ?');
+      params.push(filters.taskId);
+    }
+    if (filters.taskSessionId) {
+      clauses.push('task_session_id = ?');
+      params.push(filters.taskSessionId);
+    }
+    const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
+    const countRow = this.db.prepare(`SELECT COUNT(*) AS c FROM kanban_agent_turns ${where}`).get(...params) as {
+      c: number;
+    };
+    const rows = this.db
+      .prepare(
+        `SELECT id, project_id, task_session_id, task_id, created_at,
+          source_agent, target_agent, source_agent_response, target_agent_prompt, stream_error
+        FROM kanban_agent_turns ${where}
+        ORDER BY created_at DESC
+        LIMIT ? OFFSET ?`,
+      )
+      .all(...params, limit, offset) as Array<{
+      id: string;
+      project_id: string;
+      task_session_id: string;
+      task_id: string;
+      created_at: string;
+      source_agent: string;
+      target_agent: string;
+      source_agent_response: string;
+      target_agent_prompt: string;
+      stream_error: string | null;
+    }>;
+    return {
+      total: countRow.c,
+      rows: rows.map((row) => ({
+        id: row.id,
+        projectId: row.project_id,
+        taskSessionId: row.task_session_id,
+        taskId: row.task_id,
+        createdAt: row.created_at,
+        sourceAgent: row.source_agent,
+        targetAgent: row.target_agent,
+        sourceAgentResponse: row.source_agent_response,
+        targetAgentPrompt: row.target_agent_prompt,
+        streamError: row.stream_error ?? undefined,
+      })),
+    };
   }
 }

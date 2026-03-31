@@ -15,7 +15,13 @@ import {
   stopBridgeDaemonChild,
 } from '../lib/bridge-app-child';
 import { readBridgeDaemonDiskStatus } from '../lib/bridge-daemon-status';
-import { getCtiHomeForBridgeSlug, getSlaveEnvPath, listBridgeSlugs, loadConfig } from '../config';
+import {
+  getCtiHomeForBridgeSlug,
+  getSlaveEnvPath,
+  listBridgeSlugs,
+  loadConfig,
+  normalizeRunners,
+} from '../config';
 import { readMonitorMessages, readRunnerStatus } from '../lib/monitor-messages';
 import { getLogger } from '../logger';
 import type {
@@ -25,12 +31,59 @@ import type {
   TaskSession,
   AgentInstanceRecord,
   AgentRole,
+  KanbanAgentKind,
+  KanbanRoleMember,
+  KanbanAgentTurnRecord,
 } from './types';
+
+const KANBAN_ROLE_KINDS: KanbanAgentKind[] = [
+  'agent-dev',
+  'codex-senior',
+  'claude-review',
+  'copilot-test',
+];
+
+function parseKanbanRoleRunnersInput(raw: unknown): Partial<Record<KanbanAgentKind, string>> | null {
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) return null;
+  const out: Partial<Record<KanbanAgentKind, string>> = {};
+  for (const kind of KANBAN_ROLE_KINDS) {
+    const v = (raw as Record<string, unknown>)[kind];
+    if (v === '' || v === null || v === undefined) continue;
+    if (typeof v !== 'string' || !v.trim()) return null;
+    out[kind] = v.trim();
+  }
+  return out;
+}
+
+function parseKanbanRoleMembersInput(raw: unknown): Partial<Record<KanbanAgentKind, KanbanRoleMember[]>> | null {
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) return null;
+  const out: Partial<Record<KanbanAgentKind, KanbanRoleMember[]>> = {};
+  for (const kind of KANBAN_ROLE_KINDS) {
+    const v = (raw as Record<string, unknown>)[kind];
+    if (v === undefined || v === null) continue;
+    if (!Array.isArray(v)) return null;
+    const members: KanbanRoleMember[] = [];
+    for (const row of v) {
+      if (typeof row !== 'object' || row === null) return null;
+      const r = row as Record<string, unknown>;
+      const id = typeof r.id === 'string' ? r.id.trim() : '';
+      const name = typeof r.name === 'string' ? r.name.trim() : '';
+      const runnerProfileId = typeof r.runnerProfileId === 'string' ? r.runnerProfileId.trim() : '';
+      if (!id || !runnerProfileId) return null;
+      members.push({ id, name: name || id, runnerProfileId });
+    }
+    out[kind] = members;
+  }
+  return out;
+}
 
 export interface PlatformStoreApi {
   listProjects(): Project[];
   getProject(projectId: string): Project | null;
   upsertProject(project: Project): Project;
+  removeProject(projectId: string): { ok: true } | { ok: false; error: string };
+  previewNextIssueId(projectId: string): string;
+  getTaskSessionByProjectIssueId(projectId: string, issueId: string): TaskSession | null;
   listSprints(projectId?: string): Sprint[];
   getSprint(sprintId: string): Sprint | null;
   listTaskSessions(projectId?: string): TaskSession[];
@@ -39,6 +92,14 @@ export interface PlatformStoreApi {
   getAgentInstance(instanceId: string): AgentInstanceRecord | null;
   listPendingApprovals(taskSessionId?: string): PendingApprovalRecord[];
   getPendingApproval(approvalId: string): PendingApprovalRecord | null;
+  listKanbanAgentTurns(filters: {
+    projectId?: string;
+    taskId?: string;
+    taskSessionId?: string;
+    limit?: number;
+    offset?: number;
+  }): { rows: KanbanAgentTurnRecord[]; total: number };
+  getKanbanAgentTurn(id: string): KanbanAgentTurnRecord | null;
 }
 
 export interface WorkflowServiceApi {
@@ -57,8 +118,8 @@ export interface WorkflowServiceApi {
   rejectReview(taskSessionId: string, comment: string): Promise<TaskSession>;
   handleTestFailure(input: { taskSessionId: string; summary: string; log: string }): Promise<TaskSession>;
   closeTask(taskSessionId: string): Promise<TaskSession>;
+  deleteTask(taskSessionId: string): Promise<void>;
   resolveApproval(approvalId: string, input: unknown): boolean;
-  handleJiraWebhook(payload: unknown): Promise<unknown>;
   getKanbanStatus(): unknown;
   ensureAgentInstance(
     taskSessionId: string,
@@ -92,9 +153,8 @@ const DIRECTORY_STRUCTURE_PLAN = {
     'app': 'Next.js app router entrypoint for the web platform',
     platform: {
       'app.ts': 'native HTTP platform router shared by Next.js and tests',
-      'json-platform-store.ts': 'JSON persistence for projects, sprints, tasks, instances, approvals, and queues',
-      'jira-adapter.ts': 'Jira comment transport adapter',
-      'instance-manager.ts': 'singleton runtime registry and task runners',
+      'json-platform-store.ts': 'SQLite persistence for projects, sprints, tasks, instances, approvals, and queues',
+      'instance-manager.ts': 'singleton runtime registry and task runners (local queue)',
       'workflow-service.ts': 'state machine plus Git and PR automation',
       'compensation-service.ts': 'test failure feedback loop back to the developer agent',
       'prompts.ts': 'role-specific system prompts',
@@ -233,8 +293,115 @@ export function createPlatformApp(options: CreatePlatformAppOptions): PlatformAp
         return jsonResponse(DIRECTORY_STRUCTURE_PLAN);
       }
 
+      if (request.method === 'GET' && pathname === '/api/platform/runners') {
+        const cfg = loadConfig();
+        const runners = normalizeRunners(cfg).map((r) => ({
+          id: r.id,
+          label: r.label ?? r.id,
+          runtime: r.runtime,
+        }));
+        return jsonResponse({ runners });
+      }
+
       if (request.method === 'GET' && pathname === '/api/projects') {
         return jsonResponse(options.store.listProjects());
+      }
+
+      const projectNextIssueParams = matchPath('/api/projects/:projectId/next-issue-id', pathname);
+      if (request.method === 'GET' && projectNextIssueParams) {
+        try {
+          const issueId = options.store.previewNextIssueId(projectNextIssueParams.projectId);
+          return jsonResponse({ issueId });
+        } catch (e) {
+          return jsonResponse({ error: e instanceof Error ? e.message : String(e) }, 404);
+        }
+      }
+
+      const kanbanRolesParams = matchPath('/api/projects/:projectId/kanban-roles', pathname);
+      if (request.method === 'GET' && kanbanRolesParams) {
+        const project = options.store.getProject(kanbanRolesParams.projectId);
+        if (!project) return notFoundResponse('Project', kanbanRolesParams.projectId);
+        const cfg = loadConfig();
+        const runners = normalizeRunners(cfg).map((r) => ({
+          id: r.id,
+          label: r.label ?? r.id,
+          runtime: r.runtime,
+        }));
+        return jsonResponse({
+          projectId: project.id,
+          kinds: KANBAN_ROLE_KINDS,
+          roleLabels: {
+            'agent-dev': '开发（agent-dev）',
+            'codex-senior': '高级开发（codex-senior）',
+            'claude-review': '评审（claude-review）',
+            'copilot-test': '测试（copilot-test）',
+          },
+          runners,
+          mapping: project.kanbanRoleRunners ?? {},
+          members: project.kanbanRoleMembers ?? {},
+        });
+      }
+
+      if (request.method === 'PUT' && kanbanRolesParams) {
+        const project = options.store.getProject(kanbanRolesParams.projectId);
+        if (!project) return notFoundResponse('Project', kanbanRolesParams.projectId);
+        const body = await readRequestBody<{
+          kanbanRoleRunners?: unknown;
+          kanbanRoleMembers?: unknown;
+        }>(request);
+        if (body.kanbanRoleRunners === undefined && body.kanbanRoleMembers === undefined) {
+          return jsonResponse({ error: 'kanbanRoleRunners and/or kanbanRoleMembers is required' }, 400);
+        }
+        const cfg = loadConfig();
+        const validIds = new Set(normalizeRunners(cfg).map((r) => r.id));
+        const next: Project = { ...project };
+
+        if (body.kanbanRoleMembers !== undefined) {
+          const rawMembers = body.kanbanRoleMembers as Record<string, unknown>;
+          const parsedMembers = parseKanbanRoleMembersInput(body.kanbanRoleMembers);
+          if (parsedMembers === null) {
+            return jsonResponse({ error: 'kanbanRoleMembers must be lane → { id, name, runnerProfileId }[]' }, 400);
+          }
+          const mergedMembers: Partial<Record<KanbanAgentKind, KanbanRoleMember[]>> = {
+            ...(project.kanbanRoleMembers ?? {}),
+          };
+          for (const k of KANBAN_ROLE_KINDS) {
+            if (Object.prototype.hasOwnProperty.call(rawMembers, k)) {
+              const list = parsedMembers[k] ?? [];
+              mergedMembers[k] = list;
+              for (const m of list) {
+                if (!validIds.has(m.runnerProfileId)) {
+                  return jsonResponse({ error: `Unknown runner id: ${m.runnerProfileId}` }, 400);
+                }
+              }
+            }
+          }
+          if (Object.keys(mergedMembers).length === 0) {
+            delete next.kanbanRoleMembers;
+          } else {
+            next.kanbanRoleMembers = mergedMembers;
+          }
+        }
+
+        if (body.kanbanRoleRunners !== undefined) {
+          const parsed = parseKanbanRoleRunnersInput(body.kanbanRoleRunners);
+          if (parsed === null) {
+            return jsonResponse({ error: 'kanbanRoleRunners must be an object with string runner ids' }, 400);
+          }
+          for (const v of Object.values(parsed)) {
+            if (!validIds.has(v)) {
+              return jsonResponse({ error: `Unknown runner id: ${v}` }, 400);
+            }
+          }
+          if (Object.keys(parsed).length === 0) {
+            delete next.kanbanRoleRunners;
+          } else {
+            next.kanbanRoleRunners = parsed;
+          }
+        }
+
+        options.store.upsertProject(next);
+        return jsonResponse({ ok: true, project: options.store.getProject(project.id) });
       }
 
       const projectParams = matchPath('/api/projects/:projectId', pathname);
@@ -317,6 +484,14 @@ export function createPlatformApp(options: CreatePlatformAppOptions): PlatformAp
         return jsonResponse(options.store.upsertProject(await readRequestBody<Project>(request)), 201);
       }
 
+      if (request.method === 'DELETE' && projectParams) {
+        const result = options.store.removeProject(projectParams.projectId);
+        if (!result.ok) {
+          return jsonResponse({ error: result.error }, 400);
+        }
+        return jsonResponse({ ok: true, id: projectParams.projectId });
+      }
+
       if (request.method === 'POST' && pathname === '/api/workflows/sprints/start') {
         return jsonResponse(
           await options.workflowService.startSprint(await readRequestBody<unknown>(request)),
@@ -329,6 +504,25 @@ export function createPlatformApp(options: CreatePlatformAppOptions): PlatformAp
           await options.workflowService.createTask(await readRequestBody<unknown>(request)),
           201,
         );
+      }
+
+      if (request.method === 'GET' && pathname === '/api/kanban/monitor') {
+        const projectId = searchParams.get('projectId')?.trim() || undefined;
+        const taskId = searchParams.get('taskId')?.trim() || undefined;
+        const taskSessionId = searchParams.get('taskSessionId')?.trim() || undefined;
+        const limitRaw = parseInt(searchParams.get('limit') || '', 10);
+        const offsetRaw = parseInt(searchParams.get('offset') || '', 10);
+        const limit = Number.isFinite(limitRaw) ? limitRaw : undefined;
+        const offset = Number.isFinite(offsetRaw) ? offsetRaw : undefined;
+        return jsonResponse(
+          options.store.listKanbanAgentTurns({ projectId, taskId, taskSessionId, limit, offset }),
+        );
+      }
+
+      const kanbanMonitorTurnParams = matchPath('/api/kanban/monitor/:turnId', pathname);
+      if (request.method === 'GET' && kanbanMonitorTurnParams) {
+        const row = options.store.getKanbanAgentTurn(kanbanMonitorTurnParams.turnId);
+        return row ? jsonResponse(row) : notFoundResponse('Kanban agent turn', kanbanMonitorTurnParams.turnId);
       }
 
       if (request.method === 'GET' && pathname === '/api/kanban/status') {
@@ -344,7 +538,11 @@ export function createPlatformApp(options: CreatePlatformAppOptions): PlatformAp
 
       const submitReviewParams = matchPath('/api/workflows/tasks/:taskSessionId/submit-review', pathname);
       if (request.method === 'POST' && submitReviewParams) {
-        const payload = await readRequestBody<{ commitMessage: string; prTitle: string; prBody: string }>(request);
+        const payload = await readRequestBody<{
+          commitMessage: string;
+          prTitle: string;
+          prBody: string;
+        }>(request);
         return jsonResponse(
           await options.workflowService.submitTaskForReview({
             taskSessionId: submitReviewParams.taskSessionId,
@@ -406,6 +604,12 @@ export function createPlatformApp(options: CreatePlatformAppOptions): PlatformAp
         );
       }
 
+      const deleteTaskParams = matchPath('/api/workflows/tasks/:taskSessionId', pathname);
+      if (request.method === 'DELETE' && deleteTaskParams) {
+        await options.workflowService.deleteTask(deleteTaskParams.taskSessionId);
+        return jsonResponse({ ok: true });
+      }
+
       if (request.method === 'POST' && approvalParams) {
         return jsonResponse({
           ok: options.workflowService.resolveApproval(
@@ -446,15 +650,6 @@ export function createPlatformApp(options: CreatePlatformAppOptions): PlatformAp
       if (request.method === 'DELETE' && instanceParams) {
         await options.instanceManager.deleteInstance(instanceParams.instanceId);
         return jsonResponse({ ok: true, instanceId: instanceParams.instanceId });
-      }
-
-      if (request.method === 'POST' && pathname === '/api/webhooks/jira') {
-        return jsonResponse({
-          ok: true,
-          result: await options.workflowService.handleJiraWebhook(
-            await readRequestBody<unknown>(request),
-          ),
-        });
       }
 
       if (request.method === 'GET' && pathname === '/api/bridge/status') {

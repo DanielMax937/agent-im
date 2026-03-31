@@ -1,23 +1,30 @@
+import crypto from 'node:crypto';
+
 import type { LLMProvider, PermissionResolution } from '../lib/bridge/host';
 import { loadConfig, normalizeRunners, resolveRuntimeForPlatformInstance } from '../config';
 import { PendingPermissions } from '../permission-gateway';
 import { resolveProvider } from '../runtime-provider';
+import {
+  formatKanbanAgentFullPrompt,
+  formatKanbanTurnAgentLabel,
+  resolveKanbanTurnSource,
+} from './kanban-agent-turn';
 import { JsonPlatformStore } from './json-platform-store';
-import { JiraAdapter, type JiraApiClient } from './jira-adapter';
+import { notifyKanbanTelegram } from './kanban-notify';
 import { buildRolePrompt } from './prompts';
 import { consumeAgentStream } from './stream-consumer';
-import type { AgentInstanceRecord, AgentRuntime, TaskConversationEntry } from './types';
+import type { AgentInstanceRecord, AgentRole, TaskConversationEntry, TaskQueueMessage } from './types';
 
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-export interface ProviderFactory {
-  (instance: AgentInstanceRecord, pendingPermissions: PendingPermissions): Promise<LLMProvider>;
+function notifyKanbanSideChannel(issueId: string, text: string): void {
+  void notifyKanbanTelegram(`[Kanban][${issueId}] ${text}`);
 }
 
-export interface JiraClientFactory {
-  (instance: AgentInstanceRecord): JiraApiClient | undefined;
+export interface ProviderFactory {
+  (instance: AgentInstanceRecord, pendingPermissions: PendingPermissions): Promise<LLMProvider>;
 }
 
 interface ManagedRunner {
@@ -30,21 +37,25 @@ interface ManagedRunner {
 interface InstanceManagerDeps {
   store: JsonPlatformStore;
   providerFactory?: ProviderFactory;
-  jiraClientFactory?: JiraClientFactory;
+  /** Invoked after a successful assistant turn (conversation entry persisted). */
+  onAgentTurnComplete?: (
+    taskSessionId: string,
+    role: AgentRole,
+    instanceId: string,
+  ) => Promise<void>;
 }
 
 class TaskAgentRunner implements ManagedRunner {
   private running = false;
   private loopPromise: Promise<void> | null = null;
-  private readonly pendingPermissions = new PendingPermissions();
-  private adapter: JiraAdapter | null = null;
   private provider: LLMProvider | null = null;
+  private readonly pendingPermissions = new PendingPermissions();
 
   constructor(
     private readonly store: JsonPlatformStore,
     private readonly instanceId: string,
     private readonly providerFactory: ProviderFactory,
-    private readonly jiraClientFactory?: JiraClientFactory,
+    private readonly onAgentTurnComplete?: InstanceManagerDeps['onAgentTurnComplete'],
   ) {}
 
   isRunning(): boolean {
@@ -60,18 +71,6 @@ class TaskAgentRunner implements ManagedRunner {
 
     const instance = this.requireInstance();
     this.provider = await this.providerFactory(instance, this.pendingPermissions);
-    this.adapter = new JiraAdapter(
-      {
-        instanceId: instance.id,
-        issueId: instance.jira.issueId,
-        baseUrl: instance.jira.baseUrl,
-        email: instance.jira.email,
-        apiToken: instance.jira.apiToken,
-        pollIntervalMs: instance.jira.pollIntervalMs,
-        botAccountId: instance.jira.botAccountId,
-      },
-      this.jiraClientFactory?.(instance),
-    );
 
     this.running = true;
     this.updateInstance({
@@ -80,7 +79,6 @@ class TaskAgentRunner implements ManagedRunner {
       lastError: undefined,
     });
 
-    await this.adapter.start();
     this.loopPromise = this.runLoop().catch((error) => {
       this.updateInstance({
         status: 'error',
@@ -93,8 +91,8 @@ class TaskAgentRunner implements ManagedRunner {
   async stop(): Promise<void> {
     if (!this.running) return;
     this.running = false;
-    await this.adapter?.stop();
     await this.loopPromise;
+    this.provider = null;
     this.updateInstanceIfPresent({
       status: 'stopped',
       stoppedAt: new Date().toISOString(),
@@ -108,27 +106,35 @@ class TaskAgentRunner implements ManagedRunner {
 
       const queuedMessages = this.store.drainTaskQueue(taskSession.messageQueueKey);
       for (const queueMessage of queuedMessages) {
-        await this.processPrompt(queueMessage.content, queueMessage.type === 'directive' ? 'workflow' : instance.role);
+        const assistantTurn = await this.processPrompt(
+          queueMessage.content,
+          queueMessage.type === 'directive' ? 'workflow' : instance.role,
+          queueMessage,
+        );
+        if (assistantTurn && this.onAgentTurnComplete) {
+          await this.onAgentTurnComplete(instance.taskSessionId, instance.role, instance.id);
+        }
       }
 
-      const inbound = await Promise.race([
-        this.adapter?.consumeOne() ?? Promise.resolve(null),
-        delay(750).then(() => null),
-      ]);
-
-      if (!inbound) continue;
-      await this.processPrompt(inbound.text, 'jira');
+      await delay(750);
     }
   }
 
   private async processPrompt(
     prompt: string,
-    source: 'jira' | 'workflow' | AgentInstanceRecord['role'],
-  ): Promise<void> {
+    source: 'workflow' | AgentInstanceRecord['role'],
+    queueMessage: TaskQueueMessage,
+  ): Promise<boolean> {
     const instance = this.requireInstance();
     const taskSession = this.requireTaskSession(instance.taskSessionId);
     const project = this.requireProject(taskSession.projectId);
     const sprint = this.requireSprint(taskSession.sprintId);
+
+    const historyBeforeUser = [...taskSession.conversationHistory];
+    const { sourceAgent, sourceAgentResponse } = resolveKanbanTurnSource({
+      queueMessage,
+      historyBeforeUser,
+    });
 
     this.store.appendConversationEntry(taskSession.id, {
       role: 'user',
@@ -177,19 +183,15 @@ class TaskAgentRunner implements ManagedRunner {
           createdAt: new Date().toISOString(),
         });
 
-        await this.adapter!.send({
-          address: {
-            channelType: this.adapter!.channelType,
-            chatId: instance.jira.issueId,
-          },
-          text: [
+        notifyKanbanSideChannel(
+          currentTaskSession.issueId,
+          [
             `Approval required for ${permission.toolName}.`,
             `Approval ID: ${permission.permissionRequestId}`,
             `Tool input: ${permission.toolInput}`,
             `Approve via POST ${this.getApprovalUrl(permission.permissionRequestId)}`,
           ].join('\n'),
-          parseMode: 'plain',
-        });
+        );
       },
     });
 
@@ -200,34 +202,40 @@ class TaskAgentRunner implements ManagedRunner {
       lastError: result.hasError ? result.errorMessage : undefined,
     });
 
+    const targetAgentPrompt = formatKanbanAgentFullPrompt({
+      systemPrompt,
+      conversationHistory,
+      userPrompt: prompt,
+    });
+
+    const targetAgent = formatKanbanTurnAgentLabel(nextTaskSession.kanbanAgent, instance.role);
+
+    this.store.insertKanbanAgentTurn({
+      id: crypto.randomUUID(),
+      projectId: taskSession.projectId,
+      taskSessionId: taskSession.id,
+      taskId: taskSession.issueId,
+      createdAt: new Date().toISOString(),
+      sourceAgent,
+      targetAgent,
+      sourceAgentResponse,
+      targetAgentPrompt,
+      streamError: result.hasError ? result.errorMessage : undefined,
+    });
+
     if (result.hasError) {
-      await this.adapter!.send({
-        address: {
-          channelType: this.adapter!.channelType,
-          chatId: instance.jira.issueId,
-        },
-        text: `Runtime error: ${result.errorMessage}`,
-        parseMode: 'plain',
-      });
-      return;
+      notifyKanbanSideChannel(currentTaskSession.issueId, `Runtime error: ${result.errorMessage}`);
+      return false;
     }
 
-    if (!result.responseText) return;
+    if (!result.responseText) return false;
 
     this.store.appendConversationEntry(nextTaskSession.id, {
       role: 'assistant',
       source: instance.role,
       content: result.responseText,
     });
-
-    await this.adapter!.send({
-      address: {
-        channelType: this.adapter!.channelType,
-        chatId: instance.jira.issueId,
-      },
-      text: result.responseText,
-      parseMode: 'plain',
-    });
+    return true;
   }
 
   private getApprovalUrl(permissionRequestId: string): string {
@@ -352,12 +360,14 @@ export class InstanceManager {
     const existing = this.runners.get(instanceId);
     if (existing?.isRunning()) return;
 
-    const runner = existing ?? new TaskAgentRunner(
-      this.deps.store,
-      instanceId,
-      this.providerFactory,
-      this.deps.jiraClientFactory,
-    );
+    const runner =
+      existing ??
+      new TaskAgentRunner(
+        this.deps.store,
+        instanceId,
+        this.providerFactory,
+        this.deps.onAgentTurnComplete,
+      );
     this.runners.set(instanceId, runner);
     await runner.start();
   }

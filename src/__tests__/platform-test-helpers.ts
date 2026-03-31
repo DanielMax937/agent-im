@@ -12,6 +12,11 @@ import type { AgentInstanceRecord, PendingApprovalRecord, Project, Sprint, TaskS
 
 export const PLATFORM_DIR = path.join(getCtiHome(), 'data', 'platform');
 
+/** Isolated store for tests (avoids SQLite file locks vs `rmSync` on the default `platform.db`). */
+export function createTestJsonPlatformStore(): JsonPlatformStore {
+  return new JsonPlatformStore({ dbPath: ':memory:' });
+}
+
 export class FakeGitService {
   public calls: string[] = [];
   public createSprintBranchResult = 'feature/sprint-alpha';

@@ -10,3 +10,11 @@ export async function GET(request: Request): Promise<Response> {
 export async function POST(request: Request): Promise<Response> {
   return handlePlatformRequest(request);
 }
+
+export async function PUT(request: Request): Promise<Response> {
+  return handlePlatformRequest(request);
+}
+
+export async function DELETE(request: Request): Promise<Response> {
+  return handlePlatformRequest(request);
+}

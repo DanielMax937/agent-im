@@ -4,7 +4,6 @@ import fs from 'node:fs';
 
 import { CompensationService } from '../platform/compensation-service';
 import { createPlatformApp } from '../platform/app';
-import { JsonPlatformStore } from '../platform/json-platform-store';
 import { WorkflowService } from '../platform/workflow-service';
 import {
   asGitService,
@@ -14,6 +13,7 @@ import {
   createProject,
   createSprint,
   createTaskSession,
+  createTestJsonPlatformStore,
   FakeGitService,
   FakeInstanceManager,
   FakeScmClient,
@@ -25,14 +25,10 @@ import {
 describe('Platform app integration', () => {
   beforeEach(() => {
     fs.rmSync(PLATFORM_DIR, { recursive: true, force: true });
-    process.env.CTI_JIRA_BASE_URL = 'https://jira.example.test';
-    process.env.CTI_JIRA_EMAIL = 'bot@example.test';
-    process.env.CTI_JIRA_API_TOKEN = 'token';
-    process.env.CTI_JIRA_POLL_INTERVAL_MS = '1000';
   });
 
   function createHarness() {
-    const store = new JsonPlatformStore();
+    const store = createTestJsonPlatformStore();
     const gitService = new FakeGitService();
     const scmClient = new FakeScmClient();
     const instanceManager = new FakeInstanceManager(store);
@@ -68,13 +64,6 @@ describe('Platform app integration', () => {
       status: 'running',
       branchName: taskSession.branchName,
       workingDirectory: '/tmp/agent-im',
-      jira: {
-        baseUrl: 'https://jira.example.test',
-        issueId: taskSession.issueId,
-        email: 'bot@example.test',
-        apiToken: 'token',
-        pollIntervalMs: 1000,
-      },
       approvalsRequired: true,
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
@@ -151,6 +140,82 @@ describe('Platform app integration', () => {
 
       assert.equal(response.status, 201);
       assert.equal((response.body as { id: string }).id, 'project-2');
+    } finally {
+      await server.close();
+    }
+  });
+
+  it('deletes a project when no sprints or tasks reference it', async () => {
+    const { app, store } = createHarness();
+    const project = createProject(store, { id: 'delete-me' });
+    const server = await startHttpApp(app);
+    try {
+      const response = await fetchJson(server.baseUrl, `/api/projects/${encodeURIComponent(project.id)}`, {
+        method: 'DELETE',
+      });
+      assert.equal(response.status, 200);
+      assert.equal(store.getProject(project.id), null);
+    } finally {
+      await server.close();
+    }
+  });
+
+  it('GET/PUT kanban-roles lists runners and persists mapping', async () => {
+    const { app, store } = createHarness();
+    const project = createProject(store);
+    const server = await startHttpApp(app);
+    try {
+      const getRes = await fetchJson(server.baseUrl, `/api/projects/${encodeURIComponent(project.id)}/kanban-roles`);
+      assert.equal(getRes.status, 200);
+      const runners = (getRes.body as { runners: { id: string }[] }).runners;
+      assert.ok(Array.isArray(runners) && runners.some((r) => r.id === 'default'));
+
+      const putRes = await fetchJson(server.baseUrl, `/api/projects/${encodeURIComponent(project.id)}/kanban-roles`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          kanbanRoleRunners: {
+            'agent-dev': 'default',
+            'claude-review': 'default',
+            'copilot-test': '',
+            'codex-senior': '',
+          },
+        }),
+      });
+      assert.equal(putRes.status, 200);
+      const p = store.getProject(project.id);
+      assert.equal(p?.kanbanRoleRunners?.['agent-dev'], 'default');
+      assert.equal(p?.kanbanRoleRunners?.['claude-review'], 'default');
+    } finally {
+      await server.close();
+    }
+  });
+
+  it('GET /api/projects/:id/next-issue-id returns preview', async () => {
+    const { app, store } = createHarness();
+    const project = createProject(store);
+    const server = await startHttpApp(app);
+    try {
+      const r = await fetchJson(server.baseUrl, `/api/projects/${encodeURIComponent(project.id)}/next-issue-id`);
+      assert.equal(r.status, 200);
+      assert.equal((r.body as { issueId: string }).issueId, 'PROJECT-1');
+    } finally {
+      await server.close();
+    }
+  });
+
+  it('rejects project delete when sprints exist', async () => {
+    const { app, store } = createHarness();
+    const project = createProject(store);
+    createSprint(store, project.id);
+    const server = await startHttpApp(app);
+    try {
+      const response = await fetchJson(server.baseUrl, `/api/projects/${encodeURIComponent(project.id)}`, {
+        method: 'DELETE',
+      });
+      assert.equal(response.status, 400);
+      const err = (response.body as { error?: string }).error ?? '';
+      assert.ok(err.includes('sprint') || err.includes('task'));
     } finally {
       await server.close();
     }
@@ -252,13 +317,6 @@ describe('Platform app integration', () => {
       status: 'running',
       branchName: taskSession.branchName,
       workingDirectory: '/tmp/agent-im',
-      jira: {
-        baseUrl: 'https://jira.example.test',
-        issueId: taskSession.issueId,
-        email: 'bot@example.test',
-        apiToken: 'token',
-        pollIntervalMs: 1000,
-      },
       approvalsRequired: true,
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
@@ -310,7 +368,7 @@ describe('Platform app integration', () => {
     }
   });
 
-  it('resolves approvals and Jira webhooks through dedicated APIs', async () => {
+  it('resolves approvals through the dedicated API', async () => {
     const { app, store, instanceManager } = createHarness();
     const project = createProject(store);
     const sprint = createSprint(store, project.id);
@@ -343,20 +401,6 @@ describe('Platform app integration', () => {
           },
         },
       ]);
-
-      const webhook = await fetchJson(server.baseUrl, '/api/webhooks/jira', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          projectId: project.id,
-          sprintId: sprint.id,
-          issueId: 'ISSUE-404',
-          title: 'Hook triggered task',
-          status: 'In Progress',
-          runtime: 'cursor',
-        }),
-      });
-      assert.equal((webhook.body as { ok: boolean }).ok, true);
     } finally {
       await server.close();
     }

@@ -4,7 +4,7 @@ export const ROLE_PROMPTS: Record<AgentRole, string> = {
   developer: [
     'You are the Developer agent inside the agent-im DevOps Agentic Platform.',
     'Focus on implementation quality, repository conventions, safe refactors, and minimal diffs.',
-    'Always keep task context isolated to the current Jira issue and branch.',
+    'Always keep task context isolated to the current Kanban issue and branch.',
     'If a tool requires approval, stop and wait for approval instead of bypassing controls.',
     'Leave clear commit-ready changes and explain trade-offs tersely.',
   ].join('\n'),
@@ -19,7 +19,7 @@ export const ROLE_PROMPTS: Record<AgentRole, string> = {
     'You are the Tester agent inside the agent-im DevOps Agentic Platform.',
     'Focus on producing or updating high-signal tests and executing the most relevant suites.',
     'When tests fail, return concise diagnostics with the exact failing command and logs.',
-    'Do not leak context across tasks; report only against the current Jira issue.',
+    'Do not leak context across tasks; report only against the current Kanban issue.',
     'Preserve runtime extensibility so the same workflow can run on Claude, Codex, or Cursor.',
   ].join('\n'),
 };
@@ -78,12 +78,19 @@ export function buildRolePrompt({
     `- Sprint branch: ${sprint.branchName}`,
     `- Task branch: ${taskSession.branchName ?? 'not assigned yet'}`,
     `- Workflow state: ${taskSession.workflowState}`,
-    `- Jira issue: ${taskSession.issueId}`,
+    `- Issue: ${taskSession.issueId}`,
     `- Task title: ${taskSession.title}`,
     '',
     'Platform guardrails:',
     '- Context Isolation: use only the current task queue and session history.',
     '- Permission Control: wait for approval when the runtime requests it.',
     '- Runtime Extensibility: avoid runtime-specific assumptions unless necessary.',
+    '',
+    'Workflow automation (when the server has workflow auto-advance enabled):',
+    `To advance the Kanban board without a separate API call, end your reply with a final line exactly like one of the following (no extra text on that line):`,
+    '- `KANBAN_ACTION:SUBMIT_REVIEW` — developer in **in_progress** (submit PR for review).',
+    '- `KANBAN_ACTION:START_TESTING` or `KANBAN_ACTION:REJECT_REVIEW` — reviewer in **review**; for reject, add optional lines after the action with the comment.',
+    '- `KANBAN_ACTION:START_REGRESSION` — tester in **testing** feature-test phase.',
+    '- `KANBAN_ACTION:CLOSE` — tester in **testing** or **regression_testing** when work is done.',
   ].join('\n');
 }

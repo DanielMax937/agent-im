@@ -1,3 +1,4 @@
+import { notifyWorkflowStateTransition } from './kanban-transition-notify';
 import { JsonPlatformStore } from './json-platform-store';
 import type { TaskFailurePayload } from './types';
 import { InstanceManager } from './instance-manager';
@@ -22,6 +23,14 @@ export class CompensationService {
       'Logs:',
       payload.log,
     ].join('\n');
+
+    await notifyWorkflowStateTransition({
+      task: taskSession,
+      from: taskSession.workflowState,
+      to: 'in_progress',
+      outgoingRole: 'tester',
+      actionLabel: '测试失败退回开发',
+    });
 
     this.store.enqueueTaskMessage({
       queueKey: taskSession.messageQueueKey,

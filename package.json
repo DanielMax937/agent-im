@@ -17,6 +17,7 @@
   "dependencies": {
     "@anthropic-ai/claude-agent-sdk": "^0.2.62",
     "@larksuiteoapi/node-sdk": "^1.59.0",
+    "better-sqlite3": "^11.10.0",
     "discord.js": "^14.25.1",
     "markdown-it": "^14.1.1",
     "next": "^16.1.6",
@@ -31,6 +32,7 @@
     "redis": "^4.7.0"
   },
   "devDependencies": {
+    "@types/better-sqlite3": "^7.6.13",
     "@types/markdown-it": "^14.1.2",
     "@types/node": "^22",
     "@types/react": "^19.2.14",

@@ -61,11 +61,14 @@ export class GitService {
     await this.runGit(input.repoPath, ['checkout', input.baseBranch]);
     await this.runGit(input.repoPath, ['pull', 'origin', input.baseBranch]);
     await this.runGit(input.repoPath, ['checkout', '-B', input.nextBranch, input.baseBranch]);
+    await this.pushBranch(input.repoPath, input.nextBranch);
     return input.nextBranch;
   }
 
   async createTaskBranch(input: CreateBranchInput): Promise<string> {
-    await this.runGit(input.repoPath, ['fetch', 'origin', input.baseBranch]);
+    // Sprint branches (e.g. feature/sprint1) often exist only locally after `startSprint`;
+    // `git fetch origin <branch>` fails if that ref was never pushed. Refresh remotes, then use local base.
+    await this.runGit(input.repoPath, ['fetch', 'origin']);
     await this.runGit(input.repoPath, ['checkout', input.baseBranch]);
     await this.runGit(input.repoPath, ['checkout', '-B', input.nextBranch, input.baseBranch]);
     return input.nextBranch;
@@ -81,7 +84,7 @@ export class GitService {
     worktreePath: string;
     branchName: string;
   }): Promise<void> {
-    await this.runGit(input.repoPath, ['fetch', 'origin', input.baseBranch]);
+    await this.runGit(input.repoPath, ['fetch', 'origin']);
     await this.runGit(input.repoPath, [
       'worktree',
       'add',

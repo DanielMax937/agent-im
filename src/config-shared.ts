@@ -95,12 +95,6 @@ export interface Config {
   proxy?: string;
   // Auto-approve all tool permission requests without user confirmation
   autoApprove?: boolean;
-  // Jira (platform agents; also exposed to process via config.env)
-  jiraBaseUrl?: string;
-  jiraEmail?: string;
-  jiraApiToken?: string;
-  jiraPollIntervalMs?: number;
-  jiraBotAccountId?: string;
   /**
    * Numbered Agent bridge instances (CTI_AGENT_1_*, …). Written to config.env;
    * use with `syncConfigFileToProcessEnv()` so the agent adapter sees them.
@@ -108,7 +102,7 @@ export interface Config {
   agentEnvSlots?: AgentEnvSlot[];
   /**
    * Bridge-level runner list (`CTI_RUNNERS`). Used when **no** `imBot`, or as fallback
-   * when `imBot.runners` is empty, and for platform/Jira.
+   * when `imBot.runners` is empty, and for the local Kanban platform.
    */
   runners?: RunnerConfig[];
   /** Default runner id for legacy flat config / platform (`CTI_DEFAULT_RUNNER`). */

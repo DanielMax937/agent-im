@@ -30,7 +30,7 @@ export interface BridgeContext {
   llm: LLMProvider;
   /**
    * IM bridge: pick LLM per chat binding (multi-runner under one bot).
-   * Jira/platform code does not use this path.
+   * Platform Kanban code does not use this path.
    */
   resolveLlmForBinding?: (binding: ChannelBinding) => LLMProvider;
   /**

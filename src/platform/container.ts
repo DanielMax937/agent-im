@@ -69,10 +69,14 @@ async function createPlatformContainer(): Promise<PlatformContainer> {
   });
 
   const store = new JsonPlatformStore();
+  let workflowService: WorkflowService;
   const instanceManager = InstanceManager.getInstance({
     store,
+    onAgentTurnComplete: async (taskSessionId, role, instanceId) => {
+      await workflowService.maybeAutoAdvanceAfterAgentTurn(taskSessionId, role, instanceId);
+    },
   });
-  const workflowService = new WorkflowService({
+  workflowService = new WorkflowService({
     store,
     gitService: new GitService(),
     scmClient: new HttpScmClient(),

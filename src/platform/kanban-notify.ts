@@ -1,8 +1,9 @@
 import type { TaskConversationEntry } from './types';
 
 /**
- * Optional Telegram fan-out for Kanban / workflow comments.
- * Set `CTI_KANBAN_TELEGRAM_BOT_TOKEN` + `CTI_KANBAN_TELEGRAM_CHAT_ID` (or topic thread id as string).
+ * Outbound Telegram only (`sendMessage`); no getUpdates / long polling.
+ * Optional env: `CTI_KANBAN_TELEGRAM_BOT_TOKEN`, `CTI_KANBAN_TELEGRAM_CHAT_ID`,
+ * optional `CTI_KANBAN_TELEGRAM_MESSAGE_THREAD_ID` (forum topic).
  */
 export async function notifyKanbanTelegram(message: string): Promise<void> {
   const token = process.env.CTI_KANBAN_TELEGRAM_BOT_TOKEN?.trim();

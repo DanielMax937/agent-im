@@ -14,14 +14,14 @@ Agentic Auto Kanban / DevOps platform built on top of the original IM bridge.
 - **Pino logging** with secret masking
 - **Sprint / Task / Session / Agent Instance** persistence
 - **Agentic workflow orchestration** for `Todo -> In Progress -> Review -> Testing -> Closed`
-- **Jira comment adapter** so issue comments can drive agent execution
+- **Per-task message queues** drive agent execution (local Kanban; optional Telegram fan-out)
 - **Runtime abstraction** for Claude, Codex, and Cursor
 - **IM bridge** for Telegram / Discord / Feishu / QQ
 
 The result is a hybrid platform:
 
 ```text
-Jira / Web UI / IM channels
+Web UI / IM channels
         |
         v
 Next.js platform server
@@ -33,7 +33,6 @@ Next.js platform server
 Platform services
   - WorkflowService
   - InstanceManager
-  - JiraAdapter
   - GitService / SCM client
         |
         v
@@ -63,7 +62,7 @@ Represents an iteration branch, usually:
 
 ### Task Session
 
-Maps one Jira issue to one persistent task context:
+Maps one Kanban issue id to one persistent task context:
 
 - workflow state
 - runtime
@@ -89,7 +88,7 @@ The platform implements an automated kanban pipeline:
 
 2. **Task assignment**
    - API creates `dev/<task-id>` from the sprint branch
-   - a developer agent instance starts for the Jira issue
+   - a developer agent instance starts for the task
 
 3. **Review**
    - after task submission, the platform commits, pushes, and creates a PR / MR
@@ -170,7 +169,6 @@ Properties:
 - `POST /api/instances/reconcile`
 - `POST /api/instances/:instanceId/start`
 - `POST /api/instances/:instanceId/stop`
-- `POST /api/webhooks/jira`
 - `POST /api/bridge/:action`
 
 ## Sprint walkthrough example
@@ -212,15 +210,9 @@ Expected result:
 - sprint record is persisted
 - Git creates / checks out `feature/sprint-alpha`
 
-## Jira-driven execution
+## Local Kanban execution
 
-The platform supports **Jira comment as transport**:
-
-- Jira comments are polled as inbound task instructions
-- agent replies are written back as Jira comments
-- bot-authored comments are ignored to prevent loops
-
-This allows a Jira issue to act as the task inbox for developer / reviewer / tester agents.
+Agents read **workflow events and the per-task queue** (assign, review handoff, tester feedback). Optional **Telegram** (`CTI_KANBAN_TELEGRAM_*`) mirrors conversation lines and approval notices; there is no external issue tracker integration.
 
 ## IM bridge
 
@@ -304,7 +296,6 @@ npm run typecheck
 | `src/platform/container.ts` | Shared platform bootstrap |
 | `src/platform/workflow-service.ts` | Sprint/task state machine |
 | `src/platform/instance-manager.ts` | Runtime instance lifecycle |
-| `src/platform/jira-adapter.ts` | Jira comment adapter |
 | `src/platform/json-platform-store.ts` | Platform persistence |
 | `src/logger.ts` | Pino logger with secret masking |
 | `src/app/page.tsx` | Next.js platform landing page |

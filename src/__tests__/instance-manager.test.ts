@@ -2,31 +2,16 @@ import { beforeEach, describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 
-import { JsonPlatformStore } from '../platform/json-platform-store';
 import { InstanceManager } from '../platform/instance-manager';
-import type { JiraApiClient, JiraComment } from '../platform/jira-adapter';
 import { sseEvent } from '../sse-utils';
 import {
   createProject,
   createSprint,
   createTaskSession,
+  createTestJsonPlatformStore,
   PLATFORM_DIR,
   waitFor,
 } from './platform-test-helpers';
-
-class FakeJiraClient implements JiraApiClient {
-  public comments: JiraComment[] = [];
-  public createdBodies: string[] = [];
-
-  async listIssueComments(): Promise<JiraComment[]> {
-    return [...this.comments];
-  }
-
-  async createIssueComment(_issueId: string, body: string): Promise<{ id: string }> {
-    this.createdBodies.push(body);
-    return { id: `comment-${this.createdBodies.length}` };
-  }
-}
 
 describe('InstanceManager', () => {
   beforeEach(() => {
@@ -35,7 +20,7 @@ describe('InstanceManager', () => {
   });
 
   function createStoreFixture() {
-    const store = new JsonPlatformStore();
+    const store = createTestJsonPlatformStore();
     const project = createProject(store);
     const sprint = createSprint(store, project.id);
     const taskSession = createTaskSession(store, project.id, sprint.id);
@@ -50,13 +35,6 @@ describe('InstanceManager', () => {
       status: 'starting',
       branchName: taskSession.branchName,
       workingDirectory: '/tmp/agent-im',
-      jira: {
-        baseUrl: 'https://jira.example.test',
-        issueId: taskSession.issueId,
-        email: 'bot@example.test',
-        apiToken: 'token',
-        pollIntervalMs: 1000,
-      },
       approvalsRequired: true,
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
@@ -66,7 +44,6 @@ describe('InstanceManager', () => {
 
   it('starts an instance, consumes queued work, and stops cleanly with mocked LLM output', async () => {
     const { store, taskSession, instance } = createStoreFixture();
-    const jiraClient = new FakeJiraClient();
     store.enqueueTaskMessage({
       queueKey: taskSession.messageQueueKey,
       taskId: taskSession.taskId,
@@ -77,7 +54,6 @@ describe('InstanceManager', () => {
 
     const manager = InstanceManager.getInstance({
       store,
-      jiraClientFactory: () => jiraClient,
       providerFactory: async (_instance, _pendingPermissions) => ({
         streamChat() {
           return new ReadableStream<string>({
@@ -94,12 +70,12 @@ describe('InstanceManager', () => {
     await manager.startInstance(instance.id);
 
     await waitFor(() => {
-      assert.equal(jiraClient.createdBodies.some((body) => body.includes('implementation complete')), true);
+      const ts = store.getTaskSession(taskSession.id);
+      assert.equal(ts?.conversationHistory.at(-1)?.content, 'implementation complete');
     });
 
     const updatedTaskSession = store.getTaskSession(taskSession.id);
     assert.equal(updatedTaskSession?.providerSessionId, 'sdk-123');
-    assert.equal(updatedTaskSession?.conversationHistory.at(-1)?.content, 'implementation complete');
     assert.deepEqual(manager.listRunningInstanceIds(), [instance.id]);
 
     await manager.stopInstance(instance.id);
@@ -109,7 +85,6 @@ describe('InstanceManager', () => {
 
   it('resolves approval requests created by a mocked runtime stream', async () => {
     const { store, taskSession, instance } = createStoreFixture();
-    const jiraClient = new FakeJiraClient();
     store.enqueueTaskMessage({
       queueKey: taskSession.messageQueueKey,
       taskId: taskSession.taskId,
@@ -120,7 +95,6 @@ describe('InstanceManager', () => {
 
     const manager = InstanceManager.getInstance({
       store,
-      jiraClientFactory: () => jiraClient,
       providerFactory: async (_instance, pendingPermissions) => ({
         streamChat() {
           return new ReadableStream<string>({
@@ -148,7 +122,6 @@ describe('InstanceManager', () => {
 
     await waitFor(() => {
       assert.ok(store.getPendingApproval('approval-1'));
-      assert.equal(jiraClient.createdBodies.some((body) => body.includes('Approval required for bash.')), true);
     });
 
     const resolved = manager.resolveApproval('approval-1', { behavior: 'allow' });
@@ -156,7 +129,6 @@ describe('InstanceManager', () => {
 
     await waitFor(() => {
       assert.equal(store.getPendingApproval('approval-1')?.status, 'approved');
-      assert.equal(jiraClient.createdBodies.some((body) => body.includes('approval:allow')), true);
     });
 
     await manager.stopInstance(instance.id);
@@ -164,7 +136,6 @@ describe('InstanceManager', () => {
 
   it('reconciles persisted instances and stops runners removed from storage', async () => {
     const { store, taskSession, instance } = createStoreFixture();
-    const jiraClient = new FakeJiraClient();
     store.enqueueTaskMessage({
       queueKey: taskSession.messageQueueKey,
       taskId: taskSession.taskId,
@@ -179,7 +150,6 @@ describe('InstanceManager', () => {
 
     const manager = InstanceManager.getInstance({
       store,
-      jiraClientFactory: () => jiraClient,
       providerFactory: async (_instance, _pendingPermissions) => ({
         streamChat() {
           return new ReadableStream<string>({

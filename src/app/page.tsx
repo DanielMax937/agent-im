@@ -1,13 +1,18 @@
 const platformEndpoints = [
   'GET /health',
   'GET /api/projects',
+  'GET /api/projects/:projectId/next-issue-id',
+  'GET /api/projects/:projectId/kanban-roles',
+  'PUT /api/projects/:projectId/kanban-roles',
+  'GET /api/platform/runners',
+  'POST /api/projects',
+  'DELETE /api/projects/:projectId',
   'GET /api/sprints',
   'GET /api/tasks',
   'GET /api/instances',
   'GET /api/approvals',
   'POST /api/workflows/sprints/start',
   'POST /api/workflows/tasks/assign',
-  'POST /api/webhooks/jira',
 ];
 
 export default function HomePage() {
@@ -17,10 +22,11 @@ export default function HomePage() {
         <p className="eyebrow">agent-im</p>
         <h1>基于 Next.js 的 DevOps 智能体平台</h1>
         <p className="lead">
-          Web 服务由 Next.js 承载；平台 API、Jira 工作流引擎与多实例运行器仍通过统一的 HTTP 层对外提供，便于复用与集成。
+          Web 服务由 Next.js 承载；平台 API、本地 Kanban 工作流与多实例运行器仍通过统一的 HTTP 层对外提供，便于复用与集成。
         </p>
         <div className="actions">
           <a href="/admin">管理后台（桥接与配置）</a>
+          <a href="/projects">项目管理</a>
           <a href="/board">任务看板</a>
           <a href="/health">健康检查</a>
           <a href="/api/bridge/status">桥接状态（JSON）</a>

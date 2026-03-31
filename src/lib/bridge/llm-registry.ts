@@ -1,6 +1,6 @@
 /**
  * IM bridge: one LLM provider per (IM bot × runner id), resolved per ChannelBinding.
- * Jira/platform agents use a separate stack in `src/platform/` — see docs/IM_BRIDGE_MODEL.md.
+ * Platform Kanban agents use a separate stack in `src/platform/` — see docs/IM_BRIDGE_MODEL.md.
  */
 
 import type { Config } from '../../config';

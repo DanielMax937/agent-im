@@ -17,6 +17,14 @@ export type TaskWorkflowState =
  * - codex-senior: escalation developer after repeated review pushback
  */
 export type KanbanAgentKind = 'agent-dev' | 'claude-review' | 'copilot-test' | 'codex-senior';
+
+/** One human or logical assignee in a Kanban lane; each has their own runner profile. */
+export interface KanbanRoleMember {
+  id: string;
+  name: string;
+  /** Runner id from `CTI_RUNNERS` / project mapping. */
+  runnerProfileId: string;
+}
 export type SprintStatus = 'planned' | 'active' | 'closed';
 export type AgentInstanceStatus = 'stopped' | 'starting' | 'running' | 'error';
 export type TaskMessageType = 'directive' | 'review_feedback' | 'test_failure' | 'system';
@@ -46,6 +54,21 @@ export interface Project {
   name: string;
   /** Optional human owner (e.g. @telegram or name) for status queries. */
   owner?: string;
+  /**
+   * Prefix for auto-generated issue ids (`PREFIX-1`, …). Unique per project is enforced
+   * by `(projectId, issueId)`; if unset, derived from the first segment of `id` (e.g. `demo-x` → `DEMO`).
+   */
+  issueIdPrefix?: string;
+  /**
+   * Maps Kanban lane → runner id (`CTI_RUNNERS` / `config.env`). When set, overrides default
+   * runtime-only resolution for that lane (developer / reviewer / tester instances).
+   * If `kanbanRoleMembers[kind]` is non-empty, members take precedence for assignment.
+   */
+  kanbanRoleRunners?: Partial<Record<KanbanAgentKind, string>>;
+  /**
+   * Multiple assignees per lane; each row has a runner. Used for auto (sticky + least-loaded) or manual pick.
+   */
+  kanbanRoleMembers?: Partial<Record<KanbanAgentKind, KanbanRoleMember[]>>;
   repository: ProjectRepository;
   agents: ProjectAgentProfile[];
   createdAt: string;
@@ -69,7 +92,7 @@ export interface Sprint {
 export interface TaskConversationEntry {
   id: string;
   role: 'system' | 'user' | 'assistant';
-  source: 'jira' | 'workflow' | 'developer' | 'reviewer' | 'tester';
+  source: 'kanban' | 'workflow' | 'developer' | 'reviewer' | 'tester';
   content: string;
   createdAt: string;
 }
@@ -88,6 +111,8 @@ export interface TaskSession {
   role: AgentRole;
   /** Last lane used when assigning work (drives prompts + runner selection). */
   kanbanAgent?: KanbanAgentKind;
+  /** Sticky assignee per lane (`KanbanRoleMember.id`) for auto-routing and history. */
+  kanbanAssignees?: Partial<Record<KanbanAgentKind, string>>;
   /** Review rounds pushed back to development (used to escalate to codex-senior). */
   reviewRejectionCount?: number;
   /** Read by the next agent at start (also mirrored into prompts). */
@@ -113,15 +138,6 @@ export interface TaskSession {
   updatedAt: string;
 }
 
-export interface JiraInstanceConfig {
-  baseUrl: string;
-  issueId: string;
-  email: string;
-  apiToken: string;
-  pollIntervalMs: number;
-  botAccountId?: string;
-}
-
 export interface AgentInstanceRecord {
   id: string;
   projectId: string;
@@ -135,7 +151,6 @@ export interface AgentInstanceRecord {
   status: AgentInstanceStatus;
   branchName?: string;
   workingDirectory: string;
-  jira: JiraInstanceConfig;
   approvalsRequired: boolean;
   createdAt: string;
   updatedAt: string;
@@ -184,7 +199,8 @@ export interface StartSprintInput {
 export interface CreateTaskInput {
   projectId: string;
   sprintId: string;
-  issueId: string;
+  /** Omit to auto-generate `{issueIdPrefix}-n` unique within this project. */
+  issueId?: string;
   title: string;
 }
 
@@ -206,6 +222,10 @@ export interface AssignTaskInput {
   taskSessionId?: string;
   kanbanAgent?: KanbanAgentKind;
   handoffComment?: string;
+  /** When project defines members for this lane, pick this assignee; omit for auto (sticky → least load). */
+  assigneeMemberId?: string;
+  /** Default true. Set false to require `assigneeMemberId` when members exist. */
+  autoAssign?: boolean;
 }
 
 export interface SubmitTaskForReviewInput {
@@ -213,6 +233,11 @@ export interface SubmitTaskForReviewInput {
   commitMessage: string;
   prTitle: string;
   prBody: string;
+  /**
+   * When set (e.g. workflow auto-advance from this runner), that instance is stopped
+   * after the transition finishes so the runner is not awaited while still inside its loop.
+   */
+  deferStopInstanceId?: string;
 }
 
 export interface ApprovalResolutionInput {
@@ -220,12 +245,25 @@ export interface ApprovalResolutionInput {
   message?: string;
 }
 
-export interface JiraWebhookPayload {
+/**
+ * One row per queue turn toward a target agent: who handed off, who receives,
+ * prior agent’s last reply (empty on first assignment), and the prompt sent to the target.
+ */
+export interface KanbanAgentTurnRecord {
+  id: string;
   projectId: string;
-  sprintId?: string;
-  issueId: string;
-  issueKey?: string;
-  title?: string;
-  status?: string;
-  runtime?: AgentRuntime;
+  taskSessionId: string;
+  /** Issue id (board / filter). */
+  taskId: string;
+  createdAt: string;
+  /** Who handed off (lane/role label); empty on first todo → assign kickoff. */
+  sourceAgent: string;
+  /** Who is prompted this turn (lane/role). */
+  targetAgent: string;
+  /** Last assistant message before this turn; empty on first assignment. */
+  sourceAgentResponse: string;
+  /** Full prompt bundle sent to the target runtime (system + history + user turn). */
+  targetAgentPrompt: string;
+  /** Set when the stream failed. */
+  streamError?: string;
 }

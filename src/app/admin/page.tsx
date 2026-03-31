@@ -572,6 +572,7 @@ export default function AdminPage() {
           <h1 style={{ marginBottom: '0.5rem' }}>桥接与平台</h1>
           <nav className="ui-nav">
             <a href="/">首页</a>
+            <a href="/projects">项目管理</a>
             <a href="/board">任务看板</a>
             <a href="/health">健康检查</a>
             <a href="/monitor">Auto Monitor</a>

@@ -1,8 +1,15 @@
 'use client';
 
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState, type KeyboardEvent } from 'react';
 
-import type { KanbanAgentKind, Project, Sprint, TaskSession, TaskWorkflowState } from '../../platform/types';
+import type {
+  KanbanAgentKind,
+  KanbanRoleMember,
+  Project,
+  Sprint,
+  TaskSession,
+  TaskWorkflowState,
+} from '../../platform/types';
 
 const COLUMNS: { key: TaskWorkflowState; label: string }[] = [
   { key: 'todo', label: '待办' },
@@ -44,36 +51,44 @@ export default function BoardPage() {
   const [tasks, setTasks] = useState<TaskSession[]>([]);
   const [projects, setProjects] = useState<Project[]>([]);
   const [sprints, setSprints] = useState<Sprint[]>([]);
-  const [projectId, setProjectId] = useState('');
+  /** 看板任务列表筛选（空 = 显示全部项目） */
+  const [filterProjectId, setFilterProjectId] = useState('');
+  /** 新建任务 / 迭代 / 预览 Issue 所用项目 */
+  const [createProjectId, setCreateProjectId] = useState('');
   const [sprintId, setSprintId] = useState('');
-  const [createIssueId, setCreateIssueId] = useState('');
+  const [nextIssueHint, setNextIssueHint] = useState('');
+  const [newSprintName, setNewSprintName] = useState('');
   const [createTitle, setCreateTitle] = useState('');
-  const [assignAgent, setAssignAgent] = useState<KanbanAgentKind>('agent-dev');
-  const [handoff, setHandoff] = useState('');
-  const [prByTask, setPrByTask] = useState<Record<string, { commit: string; title: string; body: string }>>({});
-  const [rejectByTask, setRejectByTask] = useState<Record<string, string>>({});
+  /** 待办领取弹窗：当前选中的任务；null 表示关闭 */
+  const [assignModalTask, setAssignModalTask] = useState<TaskSession | null>(null);
+  const [modalAssignAgent, setModalAssignAgent] = useState<KanbanAgentKind>('agent-dev');
+  const [modalHandoff, setModalHandoff] = useState('');
+  /** Loaded when assign modal opens — project kanbanRoleMembers from API */
+  const [laneMembersByKind, setLaneMembersByKind] = useState<
+    Partial<Record<KanbanAgentKind, KanbanRoleMember[]>> | null
+  >(null);
+  const [modalAssignMode, setModalAssignMode] = useState<'auto' | 'manual'>('auto');
+  const [modalAssigneeMemberId, setModalAssigneeMemberId] = useState('');
   const [kanbanStatus, setKanbanStatus] = useState<KanbanStatus | null>(null);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  function prDraft(taskId: string) {
-    return prByTask[taskId] ?? { commit: '', title: '', body: '' };
-  }
+  useEffect(() => {
+    setModalAssigneeMemberId('');
+  }, [modalAssignAgent]);
 
-  function setPrField(taskId: string, patch: Partial<{ commit: string; title: string; body: string }>) {
-    setPrByTask((prev) => ({
-      ...prev,
-      [taskId]: { ...prDraft(taskId), ...patch },
-    }));
-  }
+  const modalLaneRoster = useMemo(
+    () => laneMembersByKind?.[modalAssignAgent] ?? [],
+    [laneMembersByKind, modalAssignAgent],
+  );
 
   const load = useCallback(async () => {
     setLoading(true);
     setError(null);
     try {
-      const taskUrl = projectId
-        ? `/api/tasks?projectId=${encodeURIComponent(projectId)}`
+      const taskUrl = filterProjectId
+        ? `/api/tasks?projectId=${encodeURIComponent(filterProjectId)}`
         : '/api/tasks';
       const [taskRes, projRes] = await Promise.all([fetch(taskUrl), fetch('/api/projects')]);
       if (!taskRes.ok) throw new Error(await taskRes.text());
@@ -87,7 +102,7 @@ export default function BoardPage() {
     } finally {
       setLoading(false);
     }
-  }, [projectId]);
+  }, [filterProjectId]);
 
   const loadSprints = useCallback(async (pid: string) => {
     if (!pid) {
@@ -112,8 +127,69 @@ export default function BoardPage() {
   }, [load]);
 
   useEffect(() => {
-    if (projectId) void loadSprints(projectId);
-  }, [projectId, loadSprints]);
+    if (createProjectId) void loadSprints(createProjectId);
+  }, [createProjectId, loadSprints]);
+
+  useEffect(() => {
+    if (projects.length === 0) return;
+    setCreateProjectId((prev) => prev || projects[0].id);
+  }, [projects]);
+
+  useEffect(() => {
+    if (!assignModalTask) return;
+    const onKey = (e: globalThis.KeyboardEvent) => {
+      if (e.key === 'Escape') setAssignModalTask(null);
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [assignModalTask]);
+
+  useEffect(() => {
+    if (!createProjectId) {
+      setNextIssueHint('');
+      return;
+    }
+    let cancelled = false;
+    void fetch(`/api/projects/${encodeURIComponent(createProjectId)}/next-issue-id`, { cache: 'no-store' })
+      .then(async (res) => {
+        const data = (await res.json()) as { issueId?: string; error?: string };
+        if (!cancelled && res.ok && data.issueId) setNextIssueHint(data.issueId);
+        else if (!cancelled) setNextIssueHint('');
+      })
+      .catch(() => {
+        if (!cancelled) setNextIssueHint('');
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [createProjectId, tasks]);
+
+  async function startSprint() {
+    if (!createProjectId || !newSprintName.trim()) {
+      setError('请选择项目并填写迭代名称（如 Sprint 1）');
+      return;
+    }
+    setBusy(true);
+    setError(null);
+    try {
+      const res = await fetch('/api/workflows/sprints/start', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          projectId: createProjectId,
+          sprintName: newSprintName.trim(),
+        }),
+      });
+      if (!res.ok) throw new Error(await res.text());
+      setNewSprintName('');
+      await loadSprints(createProjectId);
+      await load();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
 
   const byColumn = useMemo(() => {
     const map = new Map<TaskWorkflowState, TaskSession[]>();
@@ -126,8 +202,8 @@ export default function BoardPage() {
   }, [tasks]);
 
   async function createTask() {
-    if (!projectId || !sprintId || !createIssueId.trim() || !createTitle.trim()) {
-      setError('请选择项目、迭代，并填写 issueId 与标题');
+    if (!createProjectId || !sprintId || !createTitle.trim()) {
+      setError('请选择项目、迭代，并填写标题（Issue ID 将按项目自动生成）');
       return;
     }
     setBusy(true);
@@ -137,14 +213,12 @@ export default function BoardPage() {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          projectId,
+          projectId: createProjectId,
           sprintId,
-          issueId: createIssueId.trim(),
           title: createTitle.trim(),
         }),
       });
       if (!res.ok) throw new Error(await res.text());
-      setCreateIssueId('');
       setCreateTitle('');
       await load();
     } catch (e) {
@@ -154,9 +228,46 @@ export default function BoardPage() {
     }
   }
 
-  async function assignFromTodo(task: TaskSession) {
-    if (!handoff.trim()) {
-      setError('分配前请填写交接说明（会写入 comment 并发 Telegram）');
+  function openAssignModal(task: TaskSession) {
+    setAssignModalTask(task);
+    setModalAssignAgent('agent-dev');
+    setModalHandoff('');
+    setModalAssignMode('auto');
+    setModalAssigneeMemberId('');
+    setLaneMembersByKind(null);
+    setError(null);
+  }
+
+  useEffect(() => {
+    const task = assignModalTask;
+    if (!task) {
+      setLaneMembersByKind(null);
+      return;
+    }
+    let cancelled = false;
+    void (async () => {
+      try {
+        const res = await fetch(`/api/projects/${encodeURIComponent(task.projectId)}/kanban-roles`, {
+          cache: 'no-store',
+        });
+        if (!res.ok) throw new Error(await res.text());
+        const data = (await res.json()) as { members?: Partial<Record<KanbanAgentKind, KanbanRoleMember[]>> };
+        if (!cancelled) setLaneMembersByKind(data.members ?? {});
+      } catch {
+        if (!cancelled) setLaneMembersByKind({});
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [assignModalTask]);
+
+  async function confirmAssignFromTodo() {
+    const task = assignModalTask;
+    if (!task) return;
+    const roster = laneMembersByKind?.[modalAssignAgent] ?? [];
+    if (modalAssignMode === 'manual' && roster.length > 0 && !modalAssigneeMemberId.trim()) {
+      setError('已选择「指定人员」时请选择一个人员');
       return;
     }
     setBusy(true);
@@ -170,12 +281,18 @@ export default function BoardPage() {
           sprintId: task.sprintId,
           issueId: task.issueId,
           taskSessionId: task.id,
-          kanbanAgent: assignAgent,
-          handoffComment: handoff.trim(),
+          kanbanAgent: modalAssignAgent,
+          handoffComment: modalHandoff.trim() || undefined,
+          assigneeMemberId:
+            modalAssignMode === 'manual' && modalAssigneeMemberId.trim()
+              ? modalAssigneeMemberId.trim()
+              : undefined,
+          autoAssign: modalAssignMode === 'auto',
         }),
       });
       if (!res.ok) throw new Error(await res.text());
-      setHandoff('');
+      setAssignModalTask(null);
+      setModalHandoff('');
       await load();
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
@@ -198,20 +315,12 @@ export default function BoardPage() {
     }
   }
 
-  async function submitReviewApi(task: TaskSession) {
-    const d = prDraft(task.id);
+  async function deleteTaskApi(task: TaskSession) {
+    if (!window.confirm(`确定删除任务「${task.issueId}」？此操作不可恢复。`)) return;
     setBusy(true);
     setError(null);
     try {
-      const res = await fetch(`/api/workflows/tasks/${task.id}/submit-review`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          commitMessage: d.commit.trim() || `feat(${task.issueId}): submit for review`,
-          prTitle: d.title.trim() || `[${task.issueId}] ${task.title}`,
-          prBody: d.body.trim() || 'Submitted from Kanban board.',
-        }),
-      });
+      const res = await fetch(`/api/workflows/tasks/${encodeURIComponent(task.id)}`, { method: 'DELETE' });
       if (!res.ok) throw new Error(await res.text());
       await load();
     } catch (e) {
@@ -221,106 +330,36 @@ export default function BoardPage() {
     }
   }
 
-  async function startTestingApi(task: TaskSession) {
-    setBusy(true);
-    setError(null);
-    try {
-      const res = await fetch(`/api/workflows/tasks/${task.id}/start-testing`, { method: 'POST' });
-      if (!res.ok) throw new Error(await res.text());
-      await load();
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
-    } finally {
-      setBusy(false);
+  function formatResponsibleAgent(task: TaskSession): string {
+    if (task.workflowState === 'todo' && !task.kanbanAgent) {
+      return '未分配';
     }
+    const lane = task.kanbanAgent ? KANBAN_AGENT_LABELS[task.kanbanAgent] : '—';
+    const role = ROLE_LABELS[task.role] ?? task.role;
+    return `${lane} · ${role}`;
   }
 
-  async function rejectReviewApi(task: TaskSession) {
-    const c = (rejectByTask[task.id] ?? '').trim();
-    if (!c) {
-      setError('打回时请填写说明（写入会话并发 Telegram）');
-      return;
-    }
-    setBusy(true);
-    setError(null);
-    try {
-      const res = await fetch(`/api/workflows/tasks/${task.id}/reject-review`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ comment: c }),
-      });
-      if (!res.ok) throw new Error(await res.text());
-      setRejectByTask((prev) => ({ ...prev, [task.id]: '' }));
-      await load();
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  async function startRegressionApi(task: TaskSession) {
-    setBusy(true);
-    setError(null);
-    try {
-      const res = await fetch(`/api/workflows/tasks/${task.id}/start-regression`, { method: 'POST' });
-      if (!res.ok) throw new Error(await res.text());
-      await load();
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  async function refreshRegressionApi(task: TaskSession) {
-    setBusy(true);
-    setError(null);
-    try {
-      const res = await fetch(`/api/workflows/tasks/${task.id}/regression/refresh`, { method: 'POST' });
-      if (!res.ok) throw new Error(await res.text());
-      await load();
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  async function closeTaskApi(task: TaskSession) {
-    setBusy(true);
-    setError(null);
-    try {
-      const res = await fetch(`/api/workflows/tasks/${task.id}/close`, { method: 'POST' });
-      if (!res.ok) throw new Error(await res.text());
-      await load();
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
-    } finally {
-      setBusy(false);
-    }
+  function projectLabel(projectId: string): string {
+    return projects.find((p) => p.id === projectId)?.name ?? projectId;
   }
 
   return (
-    <main className="page-shell ui-board">
+    <main className="page-shell ui-board ui-board-fluid">
       <header className="ui-admin-header">
         <p className="eyebrow">任务</p>
-        <h1>Jira Kanban</h1>
+        <h1>Local Kanban</h1>
         <p className="lead ui-muted">
-          <strong>Goal（与 Slave 报告应对齐）</strong>：<strong>Jira Kanban 改造（Claude-to-IM-skill）</strong>
-          — 本地看板列 <code>todo → in_progress → review → testing → regression_testing → closed</code>
-          。分配/打回/评审/测试/回归 会启动对应 runner；会话记录可 fan-out 到 Telegram（<code>CTI_KANBAN_TELEGRAM_*</code>）；Auto 模式
-          下 Slave 报告标题中的 goal 取<strong>最近一次</strong>
-          <code>User goal:</code>，也可用环境变量 <code>CTI_SLAVE_REPORT_GOAL</code> 固定。
+          列：<code>todo → in_progress → review → testing → regression_testing → closed</code>。
+          <strong>卡片上只保留「删除」</strong>；待办卡片点击标题区仍可领取并分配 lane。提交评审、commit/PR、进入测试/回归、关单等由<strong>各 lane 的 agent</strong>通过工具或自动化调用平台 API 完成，本页不再提供对应按钮。
         </p>
         <p className="lead ui-muted" style={{ marginTop: '0.75rem' }}>
-          <strong>产品说明（g：Git / 测试范围）</strong>：开发阶段可启用 worktree（<code>CTI_KANBAN_USE_WORKTREE=1</code>），在独立检出上开发。
-          <strong>功能测试</strong>阶段只验证本 task 的验收与功能点；合入 master、解决合并冲突、走 PR 合并仍由后续人工或流程完成，不在此阶段自动合入。
-          <strong>回归测试</strong>阶段针对 <code>{'origin/<base>'}</code> 上最新 master（或主分支）跑全量/应用级用例；若在回归过程中主分支出现<strong>新的合并提交</strong>，应<strong>废弃</strong>基于旧提交做的回归分支或本地 checkout，<strong>重新拉取</strong>最新代码后再跑测试，而不是在过时检出上继续补测。工作流提供{' '}
-          <code>refreshRegressionIfMasterAdvanced</code> 用于检测主分支前进并刷新 handoff。
+          Telegram：<code>CTI_KANBAN_TELEGRAM_*</code>；worktree：<code>CTI_KANBAN_USE_WORKTREE=1</code>。Slave goal 与 <code>CTI_SLAVE_REPORT_GOAL</code> 等同原说明。
         </p>
         <nav className="ui-nav">
           <a href="/">首页</a>
+          <a href="/projects">项目管理</a>
+          <a href="/board/roles">角色与 Runner</a>
+          <a href="/board/monitor">Agent 监控</a>
           <a href="/admin">管理后台</a>
           <button type="button" className="ui-btn ghost" disabled={busy} onClick={() => void load()}>
             刷新任务
@@ -366,19 +405,103 @@ export default function BoardPage() {
       ) : null}
 
       <section className="ui-panel" style={{ marginBottom: '1.5rem' }}>
-        <h2 className="ui-h2">新建任务（进入待办）</h2>
+        <h2 className="ui-h2">看板筛选</h2>
+        <p className="ui-muted ui-small" style={{ marginBottom: '0.75rem' }}>
+          仅影响上方任务列显示；与下方「新建任务 / 迭代」独立。选「全部项目」可一次查看所有任务。
+        </p>
+        <label>
+          筛选项目
+          <select
+            className="ui-input"
+            style={{ maxWidth: '420px' }}
+            value={filterProjectId}
+            onChange={(e) => setFilterProjectId(e.target.value)}
+          >
+            <option value="">全部项目</option>
+            {projects.map((p) => (
+              <option key={p.id} value={p.id}>
+                {p.name}
+              </option>
+            ))}
+          </select>
+        </label>
+      </section>
+
+      <section className="ui-panel" style={{ marginBottom: '1.5rem' }}>
+        <h2 className="ui-h2">迭代（Sprint）</h2>
+        <p className="ui-muted ui-small" style={{ marginBottom: '0.75rem' }}>
+          先选项目，再开启迭代（会在仓库中创建 <code>feature/&lt;名称&gt;</code> 分支）。无迭代时无法新建任务。也可在{' '}
+          <a href="/projects">项目管理</a> 中维护仓库路径与分支前缀。
+        </p>
         <div className="ui-form-row" style={{ display: 'flex', flexWrap: 'wrap', gap: '0.75rem', alignItems: 'flex-end' }}>
           <label>
             项目
             <select
               className="ui-input"
-              value={projectId}
+              value={createProjectId}
               onChange={(e) => {
-                setProjectId(e.target.value);
+                setCreateProjectId(e.target.value);
                 setSprintId('');
               }}
             >
-              <option value="">全部项目（看板不筛选）</option>
+              {projects.map((p) => (
+                <option key={p.id} value={p.id}>
+                  {p.name}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label>
+            新迭代名称
+            <input
+              className="ui-input"
+              value={newSprintName}
+              onChange={(e) => setNewSprintName(e.target.value)}
+              placeholder="例如 Sprint Alpha"
+            />
+          </label>
+          <button type="button" className="ui-btn secondary" disabled={busy || !projects.length} onClick={() => void startSprint()}>
+            开启迭代
+          </button>
+        </div>
+        {createProjectId && sprints.length > 0 ? (
+          <ul className="ui-list" style={{ marginTop: '1rem' }}>
+            {sprints.map((s) => (
+              <li key={s.id}>
+                <strong>{s.name}</strong> — <span className="ui-mono">{s.branchName}</span>
+              </li>
+            ))}
+          </ul>
+        ) : createProjectId ? (
+          <p className="ui-muted" style={{ marginTop: '0.75rem' }}>
+            当前项目尚无迭代，请填写名称并点击「开启迭代」。
+          </p>
+        ) : null}
+      </section>
+
+      <section className="ui-panel" style={{ marginBottom: '1.5rem' }}>
+        <h2 className="ui-h2">新建任务（进入待办）</h2>
+        <p className="ui-muted ui-small" style={{ marginBottom: '0.75rem' }}>
+          Issue ID 由服务端按项目自动生成（格式 <code>前缀-序号</code>）。前缀默认取项目 ID 的第一段（如 <code>demo-app</code> →{' '}
+          <code>DEMO</code>），可在 <a href="/projects">项目管理</a> 中设置「Issue 前缀」覆盖。
+          {nextIssueHint ? (
+            <>
+              {' '}
+              下一则预计为：<strong className="ui-mono">{nextIssueHint}</strong>。
+            </>
+          ) : null}
+        </p>
+        <div className="ui-form-row" style={{ display: 'flex', flexWrap: 'wrap', gap: '0.75rem', alignItems: 'flex-end' }}>
+          <label>
+            项目
+            <select
+              className="ui-input"
+              value={createProjectId}
+              onChange={(e) => {
+                setCreateProjectId(e.target.value);
+                setSprintId('');
+              }}
+            >
               {projects.map((p) => (
                 <option key={p.id} value={p.id}>
                   {p.name}
@@ -398,15 +521,6 @@ export default function BoardPage() {
             </select>
           </label>
           <label>
-            Issue ID
-            <input
-              className="ui-input"
-              value={createIssueId}
-              onChange={(e) => setCreateIssueId(e.target.value)}
-              placeholder="PROJ-123"
-            />
-          </label>
-          <label>
             标题
             <input
               className="ui-input"
@@ -415,39 +529,10 @@ export default function BoardPage() {
               placeholder="任务描述"
             />
           </label>
-          <button type="button" className="ui-btn" disabled={busy} onClick={() => void createTask()}>
+          <button type="button" className="ui-btn" disabled={busy || !projects.length} onClick={() => void createTask()}>
             创建
           </button>
         </div>
-      </section>
-
-      <section className="ui-panel" style={{ marginBottom: '1.5rem' }}>
-        <h2 className="ui-h2">从待办领取时的 lane</h2>
-        <p className="ui-muted">
-          从待办领取仅 <code>agent-开发</code> 与 <code>codex-高级开发</code>；<strong>评审累计打回 ≥2 次</strong>时，即使选 agent-开发，服务端也会解析为{' '}
-          <strong>codex-高级开发</strong>（<code>resolveKanbanAgent</code>）。其他 lane：<strong>claude-review</strong> 在「提交评审」后、
-          <strong>copilot-测试</strong> 在「进入测试」后由工作流挂载。
-        </p>
-        <label>
-          Lane
-          <select className="ui-input" value={assignAgent} onChange={(e) => setAssignAgent(e.target.value as KanbanAgentKind)}>
-            {TODO_ASSIGN_AGENTS.map((k) => (
-              <option key={k} value={k}>
-                {KANBAN_AGENT_LABELS[k]}
-              </option>
-            ))}
-          </select>
-        </label>
-        <label style={{ display: 'block', marginTop: '0.5rem' }}>
-          交接说明（必填）
-          <textarea
-            className="ui-input"
-            style={{ width: '100%', minHeight: 72 }}
-            value={handoff}
-            onChange={(e) => setHandoff(e.target.value)}
-            placeholder="下一位 agent 开始时先读此说明"
-          />
-        </label>
       </section>
 
       {loading ? (
@@ -462,121 +547,47 @@ export default function BoardPage() {
               </h2>
               <div className="ui-cards">
                 {(byColumn.get(col.key) ?? []).map((task) => (
-                  <article key={task.id} className="ui-card">
-                    <p className="ui-card-title">{task.title}</p>
-                    <p className="ui-card-meta ui-muted" style={{ fontSize: '0.85rem' }}>
-                      项目：{projects.find((p) => p.id === task.projectId)?.name ?? task.projectId}
-                    </p>
-                    <p className="ui-card-meta">
-                      <span className="ui-mono">{task.issueId}</span>
-                      <span>{task.runtime}</span>
-                    </p>
-                    <p className="ui-card-meta">
-                      <span className="ui-pill">{ROLE_LABELS[task.role] ?? task.role}</span>
-                      {task.kanbanAgent ? (
-                        <span className="ui-pill">{KANBAN_AGENT_LABELS[task.kanbanAgent]}</span>
-                      ) : null}
-                      {task.reviewRejectionCount ? (
-                        <span className="ui-muted">打回 {task.reviewRejectionCount} 次</span>
-                      ) : null}
-                    </p>
-                    {task.handoffComment ? (
-                      <p className="ui-card-meta ui-muted" style={{ fontSize: '0.85rem' }}>
-                        交接：{task.handoffComment}
-                      </p>
-                    ) : null}
-                    {task.pullRequestUrl ? (
-                      <a className="ui-link" href={task.pullRequestUrl} target="_blank" rel="noreferrer">
-                        合并请求
-                      </a>
-                    ) : null}
-                    {task.workflowState === 'todo' ? (
-                      <p style={{ marginTop: '0.5rem' }}>
-                        {task.reviewRejectionCount != null && task.reviewRejectionCount >= 2 ? (
-                          <span className="ui-muted" style={{ display: 'block', marginBottom: '0.35rem' }}>
-                            打回 ≥2：领取 agent-开发 将自动升级为 codex-高级开发
-                          </span>
-                        ) : null}
-                        <button
-                          type="button"
-                          className="ui-btn"
-                          disabled={busy}
-                          onClick={() => void assignFromTodo(task)}
-                        >
-                          分配并启动 runner
-                        </button>
-                      </p>
-                    ) : null}
-                    {task.workflowState === 'in_progress' ? (
-                      <div style={{ marginTop: '0.5rem', fontSize: '0.9rem' }}>
-                        <p className="ui-muted">提交评审 → 创建 PR 并启动 claude-review</p>
-                        <input
-                          className="ui-input"
-                          style={{ width: '100%', marginBottom: 4 }}
-                          placeholder="commit message"
-                          value={prDraft(task.id).commit}
-                          onChange={(e) => setPrField(task.id, { commit: e.target.value })}
-                        />
-                        <input
-                          className="ui-input"
-                          style={{ width: '100%', marginBottom: 4 }}
-                          placeholder="PR title"
-                          value={prDraft(task.id).title}
-                          onChange={(e) => setPrField(task.id, { title: e.target.value })}
-                        />
-                        <textarea
-                          className="ui-input"
-                          style={{ width: '100%', minHeight: 48, marginBottom: 4 }}
-                          placeholder="PR body"
-                          value={prDraft(task.id).body}
-                          onChange={(e) => setPrField(task.id, { body: e.target.value })}
-                        />
-                        <button type="button" className="ui-btn" disabled={busy} onClick={() => void submitReviewApi(task)}>
-                          提交评审（claude-review）
-                        </button>
-                      </div>
-                    ) : null}
-                    {task.workflowState === 'review' ? (
-                      <div style={{ marginTop: '0.5rem', fontSize: '0.9rem' }}>
-                        <button type="button" className="ui-btn" disabled={busy} onClick={() => void startTestingApi(task)}>
-                          进入测试（copilot-测试）
-                        </button>
-                        <textarea
-                          className="ui-input"
-                          style={{ width: '100%', minHeight: 56, marginTop: 6 }}
-                          placeholder="打回说明 → 回到开发（满 2 次打回会走 codex）"
-                          value={rejectByTask[task.id] ?? ''}
-                          onChange={(e) => setRejectByTask((p) => ({ ...p, [task.id]: e.target.value }))}
-                        />
-                        <button type="button" className="ui-btn ghost" disabled={busy} onClick={() => void rejectReviewApi(task)}>
-                          打回开发
-                        </button>
-                      </div>
-                    ) : null}
-                    {task.workflowState === 'testing' ? (
-                      <div style={{ marginTop: '0.5rem' }}>
-                        <button type="button" className="ui-btn" disabled={busy} onClick={() => void startRegressionApi(task)}>
-                          进入回归测试（master / 全量用例）
-                        </button>
-                      </div>
-                    ) : null}
-                    {task.workflowState === 'regression_testing' ? (
-                      <div style={{ marginTop: '0.5rem', fontSize: '0.9rem' }}>
-                        {task.regressionMasterSha ? (
-                          <p className="ui-muted">master 基线 {task.regressionMasterSha.slice(0, 7)}…</p>
-                        ) : null}
-                        <button type="button" className="ui-btn" disabled={busy} onClick={() => void refreshRegressionApi(task)}>
-                          检查 master 是否前进（废弃旧回归并重启 tester）
-                        </button>
-                      </div>
-                    ) : null}
-                    {task.workflowState === 'testing' || task.workflowState === 'regression_testing' ? (
-                      <div style={{ marginTop: '0.35rem' }}>
-                        <button type="button" className="ui-btn ghost" disabled={busy} onClick={() => void closeTaskApi(task)}>
-                          标记完成
-                        </button>
-                      </div>
-                    ) : null}
+                  <article key={task.id} className="ui-card ui-card-kanban">
+                    <div
+                      className="ui-card-kanban-main"
+                      style={task.workflowState === 'todo' ? { cursor: 'pointer' } : undefined}
+                      role={task.workflowState === 'todo' ? 'button' : undefined}
+                      tabIndex={task.workflowState === 'todo' ? 0 : undefined}
+                      onKeyDown={
+                        task.workflowState === 'todo'
+                          ? (e: KeyboardEvent) => {
+                              if (e.key === 'Enter' || e.key === ' ') {
+                                e.preventDefault();
+                                openAssignModal(task);
+                              }
+                            }
+                          : undefined
+                      }
+                      onClick={
+                        task.workflowState === 'todo'
+                          ? () => {
+                              openAssignModal(task);
+                            }
+                          : undefined
+                      }
+                    >
+                      <p className="ui-card-title">{task.title}</p>
+                      <p className="ui-card-meta ui-muted">项目：{projectLabel(task.projectId)}</p>
+                      <p className="ui-card-meta ui-card-kanban-agent">负责：{formatResponsibleAgent(task)}</p>
+                    </div>
+                    <div className="ui-card-kanban-toolbar">
+                      <button
+                        type="button"
+                        className="ui-btn ghost ui-btn-tiny"
+                        disabled={busy}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          void deleteTaskApi(task);
+                        }}
+                      >
+                        删除
+                      </button>
+                    </div>
                   </article>
                 ))}
               </div>
@@ -584,6 +595,120 @@ export default function BoardPage() {
           ))}
         </div>
       )}
+
+      {assignModalTask ? (
+        <div
+          role="presentation"
+          style={{
+            position: 'fixed',
+            inset: 0,
+            zIndex: 200,
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            padding: '16px',
+            background: 'rgba(2, 6, 23, 0.72)',
+          }}
+          onClick={() => setAssignModalTask(null)}
+        >
+          <div
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="assign-modal-title"
+            className="ui-panel"
+            style={{ maxWidth: 440, width: '100%' }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <h2 id="assign-modal-title" className="ui-h2" style={{ marginTop: 0 }}>
+              从待办分配：{assignModalTask.issueId}
+            </h2>
+            <p className="ui-muted ui-small" style={{ marginBottom: '1rem' }}>
+              选择开发 lane（仅 <code>agent-开发</code> / <code>codex-高级开发</code>）。评审打回 ≥2 次时选 agent-开发也会按 codex-高级开发执行。评审与测试 lane 由后续步骤自动挂载。
+            </p>
+            <label>
+              分给谁（lane）
+              <select
+                className="ui-input"
+                style={{ width: '100%', marginTop: 4 }}
+                value={modalAssignAgent}
+                onChange={(e) => setModalAssignAgent(e.target.value as KanbanAgentKind)}
+              >
+                {TODO_ASSIGN_AGENTS.map((k) => (
+                  <option key={k} value={k}>
+                    {KANBAN_AGENT_LABELS[k]}
+                  </option>
+                ))}
+              </select>
+            </label>
+            {modalLaneRoster.length > 0 ? (
+              <div style={{ marginTop: '0.75rem' }}>
+                <p className="ui-muted ui-small" style={{ marginBottom: '0.35rem' }}>
+                  分配方式（已配置多名人员时）
+                </p>
+                <label style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', marginBottom: '0.35rem' }}>
+                  <input
+                    type="radio"
+                    name="assign-mode"
+                    checked={modalAssignMode === 'auto'}
+                    onChange={() => setModalAssignMode('auto')}
+                  />
+                  自动（历史上该任务该 lane 给谁则继续给谁；否则给当前负载最少的人）
+                </label>
+                <label style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                  <input
+                    type="radio"
+                    name="assign-mode"
+                    checked={modalAssignMode === 'manual'}
+                    onChange={() => setModalAssignMode('manual')}
+                  />
+                  指定人员
+                </label>
+                {modalAssignMode === 'manual' ? (
+                  <select
+                    className="ui-input"
+                    style={{ width: '100%', marginTop: '0.5rem' }}
+                    value={modalAssigneeMemberId}
+                    onChange={(e) => setModalAssigneeMemberId(e.target.value)}
+                  >
+                    <option value="">选择人员</option>
+                    {modalLaneRoster.map((m) => (
+                      <option key={m.id} value={m.id}>
+                        {(m.name || m.id).trim()} ({m.id})
+                      </option>
+                    ))}
+                  </select>
+                ) : null}
+              </div>
+            ) : laneMembersByKind !== null ? (
+              <p className="ui-muted ui-small" style={{ marginTop: '0.75rem' }}>
+                该项目该 lane 未配置多人员；将按默认 runner / 会话值自动分配。可在「角色与 Runner」页添加人员。
+              </p>
+            ) : (
+              <p className="ui-muted ui-small" style={{ marginTop: '0.75rem' }}>
+                正在加载人员配置…
+              </p>
+            )}
+            <label style={{ display: 'block', marginTop: '0.75rem' }}>
+              交接说明（可选，有内容时会写入工作流 comment）
+              <textarea
+                className="ui-input"
+                style={{ width: '100%', minHeight: 88, marginTop: 4 }}
+                value={modalHandoff}
+                onChange={(e) => setModalHandoff(e.target.value)}
+                placeholder="需要时填写；留空则仅按 lane 分配并启动"
+              />
+            </label>
+            <div className="ui-actions-bar" style={{ marginTop: '1.25rem', display: 'flex', gap: '0.5rem', flexWrap: 'wrap' }}>
+              <button type="button" className="ui-btn ghost" disabled={busy} onClick={() => setAssignModalTask(null)}>
+                取消
+              </button>
+              <button type="button" className="ui-btn primary" disabled={busy} onClick={() => void confirmAssignFromTodo()}>
+                分配并启动 runner
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
     </main>
   );
 }

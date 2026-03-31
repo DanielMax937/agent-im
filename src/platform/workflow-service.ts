@@ -3,6 +3,10 @@ import path from 'node:path';
 
 import { CompensationService } from './compensation-service';
 import { resolveKanbanAgent } from './kanban-agents';
+import { parseKanbanAction } from './kanban-workflow-parser';
+import { notifyKanbanTelegram } from './kanban-notify';
+import { notifyWorkflowStateTransition } from './kanban-transition-notify';
+import { mergeKanbanAssignee, resolveKanbanAssignment } from './kanban-role-assign';
 import { createApprovalQueueKey, createTaskQueueKey, JsonPlatformStore } from './json-platform-store';
 import { GitService } from './git-service';
 import { InstanceManager } from './instance-manager';
@@ -14,8 +18,8 @@ import type {
   ApprovalResolutionInput,
   AssignTaskInput,
   CreateTaskInput,
-  JiraWebhookPayload,
   KanbanAgentKind,
+  Project,
   Sprint,
   StartSprintInput,
   SubmitTaskForReviewInput,
@@ -45,10 +49,44 @@ function slugify(value: string): string {
     .slice(0, 48);
 }
 
+/** Runner id from project Kanban mapping for this lane (see `Project.kanbanRoleRunners`). */
+function runnerProfileForLane(project: Project, kind: KanbanAgentKind): string | undefined {
+  const v = project.kanbanRoleRunners?.[kind]?.trim();
+  return v || undefined;
+}
+
+/**
+ * Explicit API `runtimeProfileId` wins, then per-project lane mapping, then fallbacks
+ * (e.g. existing task session).
+ */
+function pickRuntimeProfile(
+  project: Project,
+  kind: KanbanAgentKind,
+  explicit: string | undefined,
+  ...fallbacks: (string | undefined)[]
+): string | undefined {
+  if (explicit?.trim()) return explicit.trim();
+  const fromProject = runnerProfileForLane(project, kind);
+  if (fromProject) return fromProject;
+  for (const c of fallbacks) {
+    if (c?.trim()) return c.trim();
+  }
+  return undefined;
+}
+
 function runtimeForRole(role: AgentRole, taskSession: TaskSession): AgentRuntime {
   if (role === 'reviewer') return 'claude';
   if (role === 'tester') return 'copilot';
   return taskSession.runtime;
+}
+
+function defaultSubmitTaskForReviewInput(task: TaskSession): SubmitTaskForReviewInput {
+  return {
+    taskSessionId: task.id,
+    commitMessage: `chore(${task.issueId}): submit for review`,
+    prTitle: `[${task.issueId}] ${task.title}`,
+    prBody: `Automated PR from Kanban workflow.\n\n${task.title}`,
+  };
 }
 
 export interface WorkflowServiceDeps {
@@ -61,6 +99,100 @@ export interface WorkflowServiceDeps {
 
 export class WorkflowService {
   constructor(private readonly deps: WorkflowServiceDeps) {}
+
+  /**
+   * After a successful assistant turn, parse `KANBAN_ACTION:...` from the latest reply for that role
+   * and run the same workflow transitions as the dashboard API. Disabled when `CTI_KANBAN_WORKFLOW_AUTO=0`.
+   */
+  async maybeAutoAdvanceAfterAgentTurn(
+    taskSessionId: string,
+    completedRole: AgentRole,
+    instanceId: string,
+  ): Promise<void> {
+    if (process.env.CTI_KANBAN_WORKFLOW_AUTO === '0') return;
+    const taskSession = this.deps.store.getTaskSession(taskSessionId);
+    if (!taskSession || taskSession.workflowState === 'closed') return;
+
+    const last = [...taskSession.conversationHistory].reverse().find(
+      (e) => e.role === 'assistant' && e.source === completedRole,
+    );
+    if (!last) return;
+    const parsed = parseKanbanAction(last.content);
+    if (!parsed) return;
+
+    try {
+      await this.applyKanbanWorkflowAction(taskSession, completedRole, instanceId, parsed);
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      void notifyKanbanTelegram(`[Kanban][${taskSession.issueId}] Workflow auto-advance failed: ${msg}`);
+    }
+  }
+
+  private async applyKanbanWorkflowAction(
+    taskSession: TaskSession,
+    completedRole: AgentRole,
+    instanceId: string,
+    parsed: { action: string; payload?: string },
+  ): Promise<void> {
+    const defer = instanceId;
+    const { workflowState } = taskSession;
+
+    if (parsed.action === 'SUBMIT_REVIEW') {
+      if (workflowState !== 'in_progress' || completedRole !== 'developer') return;
+      await this.submitTaskForReview({
+        ...defaultSubmitTaskForReviewInput(taskSession),
+        deferStopInstanceId: defer,
+      });
+      return;
+    }
+
+    if (parsed.action === 'START_TESTING') {
+      if (workflowState !== 'review' || completedRole !== 'reviewer') return;
+      await this.startTesting(taskSession.id, defer);
+      return;
+    }
+
+    if (parsed.action === 'REJECT_REVIEW') {
+      if (workflowState !== 'review' || completedRole !== 'reviewer') return;
+      await this.rejectReview(taskSession.id, parsed.payload?.trim() || 'Rejected by reviewer.', defer);
+      return;
+    }
+
+    if (parsed.action === 'START_REGRESSION') {
+      if (workflowState !== 'testing' || completedRole !== 'tester') return;
+      await this.startRegressionTesting(taskSession.id, defer);
+      return;
+    }
+
+    if (parsed.action === 'CLOSE') {
+      if (completedRole !== 'tester') return;
+      if (workflowState !== 'testing' && workflowState !== 'regression_testing') return;
+      await this.closeTask(taskSession.id, defer);
+      return;
+    }
+  }
+
+  /**
+   * Stops runners for a task before a workflow transition. When `deferStopInstanceId` is set (auto-advance
+   * from that runner), that instance is stopped on the next macrotask so we do not await the same runner
+   * while its `runLoop` is still awaiting this transition.
+   */
+  private async stopInstancesForTask(taskSessionId: string, deferStopInstanceId?: string): Promise<void> {
+    for (const inst of this.deps.store.listAgentInstances(taskSessionId)) {
+      if (deferStopInstanceId && inst.id === deferStopInstanceId) continue;
+      await this.deps.instanceManager.stopInstance(inst.id);
+    }
+    if (deferStopInstanceId) {
+      const id = deferStopInstanceId;
+      setImmediate(() => {
+        void this.deps.instanceManager.stopInstance(id);
+      });
+    }
+  }
+
+  private projectTasks(projectId: string): TaskSession[] {
+    return this.deps.store.listTaskSessions(projectId);
+  }
 
   async startSprint(input: StartSprintInput): Promise<Sprint> {
     const project = this.requireProject(input.projectId);
@@ -90,8 +222,14 @@ export class WorkflowService {
   async createTask(input: CreateTaskInput): Promise<TaskSession> {
     const project = this.requireProject(input.projectId);
     const sprint = this.requireSprint(input.sprintId);
-    if (this.deps.store.getTaskSessionByIssueId(input.issueId)) {
-      throw new Error(`Task already exists for issue ${input.issueId}`);
+    if (sprint.projectId !== project.id) {
+      throw new Error('Sprint does not belong to the selected project');
+    }
+    let issueId = input.issueId?.trim();
+    if (!issueId) {
+      issueId = this.deps.store.previewNextIssueId(project.id);
+    } else if (this.deps.store.getTaskSessionByProjectIssueId(project.id, issueId)) {
+      throw new Error(`Task already exists for issue ${issueId} in this project`);
     }
 
     const id = crypto.randomUUID();
@@ -99,16 +237,16 @@ export class WorkflowService {
       id,
       projectId: project.id,
       sprintId: sprint.id,
-      taskId: input.issueId,
-      issueId: input.issueId,
+      taskId: issueId,
+      issueId,
       title: input.title,
       workflowState: 'todo',
       runtime: 'claude',
       role: 'developer',
       sessionId: crypto.randomUUID(),
       workingDirectory: project.repository.localPath,
-      messageQueueKey: createTaskQueueKey(input.issueId),
-      approvalQueueKey: createApprovalQueueKey(input.issueId),
+      messageQueueKey: createTaskQueueKey(issueId),
+      approvalQueueKey: createApprovalQueueKey(issueId),
       conversationHistory: [],
       createdAt: now(),
       updatedAt: now(),
@@ -123,7 +261,7 @@ export class WorkflowService {
 
     await this.appendWorkflowComment(
       taskSession.id,
-      `Created task ${input.issueId} in project ${project.name} (todo).`,
+      `Created task ${issueId} in project ${project.name} (todo).`,
     );
     return taskSession;
   }
@@ -137,7 +275,7 @@ export class WorkflowService {
       return this.assignFromTodo(input);
     }
 
-    const existingTodo = this.deps.store.getTaskSessionByIssueId(input.issueId);
+    const existingTodo = this.deps.store.getTaskSessionByProjectIssueId(input.projectId, input.issueId);
     if (existingTodo?.workflowState === 'todo') {
       throw new Error('Task exists in todo; assign with taskSessionId and kanbanAgent, or use assignFromTodo');
     }
@@ -174,8 +312,24 @@ export class WorkflowService {
       });
     }
 
-    const existing = this.deps.store.getTaskSessionByIssueId(input.issueId);
-    const taskSession: TaskSession = this.deps.store.upsertTaskSession({
+    const existing = this.deps.store.getTaskSessionByProjectIssueId(project.id, input.issueId);
+    const priorSession = { kanbanAssignees: existing?.kanbanAssignees } as TaskSession;
+    const allTasks = this.projectTasks(project.id);
+    const { member, runtimeProfileIdHint } = resolveKanbanAssignment(project, 'agent-dev', priorSession, allTasks, {
+      runtimeProfileId: input.runtimeProfileId,
+      assigneeMemberId: input.assigneeMemberId,
+      autoAssign: input.autoAssign,
+    });
+    const resolvedProfile = pickRuntimeProfile(
+      project,
+      'agent-dev',
+      input.runtimeProfileId,
+      runtimeProfileIdHint,
+      existing?.runtimeProfileId,
+    );
+    const assignPatch = mergeKanbanAssignee(priorSession, 'agent-dev', member?.id);
+    const fromState = existing?.workflowState ?? 'todo';
+    const taskDraft: TaskSession = {
       id: existing?.id ?? crypto.randomUUID(),
       projectId: project.id,
       sprintId: sprint.id,
@@ -184,9 +338,10 @@ export class WorkflowService {
       title: input.title!,
       workflowState: 'in_progress',
       runtime: input.runtime,
-      runtimeProfileId: input.runtimeProfileId ?? existing?.runtimeProfileId,
+      runtimeProfileId: resolvedProfile,
       role,
       kanbanAgent: 'agent-dev',
+      ...assignPatch,
       preferredSkills: resolveKanbanAgent('agent-dev').preferredSkills,
       sessionId: existing?.sessionId ?? crypto.randomUUID(),
       providerSessionId: existing?.providerSessionId,
@@ -200,7 +355,15 @@ export class WorkflowService {
       lastError: undefined,
       createdAt: existing?.createdAt ?? now(),
       updatedAt: now(),
+    };
+    await notifyWorkflowStateTransition({
+      task: { ...taskDraft, workflowState: fromState },
+      from: fromState,
+      to: 'in_progress',
+      outgoingRole: null,
+      actionLabel: '分配开发（legacy）',
     });
+    const taskSession = this.deps.store.upsertTaskSession(taskDraft);
 
     if (!sprint.taskIds.includes(taskSession.id)) {
       this.deps.store.upsertSprint({
@@ -212,6 +375,7 @@ export class WorkflowService {
     const instance = await this.deps.instanceManager.upsertAndStart(
       this.buildAgentInstance(taskSession, role),
     );
+    this.enqueueKickoffPrompt(this.requireTaskSession(taskSession.id));
     await this.appendWorkflowComment(
       taskSession.id,
       `Assigned to ${instance.runtime} ${instance.role} on ${branchName}${worktreePath ? ` (worktree ${worktreePath})` : ''}.`,
@@ -263,6 +427,30 @@ export class WorkflowService {
 
     const handoff = input.handoffComment ?? taskSession.handoffComment;
 
+    const laneKind = resolved.kanbanAgent;
+    const allTasks = this.projectTasks(project.id);
+    const { member, runtimeProfileIdHint } = resolveKanbanAssignment(project, laneKind, taskSession, allTasks, {
+      runtimeProfileId: input.runtimeProfileId,
+      assigneeMemberId: input.assigneeMemberId,
+      autoAssign: input.autoAssign,
+    });
+    const resolvedProfile = pickRuntimeProfile(
+      project,
+      laneKind,
+      input.runtimeProfileId,
+      runtimeProfileIdHint,
+      taskSession.runtimeProfileId,
+    );
+    const assignPatch = mergeKanbanAssignee(taskSession, laneKind, member?.id);
+
+    await notifyWorkflowStateTransition({
+      task: taskSession,
+      from: 'todo',
+      to: 'in_progress',
+      outgoingRole: null,
+      actionLabel: '从待办分配',
+    });
+
     const next = this.deps.store.upsertTaskSession({
       ...taskSession,
       title: input.title || taskSession.title,
@@ -275,11 +463,13 @@ export class WorkflowService {
       branchName,
       worktreePath,
       workingDirectory: workingDir,
-      runtimeProfileId: input.runtimeProfileId ?? taskSession.runtimeProfileId,
+      runtimeProfileId: resolvedProfile,
+      ...assignPatch,
       updatedAt: now(),
     });
 
     await this.deps.instanceManager.upsertAndStart(this.buildAgentInstance(next, resolved.role));
+    this.enqueueKickoffPrompt(this.requireTaskSession(next.id));
     if (handoff?.trim()) {
       await this.appendWorkflowComment(
         next.id,
@@ -293,11 +483,32 @@ export class WorkflowService {
     return this.requireTaskSession(next.id);
   }
 
-  async rejectReview(taskSessionId: string, comment: string): Promise<TaskSession> {
+  async rejectReview(taskSessionId: string, comment: string, deferStopInstanceId?: string): Promise<TaskSession> {
     const taskSession = this.requireTaskSession(taskSessionId);
     this.assertTransition(taskSession.workflowState, 'in_progress');
+    await this.stopInstancesForTask(taskSession.id, deferStopInstanceId);
     const nextCount = (taskSession.reviewRejectionCount ?? 0) + 1;
     const resolved = resolveKanbanAgent('agent-dev', nextCount);
+    const project = this.requireProject(taskSession.projectId);
+    const allTasks = this.projectTasks(project.id);
+    const laneKind = resolved.kanbanAgent;
+    const { member, runtimeProfileIdHint } = resolveKanbanAssignment(project, laneKind, taskSession, allTasks, {});
+    const resolvedProfile = pickRuntimeProfile(
+      project,
+      laneKind,
+      undefined,
+      runtimeProfileIdHint,
+      taskSession.runtimeProfileId,
+    );
+    const assignPatch = mergeKanbanAssignee(taskSession, laneKind, member?.id);
+
+    await notifyWorkflowStateTransition({
+      task: taskSession,
+      from: 'review',
+      to: 'in_progress',
+      outgoingRole: 'reviewer',
+      actionLabel: '打回开发',
+    });
 
     const updated = this.deps.store.upsertTaskSession({
       ...taskSession,
@@ -307,10 +518,13 @@ export class WorkflowService {
       kanbanAgent: resolved.kanbanAgent,
       preferredSkills: resolved.preferredSkills,
       handoffComment: comment,
+      runtimeProfileId: resolvedProfile,
+      ...assignPatch,
       updatedAt: now(),
     });
 
     await this.deps.instanceManager.upsertAndStart(this.buildAgentInstance(updated, 'developer'));
+    this.enqueueKickoffPrompt(this.requireTaskSession(updated.id));
     await this.appendWorkflowComment(
       updated.id,
       `Review rejected (round ${nextCount}). Escalation runtime: ${resolved.runtime}. Comment: ${comment}`,
@@ -321,6 +535,7 @@ export class WorkflowService {
   async submitTaskForReview(input: SubmitTaskForReviewInput): Promise<{ taskSession: TaskSession; pullRequest: PullRequestRef }> {
     const taskSession = this.requireTaskSession(input.taskSessionId);
     this.assertTransition(taskSession.workflowState, 'review');
+    await this.stopInstancesForTask(taskSession.id, input.deferStopInstanceId);
 
     const project = this.requireProject(taskSession.projectId);
     const sprint = this.requireSprint(taskSession.sprintId);
@@ -344,6 +559,24 @@ export class WorkflowService {
     });
 
     const reviewerPreset = resolveKanbanAgent('claude-review');
+    const allTasks = this.projectTasks(project.id);
+    const { member, runtimeProfileIdHint } = resolveKanbanAssignment(project, 'claude-review', taskSession, allTasks, {});
+    const reviewerProfile = pickRuntimeProfile(
+      project,
+      'claude-review',
+      undefined,
+      runtimeProfileIdHint,
+      taskSession.runtimeProfileId,
+    );
+    const assignPatch = mergeKanbanAssignee(taskSession, 'claude-review', member?.id);
+
+    await notifyWorkflowStateTransition({
+      task: taskSession,
+      from: 'in_progress',
+      to: 'review',
+      outgoingRole: 'developer',
+      actionLabel: '提交评审（创建 PR）',
+    });
 
     const updatedTaskSession = this.deps.store.upsertTaskSession({
       ...taskSession,
@@ -351,22 +584,45 @@ export class WorkflowService {
       pullRequestUrl: pullRequest.url,
       preferredSkills: reviewerPreset.preferredSkills,
       kanbanAgent: 'claude-review',
+      runtimeProfileId: reviewerProfile,
+      ...assignPatch,
     });
 
     await this.deps.instanceManager.upsertAndStart(
       this.buildAgentInstance(updatedTaskSession, 'reviewer'),
     );
+    this.enqueueKickoffPrompt(this.requireTaskSession(updatedTaskSession.id));
 
     await this.appendWorkflowComment(updatedTaskSession.id, `Created PR ${pullRequest.url} and started reviewer.`);
 
     return { taskSession: updatedTaskSession, pullRequest };
   }
 
-  async startTesting(taskSessionId: string): Promise<TaskSession> {
+  async startTesting(taskSessionId: string, deferStopInstanceId?: string): Promise<TaskSession> {
     const taskSession = this.requireTaskSession(taskSessionId);
     this.assertTransition(taskSession.workflowState, 'testing');
+    await this.stopInstancesForTask(taskSession.id, deferStopInstanceId);
 
     const testerPreset = resolveKanbanAgent('copilot-test');
+    const project = this.requireProject(taskSession.projectId);
+    const allTasks = this.projectTasks(project.id);
+    const { member, runtimeProfileIdHint } = resolveKanbanAssignment(project, 'copilot-test', taskSession, allTasks, {});
+    const testerProfile = pickRuntimeProfile(
+      project,
+      'copilot-test',
+      undefined,
+      runtimeProfileIdHint,
+      taskSession.runtimeProfileId,
+    );
+    const assignPatch = mergeKanbanAssignee(taskSession, 'copilot-test', member?.id);
+
+    await notifyWorkflowStateTransition({
+      task: taskSession,
+      from: 'review',
+      to: 'testing',
+      outgoingRole: 'reviewer',
+      actionLabel: '进入功能测试',
+    });
 
     const updatedTaskSession = this.deps.store.upsertTaskSession({
       ...taskSession,
@@ -376,20 +632,24 @@ export class WorkflowService {
       handoffComment:
         taskSession.handoffComment ??
         'Feature testing: run focused tests on the task branch only; defer merge conflict resolution.',
+      runtimeProfileId: testerProfile,
+      ...assignPatch,
     });
 
     await this.deps.instanceManager.upsertAndStart(
       this.buildAgentInstance(updatedTaskSession, 'tester'),
     );
+    this.enqueueKickoffPrompt(this.requireTaskSession(updatedTaskSession.id));
 
     await this.appendWorkflowComment(updatedTaskSession.id, 'Started feature tester (branch scope).');
 
     return updatedTaskSession;
   }
 
-  async startRegressionTesting(taskSessionId: string): Promise<TaskSession> {
+  async startRegressionTesting(taskSessionId: string, deferStopInstanceId?: string): Promise<TaskSession> {
     const taskSession = this.requireTaskSession(taskSessionId);
     this.assertTransition(taskSession.workflowState, 'regression_testing');
+    await this.stopInstancesForTask(taskSession.id, deferStopInstanceId);
 
     const project = this.requireProject(taskSession.projectId);
     const repoPath = project.repository.localPath;
@@ -398,6 +658,25 @@ export class WorkflowService {
 
     await this.deps.gitService.fetchOrigin(repoPath);
     const masterSha = await this.deps.gitService.resolveRefSha(repoPath, remoteRef);
+
+    const allTasks = this.projectTasks(project.id);
+    const { member, runtimeProfileIdHint } = resolveKanbanAssignment(project, 'copilot-test', taskSession, allTasks, {});
+    const testerProfile = pickRuntimeProfile(
+      project,
+      'copilot-test',
+      undefined,
+      runtimeProfileIdHint,
+      taskSession.runtimeProfileId,
+    );
+    const assignPatch = mergeKanbanAssignee(taskSession, 'copilot-test', member?.id);
+
+    await notifyWorkflowStateTransition({
+      task: taskSession,
+      from: 'testing',
+      to: 'regression_testing',
+      outgoingRole: 'tester',
+      actionLabel: '进入回归测试',
+    });
 
     const updatedTaskSession = this.deps.store.upsertTaskSession({
       ...taskSession,
@@ -410,11 +689,14 @@ export class WorkflowService {
       handoffComment:
         taskSession.handoffComment ??
         'Regression phase: test against master; refresh regression cases when the app changes.',
+      runtimeProfileId: testerProfile,
+      ...assignPatch,
     });
 
     await this.deps.instanceManager.upsertAndStart(
       this.buildAgentInstance(updatedTaskSession, 'tester'),
     );
+    this.enqueueKickoffPrompt(this.requireTaskSession(updatedTaskSession.id));
 
     await this.appendWorkflowComment(
       updatedTaskSession.id,
@@ -475,24 +757,41 @@ export class WorkflowService {
     );
 
     await this.deps.instanceManager.upsertAndStart(this.buildAgentInstance(next, 'tester'));
+    this.enqueueKickoffPrompt(this.requireTaskSession(next.id));
     return next;
   }
 
-  async closeTask(taskSessionId: string): Promise<TaskSession> {
+  async closeTask(taskSessionId: string, deferStopInstanceId?: string): Promise<TaskSession> {
     const taskSession = this.requireTaskSession(taskSessionId);
     this.assertTransition(taskSession.workflowState, 'closed');
+
+    await notifyWorkflowStateTransition({
+      task: taskSession,
+      from: taskSession.workflowState,
+      to: 'closed',
+      outgoingRole: 'tester',
+      actionLabel: '标记完成',
+    });
 
     const updatedTaskSession = this.deps.store.upsertTaskSession({
       ...taskSession,
       workflowState: 'closed',
     });
 
-    for (const instance of this.deps.store.listAgentInstances(taskSession.id)) {
-      await this.deps.instanceManager.stopInstance(instance.id);
-    }
+    await this.stopInstancesForTask(taskSession.id, deferStopInstanceId);
 
     await this.appendWorkflowComment(updatedTaskSession.id, 'Task closed.');
     return updatedTaskSession;
+  }
+
+  /**
+   * Permanently remove task data (instances, queues, approvals, monitor rows).
+   * Stops all agent runners / LLM providers for this task the same way as `closeTask` (no defer).
+   */
+  async deleteTask(taskSessionId: string): Promise<void> {
+    this.requireTaskSession(taskSessionId);
+    await this.stopInstancesForTask(taskSessionId);
+    this.deps.store.removeTaskSession(taskSessionId);
   }
 
   async handleTestFailure(payload: TaskFailurePayload): Promise<TaskSession> {
@@ -512,51 +811,6 @@ export class WorkflowService {
     });
   }
 
-  async handleJiraWebhook(payload: JiraWebhookPayload): Promise<TaskSession | Sprint | null> {
-    const normalizedStatus = payload.status?.trim().toLowerCase();
-    if (!normalizedStatus) return null;
-
-    if (normalizedStatus === 'in progress') {
-      if (!payload.sprintId || !payload.title || !payload.runtime) {
-        throw new Error('Jira in-progress transition requires sprintId, title, and runtime');
-      }
-      return this.assignTask({
-        projectId: payload.projectId,
-        sprintId: payload.sprintId,
-        issueId: payload.issueId,
-        title: payload.title,
-        runtime: payload.runtime,
-      });
-    }
-
-    const taskSession = this.deps.store.getTaskSessionByIssueId(payload.issueId);
-    if (!taskSession) return null;
-
-    if (normalizedStatus === 'review') {
-      await this.submitTaskForReview({
-        taskSessionId: taskSession.id,
-        commitMessage: `feat(${taskSession.issueId}): submit task for review`,
-        prTitle: `[${taskSession.issueId}] ${taskSession.title}`,
-        prBody: 'Automated PR created by agent-im workflow service.',
-      });
-      return this.requireTaskSession(taskSession.id);
-    }
-
-    if (normalizedStatus === 'testing') {
-      return this.startTesting(taskSession.id);
-    }
-
-    if (normalizedStatus === 'regression' || normalizedStatus === 'regression testing') {
-      return this.startRegressionTesting(taskSession.id);
-    }
-
-    if (normalizedStatus === 'closed' || normalizedStatus === 'done') {
-      return this.closeTask(taskSession.id);
-    }
-
-    return taskSession;
-  }
-
   async ensureAgentInstance(
     taskSessionId: string,
     role: AgentRole,
@@ -564,10 +818,12 @@ export class WorkflowService {
   ): Promise<AgentInstanceRecord> {
     const taskSession = this.requireTaskSession(taskSessionId);
     const instance = this.buildAgentInstance(taskSession, role);
-    return this.deps.instanceManager.upsertAndStart({
+    const out = await this.deps.instanceManager.upsertAndStart({
       ...instance,
       ...(runtimeProfileId !== undefined ? { runtimeProfileId } : {}),
     });
+    this.enqueueKickoffPrompt(this.requireTaskSession(taskSessionId));
+    return out;
   }
 
   /** Owner / dashboard: aggregate snapshot + per-project counts (requirement k). */
@@ -624,6 +880,20 @@ export class WorkflowService {
     });
   }
 
+  /** First user turn for the runner: local Kanban only (no external issue tracker). */
+  private enqueueKickoffPrompt(taskSession: TaskSession): void {
+    this.deps.store.enqueueTaskMessage({
+      queueKey: taskSession.messageQueueKey,
+      taskSessionId: taskSession.id,
+      taskId: taskSession.taskId,
+      type: 'directive',
+      content: [
+        `Begin work on task ${taskSession.issueId}: ${taskSession.title}.`,
+        'Follow your role-specific instructions and the task context in this conversation.',
+      ].join(' '),
+    });
+  }
+
   private buildAgentInstance(taskSession: TaskSession, role: AgentRole): AgentInstanceRecord {
     const project = this.requireProject(taskSession.projectId);
     const existing = this.deps.store.findAgentInstance(taskSession.id, role);
@@ -641,14 +911,6 @@ export class WorkflowService {
       status: existing?.status ?? 'starting',
       branchName: taskSession.branchName,
       workingDirectory: taskSession.workingDirectory || project.repository.localPath,
-      jira: existing?.jira ?? {
-        baseUrl: process.env.CTI_JIRA_BASE_URL || '',
-        issueId: taskSession.issueId,
-        email: process.env.CTI_JIRA_EMAIL || '',
-        apiToken: process.env.CTI_JIRA_API_TOKEN || '',
-        pollIntervalMs: Number(process.env.CTI_JIRA_POLL_INTERVAL_MS || 5000),
-        botAccountId: process.env.CTI_JIRA_BOT_ACCOUNT_ID || undefined,
-      },
       approvalsRequired: true,
       createdAt: existing?.createdAt ?? now(),
       updatedAt: now(),

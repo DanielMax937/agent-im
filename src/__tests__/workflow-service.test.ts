@@ -3,7 +3,6 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 
 import { CompensationService } from '../platform/compensation-service';
-import { JsonPlatformStore } from '../platform/json-platform-store';
 import { WorkflowService } from '../platform/workflow-service';
 import {
   asGitService,
@@ -12,6 +11,7 @@ import {
   createProject,
   createSprint,
   createTaskSession,
+  createTestJsonPlatformStore,
   FakeGitService,
   FakeInstanceManager,
   FakeScmClient,
@@ -21,14 +21,10 @@ import {
 describe('WorkflowService', () => {
   beforeEach(() => {
     fs.rmSync(PLATFORM_DIR, { recursive: true, force: true });
-    process.env.CTI_JIRA_BASE_URL = 'https://jira.example.test';
-    process.env.CTI_JIRA_EMAIL = 'bot@example.test';
-    process.env.CTI_JIRA_API_TOKEN = 'token';
-    process.env.CTI_JIRA_POLL_INTERVAL_MS = '1000';
   });
 
   function createHarness() {
-    const store = new JsonPlatformStore();
+    const store = createTestJsonPlatformStore();
     const gitService = new FakeGitService();
     const scmClient = new FakeScmClient();
     const instanceManager = new FakeInstanceManager(store);
@@ -56,7 +52,7 @@ describe('WorkflowService', () => {
     assert.deepEqual(gitService.calls, ['createSprintBranch']);
   });
 
-  it('assigns a Jira task to a developer agent and creates the task branch', async () => {
+  it('assigns a task to a developer agent and creates the task branch', async () => {
     const { workflowService, project, store, instanceManager, gitService } = createHarness();
     const sprint = createSprint(store, project.id);
 
@@ -64,7 +60,7 @@ describe('WorkflowService', () => {
       projectId: project.id,
       sprintId: sprint.id,
       issueId: 'ISSUE-101',
-      title: 'Implement Jira workflow',
+      title: 'Implement workflow',
       runtime: 'codex',
     });
     assert.equal(taskSession.workflowState, 'in_progress');
@@ -82,8 +78,8 @@ describe('WorkflowService', () => {
 
     const reviewResult = await workflowService.submitTaskForReview({
       taskSessionId: taskSession.id,
-      commitMessage: 'feat(issue-101): implement jira workflow',
-      prTitle: '[ISSUE-101] Implement Jira workflow',
+      commitMessage: 'feat(issue-101): implement workflow',
+      prTitle: '[ISSUE-101] Implement workflow',
       prBody: 'Automated PR body',
     });
 
@@ -92,6 +88,56 @@ describe('WorkflowService', () => {
     assert.deepEqual(gitService.calls, ['commitAll', 'pushBranch']);
     assert.deepEqual(scmClient.calls, ['createPullRequest']);
     assert.deepEqual(instanceManager.started, [`reviewer:${taskSession.id}`]);
+  });
+
+  it('maybeAutoAdvanceAfterAgentTurn submits for review when assistant ends with KANBAN_ACTION:SUBMIT_REVIEW', async () => {
+    const { workflowService, project, store, instanceManager, gitService } = createHarness();
+    const sprint = createSprint(store, project.id);
+    const taskSession = createTaskSession(store, project.id, sprint.id, {
+      workflowState: 'in_progress',
+      conversationHistory: [],
+    });
+    store.appendConversationEntry(taskSession.id, {
+      role: 'assistant',
+      source: 'developer',
+      content: 'Done.\nKANBAN_ACTION:SUBMIT_REVIEW',
+    });
+
+    await workflowService.maybeAutoAdvanceAfterAgentTurn(taskSession.id, 'developer', 'dev-instance');
+
+    const updated = store.getTaskSession(taskSession.id)!;
+    assert.equal(updated.workflowState, 'review');
+    assert.deepEqual(gitService.calls, ['commitAll', 'pushBranch']);
+    assert.deepEqual(instanceManager.started, [`reviewer:${taskSession.id}`]);
+  });
+
+  it('maybeAutoAdvanceAfterAgentTurn does nothing when CTI_KANBAN_WORKFLOW_AUTO=0', async () => {
+    const prev = process.env.CTI_KANBAN_WORKFLOW_AUTO;
+    process.env.CTI_KANBAN_WORKFLOW_AUTO = '0';
+    try {
+      const { workflowService, project, store, gitService } = createHarness();
+      const sprint = createSprint(store, project.id);
+      const taskSession = createTaskSession(store, project.id, sprint.id, {
+        workflowState: 'in_progress',
+        conversationHistory: [],
+      });
+      store.appendConversationEntry(taskSession.id, {
+        role: 'assistant',
+        source: 'developer',
+        content: 'Done.\nKANBAN_ACTION:SUBMIT_REVIEW',
+      });
+
+      await workflowService.maybeAutoAdvanceAfterAgentTurn(taskSession.id, 'developer', 'dev-instance');
+
+      assert.equal(store.getTaskSession(taskSession.id)!.workflowState, 'in_progress');
+      assert.deepEqual(gitService.calls, []);
+    } finally {
+      if (prev === undefined) {
+        delete process.env.CTI_KANBAN_WORKFLOW_AUTO;
+      } else {
+        process.env.CTI_KANBAN_WORKFLOW_AUTO = prev;
+      }
+    }
   });
 
   it('starts testing for a reviewed task and creates a tester instance', async () => {
@@ -124,13 +170,6 @@ describe('WorkflowService', () => {
       status: 'running',
       branchName: taskSession.branchName,
       workingDirectory: '/tmp/agent-im',
-      jira: {
-        baseUrl: 'https://jira.example.test',
-        issueId: taskSession.issueId,
-        email: 'bot@example.test',
-        apiToken: 'token',
-        pollIntervalMs: 1000,
-      },
       approvalsRequired: true,
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
@@ -165,13 +204,6 @@ describe('WorkflowService', () => {
         status: 'running',
         branchName: taskSession.branchName,
         workingDirectory: '/tmp/agent-im',
-        jira: {
-          baseUrl: 'https://jira.example.test',
-          issueId: taskSession.issueId,
-          email: 'bot@example.test',
-          apiToken: 'token',
-          pollIntervalMs: 1000,
-        },
         approvalsRequired: true,
         createdAt: new Date().toISOString(),
         updatedAt: new Date().toISOString(),
@@ -206,24 +238,6 @@ describe('WorkflowService', () => {
     ]);
   });
 
-  it('handles Jira webhook transitions for in-progress assignment', async () => {
-    const { workflowService, project, store, instanceManager } = createHarness();
-    const sprint = createSprint(store, project.id);
-
-    const result = await workflowService.handleJiraWebhook({
-      projectId: project.id,
-      sprintId: sprint.id,
-      issueId: 'ISSUE-202',
-      title: 'Investigate flaky test',
-      status: 'In Progress',
-      runtime: 'claude',
-    });
-
-    const taskSession = result as { id: string; workflowState: string };
-    assert.equal(taskSession.workflowState, 'in_progress');
-    assert.deepEqual(instanceManager.started, [`developer:${taskSession.id}`]);
-  });
-
   it('creates a task in todo without starting a runner', async () => {
     const { workflowService, project, store, instanceManager } = createHarness();
     const sprint = createSprint(store, project.id);
@@ -234,6 +248,67 @@ describe('WorkflowService', () => {
       title: 'Kanban card',
     });
     assert.equal(task.workflowState, 'todo');
+    assert.equal(instanceManager.started.length, 0);
+  });
+
+  it('deleteTask removes task session and sprint link', async () => {
+    const { workflowService, project, store } = createHarness();
+    const sprint = createSprint(store, project.id);
+    const task = await workflowService.createTask({
+      projectId: project.id,
+      sprintId: sprint.id,
+      title: 'To delete',
+    });
+    await workflowService.deleteTask(task.id);
+    assert.equal(store.getTaskSession(task.id), null);
+    const sp = store.getSprint(sprint.id)!;
+    assert.ok(!sp.taskIds.includes(task.id));
+  });
+
+  it('deleteTask stops every agent instance for the task (same stop path as closeTask)', async () => {
+    const { workflowService, project, store, instanceManager } = createHarness();
+    const sprint = createSprint(store, project.id);
+    const taskSession = createTaskSession(store, project.id, sprint.id, {
+      workflowState: 'review',
+    });
+    const now = new Date().toISOString();
+    for (const spec of [
+      { id: 'reviewer-inst', role: 'reviewer' as const },
+      { id: 'developer-inst', role: 'developer' as const },
+    ]) {
+      store.upsertAgentInstance({
+        id: spec.id,
+        projectId: project.id,
+        sprintId: sprint.id,
+        taskId: taskSession.taskId,
+        taskSessionId: taskSession.id,
+        runtime: 'codex',
+        role: spec.role,
+        status: 'running',
+        branchName: taskSession.branchName,
+        workingDirectory: '/tmp/agent-im',
+        approvalsRequired: true,
+        createdAt: now,
+        updatedAt: now,
+      });
+    }
+
+    await workflowService.deleteTask(taskSession.id);
+
+    assert.equal(store.getTaskSession(taskSession.id), null);
+    assert.deepEqual(new Set(instanceManager.stopped), new Set(['reviewer-inst', 'developer-inst']));
+  });
+
+  it('auto-generates issue id when omitted', async () => {
+    const { workflowService, project, store, instanceManager } = createHarness();
+    const sprint = createSprint(store, project.id);
+    const task = await workflowService.createTask({
+      projectId: project.id,
+      sprintId: sprint.id,
+      title: 'Auto key',
+    });
+    assert.equal(task.workflowState, 'todo');
+    assert.match(task.issueId, /^PROJECT-\d+$/);
     assert.equal(instanceManager.started.length, 0);
   });
 
@@ -359,42 +434,25 @@ describe('WorkflowService', () => {
     assert.equal(row!.tasksByState.in_progress, 1);
   });
 
-  it('handles Jira webhook transitions for review, testing, and close', async () => {
+  it('advances review, testing, and close via workflow APIs', async () => {
     const { workflowService, project, store } = createHarness();
     const sprint = createSprint(store, project.id);
     const taskSession = createTaskSession(store, project.id, sprint.id, {
       workflowState: 'in_progress',
     });
 
-    const reviewResult = await workflowService.handleJiraWebhook({
-      projectId: project.id,
-      issueId: taskSession.issueId,
-      status: 'review',
+    const reviewResult = await workflowService.submitTaskForReview({
+      taskSessionId: taskSession.id,
+      commitMessage: 'feat: review',
+      prTitle: '[ISSUE] Review',
+      prBody: 'Body',
     });
-    assert.equal((reviewResult as { workflowState: string }).workflowState, 'review');
+    assert.equal(reviewResult.taskSession.workflowState, 'review');
 
-    const reviewedTask = store.getTaskSession(taskSession.id);
-    store.upsertTaskSession({
-      ...reviewedTask!,
-      workflowState: 'review',
-    });
-    const testingResult = await workflowService.handleJiraWebhook({
-      projectId: project.id,
-      issueId: taskSession.issueId,
-      status: 'testing',
-    });
-    assert.equal((testingResult as { workflowState: string }).workflowState, 'testing');
+    const testingResult = await workflowService.startTesting(taskSession.id);
+    assert.equal(testingResult.workflowState, 'testing');
 
-    const testingTask = store.getTaskSession(taskSession.id);
-    store.upsertTaskSession({
-      ...testingTask!,
-      workflowState: 'testing',
-    });
-    const closeResult = await workflowService.handleJiraWebhook({
-      projectId: project.id,
-      issueId: taskSession.issueId,
-      status: 'done',
-    });
-    assert.equal((closeResult as { workflowState: string }).workflowState, 'closed');
+    const closeResult = await workflowService.closeTask(taskSession.id);
+    assert.equal(closeResult.workflowState, 'closed');
   });
 });

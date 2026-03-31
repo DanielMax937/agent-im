@@ -96,11 +96,126 @@ a {
   line-height: 1.8;
 }
 
-/* Admin + board */
+/* Admin + board (default board shell is still capped; see .ui-board-fluid) */
 .ui-admin,
 .ui-board {
   max-width: 1100px;
   margin: 0 auto;
+}
+
+.ui-board.ui-board-fluid {
+  max-width: 100%;
+  width: 100%;
+  box-sizing: border-box;
+}
+
+.ui-board.ui-board-fluid .ui-admin-header,
+.ui-board.ui-board-fluid .ui-banner {
+  max-width: 100%;
+}
+
+.ui-board.ui-board-fluid .lead {
+  max-width: 100%;
+}
+
+.ui-board-monitor {
+  max-width: min(1400px, 100%);
+}
+
+.monitor-filters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 16px;
+  align-items: flex-end;
+  margin-bottom: 20px;
+}
+
+.monitor-filters label {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 13px;
+  color: #94a3b8;
+}
+
+.monitor-filters select,
+.monitor-filters input {
+  min-width: 200px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  border: 1px solid rgba(148, 163, 184, 0.25);
+  background: #0f172a;
+  color: #e2e8f0;
+}
+
+.monitor-table-wrap {
+  margin-top: 8px;
+}
+
+.monitor-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+
+.monitor-table th,
+.monitor-table td {
+  border: 1px solid rgba(148, 163, 184, 0.2);
+  padding: 8px 10px;
+  text-align: left;
+  vertical-align: top;
+}
+
+.monitor-table th {
+  background: rgba(15, 23, 42, 0.85);
+  color: #94a3b8;
+  font-weight: 600;
+}
+
+.monitor-detail {
+  margin-top: 16px;
+  padding: 16px;
+  border-radius: 12px;
+  border: 1px solid rgba(56, 189, 248, 0.25);
+  background: rgba(15, 23, 42, 0.6);
+}
+
+.monitor-detail-toolbar {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 12px;
+  gap: 12px;
+}
+
+.monitor-detail h3 {
+  margin: 12px 0 8px;
+  font-size: 14px;
+  color: #94a3b8;
+}
+
+.monitor-pre {
+  max-height: 420px;
+  overflow: auto;
+  padding: 12px 14px;
+  border-radius: 8px;
+  background: #020617;
+  border: 1px solid rgba(148, 163, 184, 0.18);
+  font-size: 12px;
+  line-height: 1.45;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.monitor-pre-short {
+  max-height: 120px;
+}
+
+.monitor-cell-clip {
+  max-width: 320px;
+  font-size: 12px;
+  line-height: 1.4;
+  word-break: break-word;
 }
 
 .ui-admin-header {
@@ -571,6 +686,50 @@ a {
   border-bottom: 1px solid rgba(148, 163, 184, 0.12);
 }
 
+.ui-panel {
+  border: 1px solid rgba(148, 163, 184, 0.2);
+  border-radius: 18px;
+  background: rgba(15, 23, 42, 0.86);
+  padding: 24px;
+  box-shadow: 0 12px 40px rgba(15, 23, 42, 0.25);
+}
+
+.ui-h2 {
+  margin: 0 0 16px;
+  font-size: 18px;
+  font-weight: 600;
+  color: #e2e8f0;
+}
+
+.ui-projects-form {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: 12px 16px;
+  align-items: end;
+}
+
+.ui-projects-form label {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 13px;
+  color: #94a3b8;
+}
+
+.ui-input,
+.ui-projects-form input:not([type='checkbox']),
+.ui-projects-form select,
+.ui-projects-form textarea {
+  padding: 10px 12px;
+  border-radius: 10px;
+  border: 1px solid rgba(148, 163, 184, 0.25);
+  background: #0f172a;
+  color: #e2e8f0;
+  font-size: 14px;
+  width: 100%;
+  box-sizing: border-box;
+}
+
 .ui-mono {
   font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
   font-size: 12px;
@@ -624,6 +783,49 @@ a {
   border-radius: 10px;
   border: 1px solid rgba(56, 189, 248, 0.2);
   background: rgba(15, 23, 42, 0.95);
+}
+
+.ui-card-kanban {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.ui-card-kanban-main {
+  flex: 1;
+  min-width: 0;
+}
+
+.ui-card-kanban-agent {
+  margin: 0;
+  font-size: 12px;
+  color: #e2e8f0;
+}
+
+.ui-card-kanban-toolbar {
+  display: flex;
+  justify-content: flex-end;
+}
+
+.ui-btn-tiny {
+  padding: 4px 10px;
+  font-size: 12px;
+}
+
+.ui-card-kanban-expanded {
+  margin-top: 2px;
+  padding-top: 10px;
+  border-top: 1px solid rgba(148, 163, 184, 0.15);
+}
+
+.ui-card-kanban-danger-zone {
+  margin-top: 0.75rem;
+  padding-top: 0.75rem;
+  border-top: 1px solid rgba(248, 113, 113, 0.22);
+}
+
+.ui-card-kanban-danger-zone .ui-btn {
+  color: #fca5a5;
 }
 
 .ui-card-title {

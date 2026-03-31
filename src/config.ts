@@ -981,13 +981,6 @@ export function loadConfig(ctiHomeOverride?: string): Config {
       : undefined,
     proxy: env.get("CTI_PROXY") || undefined,
     autoApprove: env.get("CTI_AUTO_APPROVE") === "true",
-    jiraBaseUrl: env.get("CTI_JIRA_BASE_URL") || undefined,
-    jiraEmail: env.get("CTI_JIRA_EMAIL") || undefined,
-    jiraApiToken: env.get("CTI_JIRA_API_TOKEN") || undefined,
-    jiraPollIntervalMs: env.get("CTI_JIRA_POLL_INTERVAL_MS")
-      ? Number(env.get("CTI_JIRA_POLL_INTERVAL_MS"))
-      : undefined,
-    jiraBotAccountId: env.get("CTI_JIRA_BOT_ACCOUNT_ID") || undefined,
     agentEnvSlots: parseAgentSlotsFromEnv(env),
     runners,
     defaultRunnerId,
@@ -1032,13 +1025,6 @@ export function saveConfig(config: Config, ctiHomeOverride?: string): void {
     out += formatEnvLine("CTI_DEFAULT_MODE", config.defaultMode);
   }
   out += formatEnvLine("CTI_AUTO_APPROVE", config.autoApprove ? "true" : "");
-  out += formatEnvLine("CTI_JIRA_BASE_URL", config.jiraBaseUrl);
-  out += formatEnvLine("CTI_JIRA_EMAIL", config.jiraEmail);
-  out += formatEnvLine("CTI_JIRA_API_TOKEN", config.jiraApiToken);
-  if (config.jiraPollIntervalMs !== undefined) {
-    out += formatEnvLine("CTI_JIRA_POLL_INTERVAL_MS", String(config.jiraPollIntervalMs));
-  }
-  out += formatEnvLine("CTI_JIRA_BOT_ACCOUNT_ID", config.jiraBotAccountId);
   out += formatEnvLine("CTI_TG_BOT_TOKEN", config.tgBotToken);
   out += formatEnvLine("CTI_TG_CHAT_ID", config.tgChatId);
   out += formatEnvLine(
@@ -1155,7 +1141,6 @@ const CONFIG_SECRET_KEYS = [
   "discordBotToken",
   "qqAppSecret",
   "agentOpenAIApiKey",
-  "jiraApiToken",
 ] as const;
 
 export type ConfigSecretKey = (typeof CONFIG_SECRET_KEYS)[number];
