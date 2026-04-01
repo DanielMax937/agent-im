@@ -201,9 +201,11 @@ const BATCH_SPEC_SYSTEM = [
   'Do NOT use Markdown: no ## headings, no **bold**, no bullet lines, no numbered lists outside JSON, no ``` fences.',
   'Required shape: {"tasks":[{"title":"<string>","dependsOnIndices":[<ints>]}, ...]}',
   'Example (copy structure only): {"tasks":[{"title":"Add share page route","dependsOnIndices":[]},{"title":"Wire share API","dependsOnIndices":[0]}]}',
-  'dependsOnIndices: 0-based indices of earlier tasks that must complete before this one.',
+  'dependsOnIndices: 0-based indices of **earlier** tasks in the same `tasks` array that must finish before **this** task can start.',
+  'Dependency rule (critical): if task B truly depends on work from task A, and A appears earlier in `tasks` at index i, then you MUST list i inside B\'s dependsOnIndices. Do not omit real dependencies; the system will create real Kanban links from this field.',
+  'If tasks are parallel with no ordering constraint, use dependsOnIndices: [] for those tasks.',
   'Index 0 must use dependsOnIndices: []. For task at index i>0, only use indices from 0 to i-1.',
-  'Order tasks topologically. Titles must be concise and actionable.',
+  'Order tasks topologically (dependencies point backward). Titles must be concise and actionable.',
 ].join('\n');
 
 /** Second pass when the model returns prose/Markdown instead of JSON. */
@@ -213,6 +215,7 @@ const BATCH_SPEC_REPAIR_SYSTEM = [
   'No Markdown, no code fences, no explanations, no labels before or after the JSON.',
   'Shape: {"tasks":[{"title":"string","dependsOnIndices":number[]}]}',
   'dependsOnIndices: task index 0 uses []. Later tasks only reference earlier indices (0 .. i-1).',
+  'Preserve every real dependency from the source: if item j must wait on item i (i<j), include i in tasks[j].dependsOnIndices.',
 ].join('\n');
 
 /** When not `0`, also mirror batch-spec dumps to stdout (Next dev terminal). Bridge log always receives structured lines when this runs. */
@@ -308,7 +311,10 @@ export async function runBatchTaskSpecLlm(params: {
   }
 
   const userPrompt = [
-    'Break the following pasted content into Kanban tasks with dependencies.',
+    'Break the following pasted content into Kanban tasks. For each task you MUST set dependsOnIndices:',
+    '- List the 0-based indices of earlier tasks this task cannot start until those are done.',
+    '- If the spec implies a chain or blocking order, reflect it in dependsOnIndices (do not leave dependencies implicit).',
+    '- Independent work uses dependsOnIndices: [].',
     '',
     '---',
     raw,
@@ -335,8 +341,9 @@ export async function runBatchTaskSpecLlm(params: {
 
   const repairUserPrompt = [
     'The previous assistant reply was not valid JSON (it may have been Markdown or prose).',
-    'Extract the work items and dependency order implied below. Reply with ONLY one JSON object.',
-    'First character {. Last character }. No markdown, no commentary.',
+    'Extract the work items and any "blocks / depends on / after" relationships from the text below.',
+    'Encode dependencies ONLY via dependsOnIndices on each task (earlier task index i for blocker i).',
+    'Reply with ONLY one JSON object. First character {. Last character }. No markdown, no commentary.',
     'Shape: {"tasks":[{"title":"string","dependsOnIndices":number[]}]}',
     '',
     '---',

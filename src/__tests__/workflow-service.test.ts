@@ -326,6 +326,24 @@ describe('WorkflowService', () => {
     assert.equal(instanceManager.started.length, 0);
   });
 
+  it('createTasksFromBatchPlan maps dependsOnIndices to dependsOnIssueIds on created tasks', async () => {
+    const { workflowService, project, store } = createHarness();
+    const sprint = createSprint(store, project.id);
+    const { created } = await workflowService.createTasksFromBatchPlan({
+      projectId: project.id,
+      sprintId: sprint.id,
+      tasks: [
+        { title: 'A', dependsOnIndices: [] },
+        { title: 'B', dependsOnIndices: [0] },
+        { title: 'C', dependsOnIndices: [0, 1] },
+      ],
+    });
+    assert.equal(created.length, 3);
+    assert.equal(created[0]!.dependsOnIssueIds, undefined);
+    assert.deepEqual(created[1]!.dependsOnIssueIds, [created[0]!.issueId]);
+    assert.deepEqual(created[2]!.dependsOnIssueIds, [created[0]!.issueId, created[1]!.issueId]);
+  });
+
   it('deleteTask removes task session and sprint link', async () => {
     const { workflowService, project, store } = createHarness();
     const sprint = createSprint(store, project.id);

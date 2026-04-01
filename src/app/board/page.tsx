@@ -1982,7 +1982,7 @@ export default function BoardPage() {
             {batchPreviewTasks ? (
               <div style={{ marginTop: '1rem', flex: 1, minHeight: 0, overflow: 'auto' }}>
                 <p className="ui-muted ui-small" style={{ marginBottom: '0.5rem' }}>
-                  预览（可再次点击「生成任务列表」覆盖）
+                  预览（可再次点击「生成任务列表」覆盖）。「创建到待办」会把下表中的依赖写入真实任务（与「本批序号」一致）。
                 </p>
                 <ol style={{ margin: 0, paddingLeft: '1.25rem' }}>
                   {batchPreviewTasks.map((t, i) => (

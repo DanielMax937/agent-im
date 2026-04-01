@@ -1760,7 +1760,10 @@ export class WorkflowService {
     return { tasks };
   }
 
-  /** Persists a validated batch plan as **todo** tasks (dependencies refer to earlier rows by issue id). */
+  /**
+   * Persists a validated batch plan as **todo** tasks.
+   * Each task’s `dependsOnIndices` are resolved to **real** `dependsOnIssueIds` pointing at tasks created earlier in this batch (same order as `input.tasks`).
+   */
   async createTasksFromBatchPlan(input: {
     projectId: string;
     sprintId: string;
