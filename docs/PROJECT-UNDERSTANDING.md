@@ -219,6 +219,25 @@ The task pipeline is:
 - `regression_testing`
 - `closed`
 
+## Recent auto-mode behavior fixes
+
+Recent work in the bridge focused on the Telegram auto-mode master/slave flow only. Non-auto mode behavior is intended to stay unchanged.
+
+- each new Telegram auto-mode user message now starts fresh synthetic master/slave sessions instead of continuing stale review context
+- `/autonew` was removed because new-session behavior is now the default for each new task
+- `/autostop` was fixed to abort the actual bound auto-mode runner sessions and clear queued Redis/in-memory follow-up work
+- auto-mode runner failures now surface a Telegram notice telling the user to restart the bridge; image-caption timeout gets a more specific notice
+- busy-state cleanup was fixed so crashed or aborted auto-mode turns do not leave master/slave stuck as busy in monitor state
+- master verification now logs richer detail around tool calls, durations, and whether Cursor stopped before a final result
+- master verification prompt now avoids screenshot/image-analysis requirements and steers UI checks toward Playwright with local Google Chrome (`--channel chrome`) plus DOM/state inspection, not Chrome DevTools MCP
+- master review / verification now support tagged machine-readable verdicts:
+  - `REVIEW_RESULT_JSON: {"pass": true|false}`
+  - `VERIFICATION_RESULT_JSON: {"pass": true|false}`
+- review fallback parsing was hardened for real log output where the model omitted JSON:
+  - explicit pass phrases like `可以结案`, `无需再派工`, `无需再打回`, `任务已满足`
+  - negated wording like `needs improvement：否` or `不要写 "needs improvement"`
+  - this prevents false slave re-dispatch loops when the master already concluded the task is finished
+
 Allowed transitions are enforced in code.
 
 ### Practical meaning of each state

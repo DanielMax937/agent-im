@@ -146,7 +146,11 @@ export abstract class BaseChannelAdapter {
   }
 
   /** After an auto-mode master/slave turn fails or times out, clear adapter-specific busy state. */
-  async recordAutoModeTurnFailed(_source: 'master' | 'slave'): Promise<void> {
+  async recordAutoModeTurnFailed(_payload: {
+    source: 'master' | 'slave';
+    errorMessage?: string;
+    outboundChatId?: string;
+  }): Promise<void> {
     return;
   }
 

@@ -4,6 +4,7 @@ import {
   MASTER_VERIFICATION_WALKTHROUGH_PREFIX,
   buildMasterVerificationWalkthroughPrompt,
   inferMasterVerificationMode,
+  parseMasterReviewDecision,
   parseVerificationOutcome,
 } from '../lib/bridge/master-verification-walkthrough';
 
@@ -18,6 +19,65 @@ describe('master-verification-walkthrough', () => {
       'failed',
     );
     assert.strictEqual(parseVerificationOutcome('no marker'), 'unknown');
+  });
+
+  it('parseVerificationOutcome prefers tagged JSON when present', () => {
+    assert.strictEqual(
+      parseVerificationOutcome('done\nVERIFICATION_RESULT_JSON: {"pass": true}\n'),
+      'passed',
+    );
+    assert.strictEqual(
+      parseVerificationOutcome('bad\nVERIFICATION_RESULT_JSON: {"pass":"false"}\n'),
+      'failed',
+    );
+  });
+
+  it('parseMasterReviewDecision prefers tagged JSON and avoids false follow-up on negative wording', () => {
+    assert.strictEqual(
+      parseMasterReviewDecision('summary\nREVIEW_RESULT_JSON: {"pass": true}\nneeds improvement: no'),
+      'pass',
+    );
+    assert.strictEqual(
+      parseMasterReviewDecision('please fix this\nREVIEW_RESULT_JSON: {"pass":"false"}'),
+      'follow_up',
+    );
+  });
+
+  it('parseMasterReviewDecision accepts fail JSON with reason field', () => {
+    assert.strictEqual(
+      parseMasterReviewDecision('please fix this\nREVIEW_RESULT_JSON: {"pass": false, "reason": "missing live verification"}'),
+      'follow_up',
+    );
+  });
+
+  it('parseMasterReviewDecision falls back when tagged JSON is malformed', () => {
+    assert.strictEqual(
+      parseMasterReviewDecision('任务已满足目标，可结案。\nREVIEW_RESULT_JSON: {"pass": tru}'),
+      'pass',
+    );
+    assert.strictEqual(
+      parseMasterReviewDecision('needs improvement\nREVIEW_RESULT_JSON: {"pass": fals}'),
+      'follow_up',
+    );
+  });
+
+  it('parseMasterReviewDecision treats explicit finish markers as pass without JSON', () => {
+    assert.strictEqual(
+      parseMasterReviewDecision('**结论：可以结案**（不要写 “needs improvement”）。'),
+      'pass',
+    );
+    assert.strictEqual(
+      parseMasterReviewDecision('**可以结案**（无需再打回，回复里不要出现 “needs improvement”）。'),
+      'pass',
+    );
+    assert.strictEqual(
+      parseMasterReviewDecision('从助手工作 needs improvement：否。任务可结案。'),
+      'pass',
+    );
+    assert.strictEqual(
+      parseMasterReviewDecision('任务已满足目标，无需再派工。'),
+      'pass',
+    );
   });
 
   it('buildMasterVerificationWalkthroughPrompt includes prefix and session tail', () => {
@@ -54,12 +114,14 @@ describe('master-verification-walkthrough', () => {
       'User goal: tell me current IP information',
     );
     assert.ok(apiPrompt.includes('Default to **N/A** for this mode.'));
-    assert.ok(!apiPrompt.includes('Screenshots are mandatory'));
+    assert.ok(!apiPrompt.includes('Do **not** use screenshots'));
 
     const uiPrompt = buildMasterVerificationWalkthroughPrompt(
       'User goal: fix the website layout and verify screenshot in browser',
     );
-    assert.ok(uiPrompt.includes('Screenshots are mandatory'));
+    assert.ok(uiPrompt.includes('Playwright with local Google Chrome'));
+    assert.ok(uiPrompt.includes('Do **not** use screenshots or image analysis'));
+    assert.ok(uiPrompt.includes('Do **not** use Chrome DevTools MCP'));
     assert.ok(uiPrompt.includes('VERIFICATION_ACTION: UI_AND_API'));
   });
 });

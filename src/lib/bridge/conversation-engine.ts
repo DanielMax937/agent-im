@@ -19,7 +19,11 @@ import { getBridgeContext } from './context';
 import { resolveRunnerForChannelBinding } from './im-instance-settings';
 import crypto from 'crypto';
 import { getLogger, maskSecrets } from '../../logger';
-import { MASTER_VERIFICATION_WALKTHROUGH_PREFIX } from './master-verification-walkthrough';
+import {
+  MASTER_REVIEW_RESULT_JSON_PREFIX,
+  MASTER_VERIFICATION_RESULT_JSON_PREFIX,
+  MASTER_VERIFICATION_WALKTHROUGH_PREFIX,
+} from './master-verification-walkthrough';
 
 export interface PermissionRequestInfo {
   permissionRequestId: string;
@@ -340,7 +344,16 @@ export async function processMessage(
         'RULES:\n' +
         '- NEVER execute tasks yourself — you have no tools\n' +
         '- Keep responses concise — they go directly to Telegram\n' +
-        '- Focus on whether the goal was achieved, not on style';
+        '- Focus on whether the goal was achieved, not on style\n' +
+        '- On a passing review, do not mention the literal phrase "needs improvement", even in a negated sentence or instruction\n' +
+        `- The final line of your reply must be exactly one tagged JSON object and nothing after it\n` +
+        `- For pass, use exactly: ${MASTER_REVIEW_RESULT_JSON_PREFIX} {"pass": true}\n` +
+        `- For fail, use exactly this shape: ${MASTER_REVIEW_RESULT_JSON_PREFIX} {"pass": false, "reason": "<short concrete reason>"}\n` +
+        `- Use ${MASTER_REVIEW_RESULT_JSON_PREFIX} {"pass": true} only when the task should advance to verification\n` +
+        `- Use ${MASTER_REVIEW_RESULT_JSON_PREFIX} {"pass": false, "reason": "..."} when the slave must do more work\n` +
+        `- Do not wrap the JSON in code fences\n` +
+        `- Do not add any text after the final tagged JSON line\n` +
+        `- In verification rounds, do not use ${MASTER_REVIEW_RESULT_JSON_PREFIX}; follow the verification prompt and emit ${MASTER_VERIFICATION_RESULT_JSON_PREFIX} instead`;
       systemPrompt = systemPrompt ? `${systemPrompt}\n\n${masterCoord}` : masterCoord;
       // Master must NOT have access to any tools — evaluation only
       allowedTools = [];

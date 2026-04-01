@@ -45,6 +45,7 @@ import {
   truncateSessionSummaryAfterGIfNeeded,
 } from '../kanban-redis-supplement';
 import {
+  parseMasterReviewDecision,
   MASTER_VERIFICATION_WALKTHROUGH_PREFIX,
   buildMasterVerificationWalkthroughPrompt,
   parseVerificationOutcome,
@@ -636,7 +637,7 @@ export class TelegramAdapter extends BaseChannelAdapter {
         unknownNote +
         `### Verification findings & bugs to fix\n${payload.responseText.slice(0, 4000)}\n\n` +
         `### Your Mission (Slave Runner)\n` +
-        `The master ran frontend (Chrome DevTools MCP + screenshots) and/or API (curl) checks and found issues.\n\n` +
+        `The master ran frontend (Playwright + local Chrome DOM checks) and/or API (curl) checks and found issues.\n\n` +
         `**Requirements:**\n` +
         `1. Fix every issue listed above.\n` +
         `2. Re-verify (tests, manual checks).\n` +
@@ -659,26 +660,13 @@ export class TelegramAdapter extends BaseChannelAdapter {
       : newSummary;
     await this.autoModeRedis.setSessionSummary(trimmed).catch(() => {});
 
-    const resp = payload.responseText.toLowerCase();
-    const needsFollowUp =
-      resp.includes('follow-up') || resp.includes('follow up') ||
-      resp.includes('please fix') || resp.includes('please improve') ||
-      resp.includes('please run') || resp.includes('please test') ||
-      resp.includes('please verify') || resp.includes('please check') ||
-      resp.includes('please add') || resp.includes('please update') ||
-      resp.includes('try again') || resp.includes('redo') ||
-      resp.includes('not complete') || resp.includes('incomplete') ||
-      resp.includes('needs improvement') || resp.includes('need improvement') ||
-      resp.includes('could be improved') || resp.includes('should be improved') ||
-      resp.includes('missing') || resp.includes('incorrect') ||
-      resp.includes('run tests') || resp.includes('run the tests') ||
-      resp.includes('verify your') || resp.includes('test your') ||
-      resp.includes('## follow-up instructions');
+    const reviewDecision = parseMasterReviewDecision(payload.responseText);
+    const needsFollowUp = reviewDecision === 'follow_up';
 
     if (!needsFollowUp) {
-      // Static review OK → schedule verification walkthrough (Chrome DevTools MCP, curl, screenshots) before final acceptance
+      // Static review OK → schedule verification walkthrough (Playwright DOM checks, curl) before final acceptance
       console.log(
-        `[telegram-adapter] Master evaluation: ACCEPTED on review — enqueueing verification walkthrough. ` +
+        `[telegram-adapter] Master evaluation: ACCEPTED on review (${reviewDecision}) — enqueueing verification walkthrough. ` +
           `responseLen=${payload.responseText.length}, preview=${JSON.stringify(payload.responseText.slice(0, 150))}`,
       );
       await this.autoModeRedis.incrMasterTurns().catch(() => {});
@@ -693,7 +681,7 @@ export class TelegramAdapter extends BaseChannelAdapter {
     }
 
     console.log(
-      `[telegram-adapter] Master evaluation: NEEDS FOLLOW-UP. ` +
+      `[telegram-adapter] Master evaluation: NEEDS FOLLOW-UP (${reviewDecision}). ` +
         `responseLen=${payload.responseText.length}, preview=${JSON.stringify(payload.responseText.slice(0, 150))}`,
     );
     await this.autoModeRedis.setSlaveBusy(600).catch(() => {});
@@ -742,14 +730,51 @@ export class TelegramAdapter extends BaseChannelAdapter {
     writeRunnerStatus({ slaveBusy: false, slaveSince: undefined });
   }
 
-  override async recordAutoModeTurnFailed(source: 'master' | 'slave'): Promise<void> {
+  override async recordAutoModeTurnFailed(payload: {
+    source: 'master' | 'slave';
+    errorMessage?: string;
+    outboundChatId?: string;
+  }): Promise<void> {
     if (!this.autoModeRedis) return;
-    if (source === 'master') {
+    if (payload.source === 'master') {
       writeRunnerStatus({ masterBusy: false, masterSince: undefined });
+      await this.maybeNotifyAutoModeTurnFailure(payload);
       return;
     }
     await this.autoModeRedis.clearSlaveBusy().catch(() => {});
     writeRunnerStatus({ slaveBusy: false, slaveSince: undefined });
+    await this.maybeNotifyAutoModeTurnFailure(payload);
+  }
+
+  private async maybeNotifyAutoModeTurnFailure(payload: {
+    source: 'master' | 'slave';
+    errorMessage?: string;
+    outboundChatId?: string;
+  }): Promise<void> {
+    const errorText = payload.errorMessage?.trim() || '';
+    if (!errorText) return;
+    if (/task stopped by user/i.test(errorText)) return;
+
+    const chatId = payload.outboundChatId || this.hybridMirrorChatId || this.imGet('telegram_chat_id');
+    const token = this.botToken;
+    if (!chatId || !token) return;
+    const firstLine = escapeHtml(errorText.split('\n')[0] || errorText);
+    const sourceLabel = payload.source === 'master' ? 'Master' : 'Slave';
+    const isImageCaptionTimeout = /image captioning timed out/i.test(errorText);
+    const body = isImageCaptionTimeout
+      ? 'Cursor internal image captioning timed out after screenshot verification.'
+      : `${sourceLabel} runner failed and the current auto-mode task cannot continue.`;
+
+    await callTelegramApi(token, 'sendMessage', {
+      chat_id: chatId,
+      text:
+        `⚠️ <b>Auto mode ${escapeHtml(payload.source)} turn failed</b>\n` +
+        `${body}\n` +
+        `Error: <code>${firstLine}</code>\n` +
+        'Please restart the bridge, then resend the task.',
+      parse_mode: 'HTML',
+      disable_web_page_preview: true,
+    }).catch(() => {});
   }
 
   override async resetAutoModeState(): Promise<string | null> {
@@ -777,11 +802,21 @@ export class TelegramAdapter extends BaseChannelAdapter {
   override async stopAutoModeTasks(activeTasks: Map<string, AbortController>): Promise<string | null> {
     if (!this.autoModeRedis) return null;
 
-    // Abort all in-flight tasks whose session keys match auto mode synthetic chatIds
-    const slug = this.autoModeRedis.bridgeSlug;
+    // Active task keys are CodePilot session ids, so resolve current auto-mode
+    // bindings and abort by their bound sessions instead of matching chat-id text.
+    const bridgeSlug = this.autoModeRedis.bridgeSlug;
+    const autoSessionIds = new Set(
+      router
+        .listBindings(this.channelType)
+        .filter((binding) =>
+          binding.chatId.startsWith(`auto:${bridgeSlug}:`) ||
+          binding.chatId.startsWith(`auto:master:${bridgeSlug}:`),
+        )
+        .map((binding) => binding.codepilotSessionId),
+    );
     let aborted = 0;
     for (const [sessionId, controller] of activeTasks) {
-      if (sessionId.includes(slug) || sessionId.includes('auto:')) {
+      if (autoSessionIds.has(sessionId)) {
         controller.abort();
         activeTasks.delete(sessionId);
         aborted++;
@@ -795,8 +830,13 @@ export class TelegramAdapter extends BaseChannelAdapter {
     // Drain pending input queues so no queued work fires after stop
     await this.autoModeRedis.drainInputQueues().catch(() => {});
 
+    // Drop already-enqueued master/slave synthetic messages waiting in memory.
+    this.queue = this.queue.filter(
+      (msg) => msg.deliverySource !== 'master' && msg.deliverySource !== 'slave',
+    );
+
     console.log(`[telegram-adapter] Auto mode tasks stopped for ${this.instanceId}, aborted=${aborted}`);
-    return `Auto mode tasks stopped.\n• ${aborted} in-flight task(s) aborted\n• Slave busy flag cleared\n• Input queues drained`;
+    return `Auto mode tasks stopped.\n• ${aborted} in-flight task(s) aborted\n• Slave busy flag cleared\n• Input queues drained\n• Queued auto-mode messages dropped`;
   }
 
   // ── Lifecycle hooks (called generically by bridge-manager) ───
@@ -821,7 +861,6 @@ export class TelegramAdapter extends BaseChannelAdapter {
     await callTelegramApi(token, 'setMyCommands', {
       commands: [
         { command: 'new', description: 'Start new session (optionally specify path)' },
-        { command: 'autonew', description: 'Reset auto mode session (clears Redis state + restarts slave)' },
         { command: 'autostop', description: 'Stop both master and slave tasks' },
         { command: 'bind', description: 'Bind to existing session' },
         { command: 'cwd', description: 'Change working directory' },

@@ -1,13 +1,16 @@
 /**
  * Second-phase master prompt: after static review passes, master must verify the
  * work and emit a machine-readable outcome. Verification scope is inferred from
- * the task context so simple info / API tasks do not always trigger browser MCP.
+ * the task context so simple info / API tasks do not always trigger browser work.
  */
 
 export const MASTER_VERIFICATION_WALKTHROUGH_PREFIX = '## Master Verification Walkthrough';
+export const MASTER_REVIEW_RESULT_JSON_PREFIX = 'REVIEW_RESULT_JSON:';
+export const MASTER_VERIFICATION_RESULT_JSON_PREFIX = 'VERIFICATION_RESULT_JSON:';
 
 export type VerificationOutcome = 'passed' | 'failed' | 'unknown';
 export type MasterVerificationMode = 'api_only' | 'ui_and_api';
+export type MasterReviewDecision = 'pass' | 'follow_up' | 'unknown';
 
 const UI_SIGNAL_PATTERNS = [
   /\bui\b/i,
@@ -33,7 +36,74 @@ const UI_SIGNAL_PATTERNS = [
   /https?:\/\/[^\s)]+/i,
 ];
 
+function parsePassFlagFromTaggedJson(
+  responseText: string,
+  prefix: string,
+): boolean | null {
+  const pattern = new RegExp(`${prefix.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\s*(\\{[^\\n]*\\})`, 'i');
+  const match = responseText.match(pattern);
+  if (!match?.[1]) return null;
+  try {
+    const parsed = JSON.parse(match[1]) as { pass?: unknown };
+    if (typeof parsed.pass === 'boolean') return parsed.pass;
+    if (typeof parsed.pass === 'string') {
+      const normalized = parsed.pass.trim().toLowerCase();
+      if (normalized === 'true') return true;
+      if (normalized === 'false') return false;
+    }
+  } catch {
+    return null;
+  }
+  return null;
+}
+
+export function parseMasterReviewDecision(responseText: string): MasterReviewDecision {
+  const jsonPass = parsePassFlagFromTaggedJson(responseText, MASTER_REVIEW_RESULT_JSON_PREFIX);
+  if (jsonPass === true) return 'pass';
+  if (jsonPass === false) return 'follow_up';
+
+  const resp = responseText.toLowerCase();
+  const explicitPass =
+    resp.includes('可以结案') ||
+    resp.includes('可结案') ||
+    resp.includes('任务完成') ||
+    resp.includes('已做完') ||
+    resp.includes('已满足') ||
+    resp.includes('无需再派工') ||
+    resp.includes('无需再打回') ||
+    resp.includes('无需再派给从助手') ||
+    resp.includes('无需再派给执行助手') ||
+    resp.includes('no follow-up needed') ||
+    resp.includes('no further action needed');
+  const negatedNeedsImprovement =
+    /needs?\s+improvement\s*[:：]\s*(?:no|false|否)/i.test(responseText) ||
+    /(?:不要写|不在此写|不出现|勿出现|不要出现|正文中不要出现|回复中不要出现|回复中勿出现)[^.\n]{0,80}needs?\s+improvement/i.test(responseText) ||
+    /do not include[^.\n]{0,80}needs?\s+improvement/i.test(responseText) ||
+    /without[^.\n]{0,80}needs?\s+improvement/i.test(responseText);
+  if (explicitPass || negatedNeedsImprovement) return 'pass';
+
+  const needsFollowUp =
+    resp.includes('follow-up') || resp.includes('follow up') ||
+    resp.includes('please fix') || resp.includes('please improve') ||
+    resp.includes('please run') || resp.includes('please test') ||
+    resp.includes('please verify') || resp.includes('please check') ||
+    resp.includes('please add') || resp.includes('please update') ||
+    resp.includes('try again') || resp.includes('redo') ||
+    resp.includes('not complete') || resp.includes('incomplete') ||
+    (resp.includes('needs improvement') && !negatedNeedsImprovement) ||
+    (resp.includes('need improvement') && !negatedNeedsImprovement) ||
+    resp.includes('could be improved') || resp.includes('should be improved') ||
+    resp.includes('missing') || resp.includes('incorrect') ||
+    resp.includes('run tests') || resp.includes('run the tests') ||
+    resp.includes('verify your') || resp.includes('test your') ||
+    resp.includes('## follow-up instructions');
+  return needsFollowUp ? 'follow_up' : 'pass';
+}
+
 export function parseVerificationOutcome(responseText: string): VerificationOutcome {
+  const jsonPass = parsePassFlagFromTaggedJson(responseText, MASTER_VERIFICATION_RESULT_JSON_PREFIX);
+  if (jsonPass === true) return 'passed';
+  if (jsonPass === false) return 'failed';
   const m = responseText.match(/VERIFICATION_OUTCOME:\s*(PASSED|FAILED)\b/i);
   if (!m) return 'unknown';
   return m[1].toUpperCase() === 'PASSED' ? 'passed' : 'failed';
@@ -77,7 +147,7 @@ function buildApiOnlyChecks(): string {
    - Prefer lightweight checks that directly prove the answer: status codes, body snippets, local command output, computed values, or file contents as appropriate.
    - If the task has no HTTP API, state **N/A** and verify via shell/local commands instead.
 
-2. **Browser / Chrome DevTools MCP**
+2. **Browser validation**
    - Default to **N/A** for this mode.
    - Only use browser tools if the session context explicitly requires webpage/UI validation.
 
@@ -89,10 +159,12 @@ function buildApiOnlyChecks(): string {
 function buildUiAndApiChecks(): string {
   return `### Required verification (UI_AND_API)
 
-1. **Frontend — Chrome DevTools MCP**
-   - Use **chrome-devtools** MCP (or equivalent browser control): open the relevant pages, interact as a user would, and check **console** and **network** for errors.
-   - **Screenshots are mandatory** for UI you claim works: take a screenshot, then analyze the image in your reply and confirm visible text/layout matches expectations.
-   - If you cannot load a page, say why and set outcome to FAILED.
+1. **Frontend — Playwright + local Google Chrome**
+   - Use **Playwright with local Google Chrome** (\`--channel chrome\`) to open the relevant pages and interact as a user would.
+   - Judge the UI by inspecting the **DOM**, page text, attributes, visibility, enabled/disabled state, navigation results, console messages, and network results.
+   - Do **not** use screenshots or image analysis as a required verification step.
+   - Do **not** use Chrome DevTools MCP for this verification flow.
+   - If you cannot load a page or complete the interaction, say why and set outcome to FAILED.
 
 2. **HTTP APIs / terminal checks**
    - Use **curl** or terminal commands to exercise important endpoints and supporting checks. Record status codes and short body snippets.
@@ -133,6 +205,10 @@ ${checks}
 - Start your conclusion section with exactly:
   \`VERIFICATION_ACTION: ${modeLine}\`
 - If anything is wrong, list issues under \`## Issues found\` with concrete repro steps.
+- End with a single-line JSON verdict:
+  \`${MASTER_VERIFICATION_RESULT_JSON_PREFIX} {"pass": true}\`
+  or
+  \`${MASTER_VERIFICATION_RESULT_JSON_PREFIX} {"pass": false}\`
 - End with **exactly one** machine-readable line:
   \`VERIFICATION_OUTCOME: PASSED\`
   or

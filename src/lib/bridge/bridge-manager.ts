@@ -829,7 +829,11 @@ async function handleMessage(
       await adapter.recordAutoModeSlaveTurnCompleted?.();
     }
     if (result.hasError && (msg.deliverySource === 'master' || msg.deliverySource === 'slave')) {
-      await adapter.recordAutoModeTurnFailed?.(msg.deliverySource);
+      await adapter.recordAutoModeTurnFailed?.({
+        source: msg.deliverySource,
+        errorMessage: result.errorMessage,
+        outboundChatId: msg.outboundChatId,
+      });
     }
 
     // Send response text — render via channel-appropriate format
@@ -940,7 +944,6 @@ async function handleCommand(
         '',
         '<b>Commands:</b>',
         '/new [path] - Start new session',
-        '/autonew - Reset auto mode session (Redis + slave)',
         '/autostop - Stop both master and slave tasks',
         '/bind &lt;session_id&gt; - Bind to existing session',
         '/cwd /path - Change working directory',
@@ -968,31 +971,6 @@ async function handleCommand(
       // Clear sdkSessionId to force a fresh Cursor/Claude session (not resume)
       router.updateBinding(binding.id, { sdkSessionId: '' });
       response = `New session created.\nSession: <code>${binding.codepilotSessionId.slice(0, 8)}...</code>\nCWD: <code>${escapeHtml(binding.workingDirectory || '~')}</code>`;
-      break;
-    }
-
-    case '/autonew': {
-      const parsedChannel = parseImBaseAndInstanceId(adapter.channelType);
-      const autoActive = parsedChannel
-        ? readAutoModeSettings(store, parsedChannel.base, parsedChannel.instanceId)
-        : null;
-      if (!autoActive) {
-        response = 'Auto mode is not enabled. Nothing to reset.';
-        break;
-      }
-      if (typeof adapter.resetAutoModeState !== 'function') {
-        response = 'Auto mode reset is not supported for this channel.';
-        break;
-      }
-      const result = await adapter.resetAutoModeState();
-      if (!result) {
-        response = 'Auto mode is not enabled. Nothing to reset.';
-        break;
-      }
-      // Also create a fresh IM-side binding (like /new)
-      const autoBinding = router.createBinding(msg.address);
-      router.updateBinding(autoBinding.id, { sdkSessionId: '' });
-      response = `${result}\n• New IM session: <code>${autoBinding.codepilotSessionId.slice(0, 8)}...</code>`;
       break;
     }
 
@@ -1233,7 +1211,6 @@ async function handleCommand(
         '<b>CodePilot Bridge Commands</b>',
         '',
         '/new [path] - Start new session',
-        '/autonew - Reset auto mode session (Redis + slave)',
         '/autostop - Stop both master and slave tasks',
         '/bind &lt;session_id&gt; - Bind to existing session',
         '/cwd /path - Change working directory',
