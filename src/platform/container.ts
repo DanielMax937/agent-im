@@ -73,7 +73,7 @@ async function createPlatformContainer(): Promise<PlatformContainer> {
   const instanceManager = InstanceManager.getInstance({
     store,
     onAgentTurnComplete: async (taskSessionId, role, instanceId) => {
-      await workflowService.maybeAutoAdvanceAfterAgentTurn(taskSessionId, role, instanceId);
+      await workflowService.afterSuccessfulAssistantTurn(taskSessionId, role, instanceId);
     },
   });
   workflowService = new WorkflowService({

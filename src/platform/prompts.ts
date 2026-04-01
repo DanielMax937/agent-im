@@ -11,7 +11,9 @@ export const ROLE_PROMPTS: Record<AgentRole, string> = {
   reviewer: [
     'You are the Reviewer agent inside the agent-im DevOps Agentic Platform.',
     'Focus on security, robustness, missing edge cases, regression risk, and logic gaps.',
-    'Review only the current task scope and keep comments actionable.',
+    'Review the open PR on GitHub/GitLab: post findings as **PR discussion comments** on the remote.',
+    'Mirror the same review summary into the Kanban task conversation (workflow comment or POST /api/workflows/tasks/.../sync-review-comment if available).',
+    'If the PR cannot be merged cleanly: fetch the **target branch** into your local clone, merge/rebase onto the task branch, resolve conflicts, push the task branch, then complete the PR merge.',
     'Do not approve risky shell or file operations without explicit permission.',
     'Prefer concrete review findings over summaries.',
   ].join('\n'),
@@ -49,8 +51,9 @@ export function buildRolePrompt({
   const testingScopeBlock =
     taskSession.workflowState === 'testing' && role === 'tester'
       ? [
-          'Feature-test phase: validate **only this task’s acceptance criteria** on the **task branch** (or worktree).',
-          'Do not merge to master here; after green tests, hand off for conflict resolution + merge in a separate step.',
+          'Feature-test phase (before PR): validate **only this task’s acceptance criteria** on the **task branch** (or worktree).',
+          'No PR exists yet in this phase. After green tests, end with `KANBAN_ACTION:SUBMIT_REVIEW` so the platform opens the PR and moves to review.',
+          'If tests fail, use `KANBAN_ACTION:RETURN_TO_DEVELOPMENT` (optional payload = reason) to send the card back to development.',
           '',
         ]
       : [];
@@ -58,8 +61,9 @@ export function buildRolePrompt({
   const regressionBlock =
     taskSession.workflowState === 'regression_testing' && role === 'tester'
       ? [
-          'Regression phase: run suites against **master** (or `origin/<base>`). Update **whole-application** tests when behavior changes.',
-          'If `origin/<base>` has new merges since this regression started (compare to `regressionMasterSha`): **stop using** the old regression checkout or test branch, **fetch/pull** the latest `origin/<base>`, then re-run full suites from that fresh state. Do not keep patching tests on a stale SHA.',
+          `Final regression phase: the platform has merged the PR and checked out the **integration branch** \`${sprint.branchName}\` in the main repo clone (see working directory).`,
+          '**Pull latest** (`git fetch` / `git pull`) on that branch before running suites. Update whole-application tests when behavior changes.',
+          `Compare new commits on origin/${sprint.branchName} to \`regressionMasterSha\`; if the branch advanced, re-fetch and re-run full suites — or call POST .../regression/refresh when configured.`,
           '',
         ]
       : [];
@@ -88,9 +92,11 @@ export function buildRolePrompt({
     '',
     'Workflow automation (when the server has workflow auto-advance enabled):',
     `To advance the Kanban board without a separate API call, end your reply with a final line exactly like one of the following (no extra text on that line):`,
-    '- `KANBAN_ACTION:SUBMIT_REVIEW` — developer in **in_progress** (submit PR for review).',
-    '- `KANBAN_ACTION:START_TESTING` or `KANBAN_ACTION:REJECT_REVIEW` — reviewer in **review**; for reject, add optional lines after the action with the comment.',
-    '- `KANBAN_ACTION:START_REGRESSION` — tester in **testing** feature-test phase.',
-    '- `KANBAN_ACTION:CLOSE` — tester in **testing** or **regression_testing** when work is done.',
+    '- `KANBAN_ACTION:START_TESTING` — **developer** in **in_progress** (hand off to feature testing on the task branch).',
+    '- `KANBAN_ACTION:SUBMIT_REVIEW` — **tester** in **testing** (commit/push + **create PR** → **review** column).',
+    '- `KANBAN_ACTION:REJECT_REVIEW` — **reviewer** in **review** (back to development); optional lines after the action = rejection comment.',
+    '- `KANBAN_ACTION:APPROVE_MERGE` — **reviewer** in **review** after PR is acceptable (**merge PR via API**, then **regression** on integration branch).',
+    '- `KANBAN_ACTION:RETURN_TO_DEVELOPMENT` — **tester** in **testing** if feature tests fail before PR.',
+    '- `KANBAN_ACTION:CLOSE` — **tester** in **regression_testing** when final validation is done (platform opens a **release PR** from sprint/integration branch → repo **base** if none exists; you merge it on the host).',
   ].join('\n');
 }

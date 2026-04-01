@@ -5,19 +5,18 @@
   "type": "module",
   "scripts": {
     "build:daemon": "node scripts/build.js",
-    "build:web": "next build",
+    "build:web": "NODE_OPTIONS='--experimental-sqlite' next build",
     "build": "CTI_BOT_NAME=__npm_build__ npm run build:daemon && CTI_BOT_NAME=__npm_build__ npm run build:web",
     "typecheck": "tsc --noEmit",
-    "dev": "PATH=\"/opt/homebrew/bin:$HOME/.local/bin:$PATH\" next dev",
-    "dev:bridge": "tsx src/main.ts",
-    "dev:web": "PATH=\"/opt/homebrew/bin:$HOME/.local/bin:$PATH\" next dev",
-    "start": "PATH=\"/opt/homebrew/bin:$HOME/.local/bin:$PATH\" next start",
-    "test": "CTI_HOME=$(mktemp -d) CTI_KANBAN_PLATFORM_DIR=cti-home node --test --test-concurrency=1 --import tsx --test-timeout=15000 src/__tests__/*.test.ts"
+    "dev": "NODE_OPTIONS='--experimental-sqlite' PATH=\"/opt/homebrew/bin:$HOME/.local/bin:$PATH\" next dev",
+    "dev:bridge": "NODE_OPTIONS='--experimental-sqlite' tsx src/main.ts",
+    "dev:web": "NODE_OPTIONS='--experimental-sqlite' PATH=\"/opt/homebrew/bin:$HOME/.local/bin:$PATH\" next dev",
+    "start": "NODE_OPTIONS='--experimental-sqlite' PATH=\"/opt/homebrew/bin:$HOME/.local/bin:$PATH\" next start",
+    "test": "CTI_HOME=$(mktemp -d) CTI_KANBAN_PLATFORM_DIR=cti-home NODE_OPTIONS='--experimental-sqlite' node --test --test-concurrency=1 --import tsx --test-timeout=15000 src/__tests__/*.test.ts"
   },
   "dependencies": {
     "@anthropic-ai/claude-agent-sdk": "^0.2.62",
     "@larksuiteoapi/node-sdk": "^1.59.0",
-    "better-sqlite3": "^11.10.0",
     "discord.js": "^14.25.1",
     "markdown-it": "^14.1.1",
     "next": "^16.1.6",
@@ -32,7 +31,6 @@
     "redis": "^4.7.0"
   },
   "devDependencies": {
-    "@types/better-sqlite3": "^7.6.13",
     "@types/markdown-it": "^14.1.2",
     "@types/node": "^22",
     "@types/react": "^19.2.14",
@@ -43,6 +41,6 @@
     "typescript": "^5"
   },
   "engines": {
-    "node": ">=20"
+    "node": ">=22.5.0"
   }
 }

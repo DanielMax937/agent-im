@@ -3,8 +3,9 @@ import path from 'node:path';
 
 import { CompensationService } from './compensation-service';
 import { getKanbanLogger } from './kanban-logger';
-import { resolveKanbanAgent } from './kanban-agents';
+import { preferredSkillsForProjectLane, resolveKanbanAgent } from './kanban-agents';
 import { parseKanbanAction } from './kanban-workflow-parser';
+import { buildSystemCheckPrompt, kanbanConfirmationMaxLoops } from './kanban-confirmation';
 import { notifyKanbanTelegram } from './kanban-notify';
 import { notifyWorkflowStateTransition } from './kanban-transition-notify';
 import { mergeKanbanAssignee, resolveKanbanAssignment } from './kanban-role-assign';
@@ -30,21 +31,29 @@ import type {
   TaskWorkflowState,
 } from './types';
 
+/** Feature test → PR review → merge → regression on merge target branch (see mergeAndStartRegressionTesting). */
 const ALLOWED_TRANSITIONS: Record<TaskWorkflowState, TaskWorkflowState[]> = {
-  todo: ['in_progress'],
-  in_progress: ['review', 'testing'],
-  review: ['testing', 'in_progress'],
-  testing: ['closed', 'in_progress', 'regression_testing'],
-  regression_testing: ['closed', 'testing', 'in_progress'],
+  todo: ['pending_start'],
+  pending_start: ['in_progress'],
+  in_progress: ['testing'],
+  testing: ['review', 'in_progress'],
+  review: ['in_progress', 'regression_testing'],
+  regression_testing: ['closed'],
   closed: [],
 };
+
+function useKanbanWorktree(): boolean {
+  return process.env.CTI_KANBAN_USE_WORKTREE !== '0';
+}
 
 function now(): string {
   return new Date().toISOString();
 }
 
-function roleForActiveWorkflowState(state: TaskWorkflowState): AgentRole | null {
+export function roleForActiveWorkflowState(state: TaskWorkflowState): AgentRole | null {
   switch (state) {
+    case 'pending_start':
+      return null;
     case 'in_progress':
       return 'developer';
     case 'review':
@@ -124,32 +133,257 @@ export interface WorkflowServiceDeps {
 export class WorkflowService {
   constructor(private readonly deps: WorkflowServiceDeps) {}
 
+  private normalizeDependsOnIssueIds(raw: string[] | undefined): string[] {
+    if (!raw?.length) return [];
+    return [...new Set(raw.map((x) => x.trim()).filter(Boolean))];
+  }
+
+  private dependsOnIssueIdsFor(projectId: string, issueId: string): string[] {
+    return this.deps.store.getTaskSessionByProjectIssueId(projectId, issueId)?.dependsOnIssueIds ?? [];
+  }
+
+  /** Detects a directed cycle if `newIssueId` were added with edges `newIssueId -> newDeps`. */
+  private wouldCreateDependencyCycle(projectId: string, newIssueId: string, newDeps: string[]): boolean {
+    const dfs = (issue: string, stack: Set<string>): boolean => {
+      if (stack.has(issue)) return true;
+      stack.add(issue);
+      const deps = issue === newIssueId ? newDeps : this.dependsOnIssueIdsFor(projectId, issue);
+      for (const d of deps) {
+        if (dfs(d, stack)) return true;
+      }
+      stack.delete(issue);
+      return false;
+    };
+    return dfs(newIssueId, new Set());
+  }
+
+  private allDependencyTasksClosed(task: TaskSession): boolean {
+    const deps = task.dependsOnIssueIds ?? [];
+    if (deps.length === 0) return true;
+    for (const issueId of deps) {
+      const t = this.deps.store.getTaskSessionByProjectIssueId(task.projectId, issueId);
+      if (!t || t.workflowState !== 'closed') return false;
+    }
+    return true;
+  }
+
+  private enqueuePendingAssignmentSprint(sprint: Sprint, taskSessionId: string): void {
+    const q = [...(sprint.pendingDeveloperAssignmentQueue ?? [])];
+    if (!q.includes(taskSessionId)) q.push(taskSessionId);
+    this.deps.store.upsertSprint({ ...sprint, pendingDeveloperAssignmentQueue: q, updatedAt: now() });
+  }
+
+  /**
+   * Drains the sprint FIFO: starts `pending_start` tasks when the head has no unmet dependencies.
+   * Called after enqueue, after a task closes, and on platform resume.
+   */
+  async processDeveloperAssignmentQueue(sprintId: string): Promise<void> {
+    const sprint = this.requireSprint(sprintId);
+    let queue = [...(sprint.pendingDeveloperAssignmentQueue ?? [])];
+    let changed = false;
+
+    while (queue.length > 0) {
+      const headId = queue[0]!;
+      const task = this.deps.store.getTaskSession(headId);
+      if (!task) {
+        queue.shift();
+        changed = true;
+        continue;
+      }
+      if (task.workflowState !== 'pending_start') {
+        queue.shift();
+        changed = true;
+        continue;
+      }
+      if (!this.allDependencyTasksClosed(task)) {
+        break;
+      }
+      queue.shift();
+      changed = true;
+      await this.materializeDeveloperAssignmentFromPending(task);
+    }
+
+    if (changed) {
+      const latest = this.requireSprint(sprintId);
+      this.deps.store.upsertSprint({
+        ...latest,
+        pendingDeveloperAssignmentQueue: queue,
+        updatedAt: now(),
+      });
+    }
+  }
+
+  private async materializeDeveloperAssignmentFromPending(task: TaskSession): Promise<void> {
+    const project = this.requireProject(task.projectId);
+    const sprint = this.requireSprint(task.sprintId);
+    this.assertProjectLocalRepositoryPath(project);
+    const branchName = `${project.repository.taskBranchPrefix}${slugify(task.issueId)}`;
+    const useWt = useKanbanWorktree();
+    let workingDir = project.repository.localPath;
+    let worktreePath: string | undefined;
+    if (useWt) {
+      worktreePath = path.join(path.dirname(project.repository.localPath), `wt-${slugify(task.issueId)}`);
+      await this.deps.gitService.createTaskWorktree({
+        repoPath: project.repository.localPath,
+        baseBranch: sprint.branchName,
+        worktreePath,
+        branchName,
+      });
+      workingDir = worktreePath;
+    } else {
+      await this.deps.gitService.createTaskBranch({
+        repoPath: project.repository.localPath,
+        baseBranch: sprint.branchName,
+        nextBranch: branchName,
+      });
+    }
+
+    const prior = task;
+    await notifyWorkflowStateTransition({
+      task: prior,
+      from: 'pending_start',
+      to: 'in_progress',
+      outgoingRole: null,
+      actionLabel: '队列开始开发',
+    });
+
+    const next = this.deps.store.upsertTaskSession({
+      ...prior,
+      workflowState: 'in_progress',
+      branchName,
+      worktreePath,
+      workingDirectory: workingDir,
+      updatedAt: now(),
+    });
+
+    await this.deps.instanceManager.upsertAndStart(this.buildAgentInstance(next, next.role));
+    this.enqueueKickoffPrompt(this.requireTaskSession(next.id));
+    await this.appendWorkflowComment(
+      next.id,
+      `Started from queue → ${next.kanbanAgent ?? 'agent-dev'} (${next.role}/${next.runtime}) on ${branchName}${worktreePath ? ` (worktree ${worktreePath})` : ''}.`,
+    );
+  }
+
   /**
    * After a successful assistant turn, parse `KANBAN_ACTION:...` from the latest reply for that role
    * and run the same workflow transitions as the dashboard API. Disabled when `CTI_KANBAN_WORKFLOW_AUTO=0`.
+   * @returns true if `workflowState` changed.
    */
   async maybeAutoAdvanceAfterAgentTurn(
     taskSessionId: string,
     completedRole: AgentRole,
     instanceId: string,
-  ): Promise<void> {
-    if (process.env.CTI_KANBAN_WORKFLOW_AUTO === '0') return;
+  ): Promise<boolean> {
+    if (process.env.CTI_KANBAN_WORKFLOW_AUTO === '0') return false;
     const taskSession = this.deps.store.getTaskSession(taskSessionId);
-    if (!taskSession || taskSession.workflowState === 'closed') return;
+    if (!taskSession || taskSession.workflowState === 'closed') return false;
+    const workflowStateBefore = taskSession.workflowState;
 
     const last = [...taskSession.conversationHistory].reverse().find(
       (e) => e.role === 'assistant' && e.source === completedRole,
     );
-    if (!last) return;
+    if (!last) return false;
     const parsed = parseKanbanAction(last.content);
-    if (!parsed) return;
+    if (!parsed) return false;
 
     try {
       await this.applyKanbanWorkflowAction(taskSession, completedRole, instanceId, parsed);
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       void notifyKanbanTelegram(`[Kanban][${taskSession.issueId}] Workflow auto-advance failed: ${msg}`);
+      return false;
     }
+
+    const after = this.deps.store.getTaskSession(taskSessionId);
+    return after !== null && after.workflowState !== workflowStateBefore;
+  }
+
+  /**
+   * Runs auto-advance when enabled; if the task did not change column, enqueues a `system_check` prompt
+   * (bounded by `CTI_KANBAN_CONFIRMATION_MAX_LOOPS`).
+   */
+  async afterSuccessfulAssistantTurn(
+    taskSessionId: string,
+    completedRole: AgentRole,
+    instanceId: string,
+  ): Promise<void> {
+    const before = this.deps.store.getTaskSession(taskSessionId);
+    if (!before) return;
+    const workflowStateBefore = before.workflowState;
+
+    await this.maybeAutoAdvanceAfterAgentTurn(taskSessionId, completedRole, instanceId);
+
+    const mid = this.deps.store.getTaskSession(taskSessionId);
+    if (!mid) return;
+    if (mid.workflowState !== workflowStateBefore) {
+      this.deps.store.upsertTaskSession({ ...mid, confirmationLoopCount: 0 });
+      return;
+    }
+
+    await this.maybeEnqueueSystemCheck(mid, completedRole);
+  }
+
+  /** Queue a human-authored user message and reset confirmation loop count. */
+  async enqueueManualQueueMessage(taskSessionId: string, content: string): Promise<void> {
+    const text = content.trim();
+    if (!text) throw new Error('content is required');
+    const task = this.requireTaskSession(taskSessionId);
+    if (
+      task.workflowState === 'todo' ||
+      task.workflowState === 'pending_start' ||
+      task.workflowState === 'closed'
+    ) {
+      throw new Error('Cannot queue a manual message for todo, pending_start, or closed tasks');
+    }
+    const role = roleForActiveWorkflowState(task.workflowState);
+    if (!role) throw new Error('No active lane for this workflow state');
+
+    this.deps.store.enqueueTaskMessage({
+      queueKey: task.messageQueueKey,
+      taskSessionId: task.id,
+      taskId: task.taskId,
+      type: 'human_followup',
+      content: text,
+    });
+    this.deps.store.upsertTaskSession({
+      ...task,
+      confirmationLoopCount: 0,
+    });
+
+    const inst = this.deps.store.findAgentInstance(task.id, role);
+    if (inst) await this.deps.instanceManager.startInstance(inst.id);
+  }
+
+  private async maybeEnqueueSystemCheck(task: TaskSession, completedRole: AgentRole): Promise<void> {
+    if (task.workflowState === 'todo' || task.workflowState === 'pending_start' || task.workflowState === 'closed')
+      return;
+    const expected = roleForActiveWorkflowState(task.workflowState);
+    if (!expected || expected !== completedRole) return;
+
+    const max = kanbanConfirmationMaxLoops();
+    const n = task.confirmationLoopCount ?? 0;
+    if (n >= max) {
+      void notifyKanbanTelegram(
+        `[Kanban][${task.issueId}] Human intervention requested: confirmation loop limit (${max}) reached without a workflow transition.`,
+      );
+      return;
+    }
+
+    const content = buildSystemCheckPrompt(task, completedRole);
+    this.deps.store.enqueueTaskMessage({
+      queueKey: task.messageQueueKey,
+      taskSessionId: task.id,
+      taskId: task.taskId,
+      type: 'system_check',
+      content,
+    });
+    this.deps.store.upsertTaskSession({
+      ...task,
+      confirmationLoopCount: n + 1,
+    });
+
+    const inst = this.deps.store.findAgentInstance(task.id, completedRole);
+    if (inst) await this.deps.instanceManager.startInstance(inst.id);
   }
 
   private async applyKanbanWorkflowAction(
@@ -161,18 +395,18 @@ export class WorkflowService {
     const defer = instanceId;
     const { workflowState } = taskSession;
 
-    if (parsed.action === 'SUBMIT_REVIEW') {
+    if (parsed.action === 'START_TESTING') {
       if (workflowState !== 'in_progress' || completedRole !== 'developer') return;
+      await this.startTesting(taskSession.id, defer);
+      return;
+    }
+
+    if (parsed.action === 'SUBMIT_REVIEW') {
+      if (workflowState !== 'testing' || completedRole !== 'tester') return;
       await this.submitTaskForReview({
         ...defaultSubmitTaskForReviewInput(taskSession),
         deferStopInstanceId: defer,
       });
-      return;
-    }
-
-    if (parsed.action === 'START_TESTING') {
-      if (workflowState !== 'review' || completedRole !== 'reviewer') return;
-      await this.startTesting(taskSession.id, defer);
       return;
     }
 
@@ -182,15 +416,25 @@ export class WorkflowService {
       return;
     }
 
-    if (parsed.action === 'START_REGRESSION') {
+    if (parsed.action === 'APPROVE_MERGE') {
+      if (workflowState !== 'review' || completedRole !== 'reviewer') return;
+      await this.mergeApprovedPullRequestAndStartRegression(taskSession.id, defer);
+      return;
+    }
+
+    if (parsed.action === 'RETURN_TO_DEVELOPMENT') {
       if (workflowState !== 'testing' || completedRole !== 'tester') return;
-      await this.startRegressionTesting(taskSession.id, defer);
+      await this.returnFromFeatureTestingToDevelopment(
+        taskSession.id,
+        parsed.payload?.trim() || 'Feature tests failed; returning to development.',
+        defer,
+      );
       return;
     }
 
     if (parsed.action === 'CLOSE') {
       if (completedRole !== 'tester') return;
-      if (workflowState !== 'testing' && workflowState !== 'regression_testing') return;
+      if (workflowState !== 'regression_testing') return;
       await this.closeTask(taskSession.id, defer);
       return;
     }
@@ -261,6 +505,19 @@ export class WorkflowService {
       throw new Error(`Task already exists for issue ${issueId} in this project`);
     }
 
+    const dependsOnIssueIds = this.normalizeDependsOnIssueIds(input.dependsOnIssueIds);
+    for (const dep of dependsOnIssueIds) {
+      if (dep === issueId) {
+        throw new Error('Task cannot depend on itself');
+      }
+      if (!this.deps.store.getTaskSessionByProjectIssueId(project.id, dep)) {
+        throw new Error(`dependsOnIssueIds: no task with issue ${dep} in this project`);
+      }
+    }
+    if (this.wouldCreateDependencyCycle(project.id, issueId, dependsOnIssueIds)) {
+      throw new Error('dependsOnIssueIds would create a dependency cycle');
+    }
+
     const id = crypto.randomUUID();
     const taskSession = this.deps.store.upsertTaskSession({
       id,
@@ -269,6 +526,7 @@ export class WorkflowService {
       taskId: issueId,
       issueId,
       title: input.title,
+      ...(dependsOnIssueIds.length ? { dependsOnIssueIds } : {}),
       workflowState: 'todo',
       runtime: 'claude',
       role: 'developer',
@@ -296,8 +554,9 @@ export class WorkflowService {
   }
 
   /**
-   * Assign work to a lane runner. Use `taskSessionId` + `kanbanAgent` to pick up a **todo** card;
-   * otherwise legacy one-shot assign (creates **in_progress** immediately).
+   * Assign work to a lane runner. Use `taskSessionId` + `kanbanAgent` to pick up a **todo** card
+   * (queued `pending_start` until dependencies and FIFO allow **in_progress**);
+   * otherwise legacy assign (existing non-todo rows keep immediate **in_progress**; new issues use create+queue).
    */
   async assignTask(input: AssignTaskInput): Promise<TaskSession> {
     if (input.taskSessionId) {
@@ -307,6 +566,29 @@ export class WorkflowService {
     const existingTodo = this.deps.store.getTaskSessionByProjectIssueId(input.projectId, input.issueId);
     if (existingTodo?.workflowState === 'todo') {
       throw new Error('Task exists in todo; assign with taskSessionId and kanbanAgent, or use assignFromTodo');
+    }
+
+    const existing = this.deps.store.getTaskSessionByProjectIssueId(input.projectId, input.issueId);
+    if (!existing) {
+      if (!input.title?.trim() || !input.runtime) {
+        throw new Error('Legacy assignTask requires title and runtime');
+      }
+      const created = await this.createTask({
+        projectId: input.projectId,
+        sprintId: input.sprintId,
+        issueId: input.issueId,
+        title: input.title!,
+        dependsOnIssueIds: input.dependsOnIssueIds,
+      });
+      return this.assignFromTodo({
+        ...input,
+        taskSessionId: created.id,
+        kanbanAgent: input.kanbanAgent ?? 'agent-dev',
+      });
+    }
+
+    if (existing.workflowState === 'pending_start') {
+      throw new Error('Task is already queued for development; wait for dependencies or queue order');
     }
 
     if (!input.title?.trim() || !input.runtime) {
@@ -322,7 +604,7 @@ export class WorkflowService {
     }
 
     const branchName = `${project.repository.taskBranchPrefix}${slugify(input.issueId)}`;
-    const useWt = process.env.CTI_KANBAN_USE_WORKTREE === '1';
+    const useWt = useKanbanWorktree();
     let workingDir = project.repository.localPath;
     let worktreePath: string | undefined;
     if (useWt) {
@@ -342,8 +624,7 @@ export class WorkflowService {
       });
     }
 
-    const existing = this.deps.store.getTaskSessionByProjectIssueId(project.id, input.issueId);
-    const priorSession = { kanbanAssignees: existing?.kanbanAssignees } as TaskSession;
+    const priorSession = { kanbanAssignees: existing.kanbanAssignees } as TaskSession;
     const allTasks = this.projectTasks(project.id);
     const { member, runtimeProfileIdHint } = resolveKanbanAssignment(project, 'agent-dev', priorSession, allTasks, {
       runtimeProfileId: input.runtimeProfileId,
@@ -358,9 +639,9 @@ export class WorkflowService {
       existing?.runtimeProfileId,
     );
     const assignPatch = mergeKanbanAssignee(priorSession, 'agent-dev', member?.id);
-    const fromState = existing?.workflowState ?? 'todo';
+    const fromState = existing.workflowState;
     const taskDraft: TaskSession = {
-      id: existing?.id ?? crypto.randomUUID(),
+      id: existing.id,
       projectId: project.id,
       sprintId: sprint.id,
       taskId: input.issueId,
@@ -372,18 +653,18 @@ export class WorkflowService {
       role,
       kanbanAgent: 'agent-dev',
       ...assignPatch,
-      preferredSkills: resolveKanbanAgent('agent-dev').preferredSkills,
-      sessionId: existing?.sessionId ?? crypto.randomUUID(),
-      providerSessionId: existing?.providerSessionId,
+      preferredSkills: preferredSkillsForProjectLane(project, 'agent-dev', 0),
+      sessionId: existing.sessionId,
+      providerSessionId: existing.providerSessionId,
       workingDirectory: workingDir,
       worktreePath,
       branchName,
-      messageQueueKey: existing?.messageQueueKey ?? createTaskQueueKey(input.issueId),
-      approvalQueueKey: existing?.approvalQueueKey ?? createApprovalQueueKey(input.issueId),
-      conversationHistory: existing?.conversationHistory ?? [],
-      systemPrompt: existing?.systemPrompt,
+      messageQueueKey: existing.messageQueueKey ?? createTaskQueueKey(input.issueId),
+      approvalQueueKey: existing.approvalQueueKey ?? createApprovalQueueKey(input.issueId),
+      conversationHistory: existing.conversationHistory ?? [],
+      systemPrompt: existing.systemPrompt,
       lastError: undefined,
-      createdAt: existing?.createdAt ?? now(),
+      createdAt: existing.createdAt ?? now(),
       updatedAt: now(),
     };
     await notifyWorkflowStateTransition({
@@ -435,27 +716,6 @@ export class WorkflowService {
     const rejectionCount = taskSession.reviewRejectionCount ?? 0;
     const resolved = resolveKanbanAgent(kind, rejectionCount);
 
-    const branchName = `${project.repository.taskBranchPrefix}${slugify(taskSession.issueId)}`;
-    const useWt = process.env.CTI_KANBAN_USE_WORKTREE === '1';
-    let workingDir = project.repository.localPath;
-    let worktreePath: string | undefined;
-    if (useWt) {
-      worktreePath = path.join(path.dirname(project.repository.localPath), `wt-${slugify(taskSession.issueId)}`);
-      await this.deps.gitService.createTaskWorktree({
-        repoPath: project.repository.localPath,
-        baseBranch: sprint.branchName,
-        worktreePath,
-        branchName,
-      });
-      workingDir = worktreePath;
-    } else {
-      await this.deps.gitService.createTaskBranch({
-        repoPath: project.repository.localPath,
-        baseBranch: sprint.branchName,
-        nextBranch: branchName,
-      });
-    }
-
     const handoff = input.handoffComment ?? taskSession.handoffComment;
 
     const laneKind = resolved.kanbanAgent;
@@ -477,30 +737,28 @@ export class WorkflowService {
     await notifyWorkflowStateTransition({
       task: taskSession,
       from: 'todo',
-      to: 'in_progress',
+      to: 'pending_start',
       outgoingRole: null,
-      actionLabel: '从待办分配',
+      actionLabel: '从待办分配（排队）',
     });
 
     const next = this.deps.store.upsertTaskSession({
       ...taskSession,
       title: input.title || taskSession.title,
-      workflowState: 'in_progress',
+      workflowState: 'pending_start',
       runtime: resolved.runtime,
       role: resolved.role,
       kanbanAgent: resolved.kanbanAgent,
-      preferredSkills: resolved.preferredSkills,
+      preferredSkills: preferredSkillsForProjectLane(project, kind, rejectionCount),
       handoffComment: handoff,
-      branchName,
-      worktreePath,
-      workingDirectory: workingDir,
       runtimeProfileId: resolvedProfile,
+      workingDirectory: project.repository.localPath,
       ...assignPatch,
       updatedAt: now(),
     });
 
-    await this.deps.instanceManager.upsertAndStart(this.buildAgentInstance(next, resolved.role));
-    this.enqueueKickoffPrompt(this.requireTaskSession(next.id));
+    this.enqueuePendingAssignmentSprint(sprint, next.id);
+
     if (handoff?.trim()) {
       await this.appendWorkflowComment(
         next.id,
@@ -509,8 +767,10 @@ export class WorkflowService {
     }
     await this.appendWorkflowComment(
       next.id,
-      `Assigned from todo → ${resolved.kanbanAgent} (${resolved.role}/${resolved.runtime}).`,
+      `Queued for development (${resolved.kanbanAgent} / ${resolved.runtime}).`,
     );
+
+    await this.processDeveloperAssignmentQueue(sprint.id);
     return this.requireTaskSession(next.id);
   }
 
@@ -519,8 +779,8 @@ export class WorkflowService {
     this.assertTransition(taskSession.workflowState, 'in_progress');
     await this.stopInstancesForTask(taskSession.id, deferStopInstanceId);
     const nextCount = (taskSession.reviewRejectionCount ?? 0) + 1;
-    const resolved = resolveKanbanAgent('agent-dev', nextCount);
     const project = this.requireProject(taskSession.projectId);
+    const resolved = resolveKanbanAgent('agent-dev', nextCount);
     const allTasks = this.projectTasks(project.id);
     const laneKind = resolved.kanbanAgent;
     const { member, runtimeProfileIdHint } = resolveKanbanAssignment(project, laneKind, taskSession, allTasks, {});
@@ -547,7 +807,7 @@ export class WorkflowService {
       reviewRejectionCount: nextCount,
       runtime: resolved.runtime,
       kanbanAgent: resolved.kanbanAgent,
-      preferredSkills: resolved.preferredSkills,
+      preferredSkills: preferredSkillsForProjectLane(project, 'agent-dev', nextCount),
       handoffComment: comment,
       runtimeProfileId: resolvedProfile,
       ...assignPatch,
@@ -573,14 +833,14 @@ export class WorkflowService {
     const sprint = this.requireSprint(taskSession.sprintId);
     const repoPath = taskSession.worktreePath ?? project.repository.localPath;
 
-    const commitResult = await this.deps.gitService.commitAll({
+    await this.deps.gitService.commitAll({
       repoPath,
       message: input.commitMessage,
     });
 
-    if (commitResult.committed) {
-      await this.deps.gitService.pushBranch(repoPath, taskSession.branchName!);
-    }
+    // Always push before opening the PR: GitHub needs `head` on origin. If we only pushed when
+    // `committed` was true, a no-op commit attempt could skip push and cause API 404 / missing head.
+    await this.deps.gitService.pushBranch(repoPath, taskSession.branchName!);
 
     const pullRequest = await this.deps.scmClient.createPullRequest({
       project,
@@ -590,7 +850,6 @@ export class WorkflowService {
       targetBranch: sprint.branchName,
     });
 
-    const reviewerPreset = resolveKanbanAgent('claude-review');
     const allTasks = this.projectTasks(project.id);
     const { member, runtimeProfileIdHint } = resolveKanbanAssignment(project, 'claude-review', taskSession, allTasks, {});
     const reviewerProfile = pickRuntimeProfile(
@@ -604,9 +863,9 @@ export class WorkflowService {
 
     await notifyWorkflowStateTransition({
       task: taskSession,
-      from: 'in_progress',
+      from: 'testing',
       to: 'review',
-      outgoingRole: 'developer',
+      outgoingRole: 'tester',
       actionLabel: '提交评审（创建 PR）',
     });
 
@@ -614,7 +873,8 @@ export class WorkflowService {
       ...taskSession,
       workflowState: 'review',
       pullRequestUrl: pullRequest.url,
-      preferredSkills: reviewerPreset.preferredSkills,
+      pullRequestNumber: pullRequest.number,
+      preferredSkills: preferredSkillsForProjectLane(project, 'claude-review', 0),
       kanbanAgent: 'claude-review',
       runtimeProfileId: reviewerProfile,
       ...assignPatch,
@@ -635,7 +895,6 @@ export class WorkflowService {
     this.assertTransition(taskSession.workflowState, 'testing');
     await this.stopInstancesForTask(taskSession.id, deferStopInstanceId);
 
-    const testerPreset = resolveKanbanAgent('copilot-test');
     const project = this.requireProject(taskSession.projectId);
     const allTasks = this.projectTasks(project.id);
     const { member, runtimeProfileIdHint } = resolveKanbanAssignment(project, 'copilot-test', taskSession, allTasks, {});
@@ -650,16 +909,16 @@ export class WorkflowService {
 
     await notifyWorkflowStateTransition({
       task: taskSession,
-      from: 'review',
+      from: 'in_progress',
       to: 'testing',
-      outgoingRole: 'reviewer',
+      outgoingRole: 'developer',
       actionLabel: '进入功能测试',
     });
 
     const updatedTaskSession = this.deps.store.upsertTaskSession({
       ...taskSession,
       workflowState: 'testing',
-      preferredSkills: testerPreset.preferredSkills,
+      preferredSkills: preferredSkillsForProjectLane(project, 'copilot-test', 0),
       kanbanAgent: 'copilot-test',
       handoffComment:
         taskSession.handoffComment ??
@@ -678,19 +937,33 @@ export class WorkflowService {
     return updatedTaskSession;
   }
 
-  async startRegressionTesting(taskSessionId: string, deferStopInstanceId?: string): Promise<TaskSession> {
+  /**
+   * Merge the open PR/MR, then start regression testing on the merge-target branch in the main repo clone.
+   * Call from **review** (reviewer `KANBAN_ACTION:APPROVE_MERGE`) or POST `/start-regression` when state is review.
+   */
+  async mergeApprovedPullRequestAndStartRegression(
+    taskSessionId: string,
+    deferStopInstanceId?: string,
+  ): Promise<TaskSession> {
     const taskSession = this.requireTaskSession(taskSessionId);
     this.assertTransition(taskSession.workflowState, 'regression_testing');
+    if (taskSession.pullRequestNumber == null) {
+      throw new Error('Missing pullRequestNumber — create PR first (submit-review from testing).');
+    }
     await this.stopInstancesForTask(taskSession.id, deferStopInstanceId);
 
     const project = this.requireProject(taskSession.projectId);
     this.assertProjectLocalRepositoryPath(project);
+    const sprint = this.requireSprint(taskSession.sprintId);
     const repoPath = project.repository.localPath;
-    const base = project.repository.baseBranch;
-    const remoteRef = `origin/${base}`;
+    const mergeTarget = sprint.branchName;
 
+    await this.deps.scmClient.mergePullRequest(project, taskSession.pullRequestNumber);
     await this.deps.gitService.fetchOrigin(repoPath);
-    const masterSha = await this.deps.gitService.resolveRefSha(repoPath, remoteRef);
+    await this.deps.gitService.checkoutOriginTrackingBranch(repoPath, mergeTarget);
+
+    const remoteRef = `origin/${mergeTarget}`;
+    const baselineSha = await this.deps.gitService.resolveRefSha(repoPath, remoteRef);
 
     const allTasks = this.projectTasks(project.id);
     const { member, runtimeProfileIdHint } = resolveKanbanAssignment(project, 'copilot-test', taskSession, allTasks, {});
@@ -705,23 +978,26 @@ export class WorkflowService {
 
     await notifyWorkflowStateTransition({
       task: taskSession,
-      from: 'testing',
+      from: 'review',
       to: 'regression_testing',
-      outgoingRole: 'tester',
-      actionLabel: '进入回归测试',
+      outgoingRole: 'reviewer',
+      actionLabel: '合并 PR 并进入回归测试',
     });
 
     const updatedTaskSession = this.deps.store.upsertTaskSession({
       ...taskSession,
       workflowState: 'regression_testing',
-      regressionMasterSha: masterSha,
+      regressionMasterSha: baselineSha,
+      workingDirectory: repoPath,
+      worktreePath: undefined,
+      branchName: mergeTarget,
       preferredSkills: [
-        'verification-before-completion',
-        'Regression on master: if new commits landed, discard stale test branches and re-pull master before running suites.',
+        ...preferredSkillsForProjectLane(project, 'copilot-test', 0),
+        'Final regression: you are on the main repo clone with branch matching the PR merge target (sprint/integration). Pull latest before suites; if origin moved, re-fetch and re-run.',
       ],
       handoffComment:
         taskSession.handoffComment ??
-        'Regression phase: test against master; refresh regression cases when the app changes.',
+        `Regression phase: run full suites on local branch "${mergeTarget}" (merge target after PR). Compare new commits with regressionMasterSha when checking for drift.`,
       runtimeProfileId: testerProfile,
       ...assignPatch,
     });
@@ -733,10 +1009,67 @@ export class WorkflowService {
 
     await this.appendWorkflowComment(
       updatedTaskSession.id,
-      `Started regression tester (master ${base} @ ${masterSha.slice(0, 7)}).`,
+      `Merged PR #${taskSession.pullRequestNumber}; regression baseline ${mergeTarget} @ ${baselineSha.slice(0, 7)} (main repo checkout).`,
     );
 
     return updatedTaskSession;
+  }
+
+  /** @deprecated Prefer merge from review via APPROVE_MERGE. Kept for API: merges PR then starts regression when in **review**. */
+  async startRegressionTesting(taskSessionId: string, deferStopInstanceId?: string): Promise<TaskSession> {
+    const taskSession = this.requireTaskSession(taskSessionId);
+    if (taskSession.workflowState !== 'review') {
+      throw new Error('startRegressionTesting: task must be in review (open PR) to merge and start regression');
+    }
+    return this.mergeApprovedPullRequestAndStartRegression(taskSessionId, deferStopInstanceId);
+  }
+
+  private async returnFromFeatureTestingToDevelopment(
+    taskSessionId: string,
+    comment: string,
+    deferStopInstanceId?: string,
+  ): Promise<void> {
+    const taskSession = this.requireTaskSession(taskSessionId);
+    this.assertTransition(taskSession.workflowState, 'in_progress');
+    await this.stopInstancesForTask(taskSession.id, deferStopInstanceId);
+
+    const project = this.requireProject(taskSession.projectId);
+    const resolved = resolveKanbanAgent('agent-dev', taskSession.reviewRejectionCount ?? 0);
+    const allTasks = this.projectTasks(project.id);
+    const laneKind = resolved.kanbanAgent;
+    const { member, runtimeProfileIdHint } = resolveKanbanAssignment(project, laneKind, taskSession, allTasks, {});
+    const resolvedProfile = pickRuntimeProfile(
+      project,
+      laneKind,
+      undefined,
+      runtimeProfileIdHint,
+      taskSession.runtimeProfileId,
+    );
+    const assignPatch = mergeKanbanAssignee(taskSession, laneKind, member?.id);
+
+    await notifyWorkflowStateTransition({
+      task: taskSession,
+      from: 'testing',
+      to: 'in_progress',
+      outgoingRole: 'tester',
+      actionLabel: '功能测试未通过，退回开发',
+    });
+
+    const updated = this.deps.store.upsertTaskSession({
+      ...taskSession,
+      workflowState: 'in_progress',
+      runtime: resolved.runtime,
+      kanbanAgent: resolved.kanbanAgent,
+      preferredSkills: preferredSkillsForProjectLane(project, 'agent-dev', taskSession.reviewRejectionCount ?? 0),
+      handoffComment: comment,
+      runtimeProfileId: resolvedProfile,
+      ...assignPatch,
+      updatedAt: now(),
+    });
+
+    await this.deps.instanceManager.upsertAndStart(this.buildAgentInstance(updated, 'developer'));
+    this.enqueueKickoffPrompt(this.requireTaskSession(updated.id));
+    await this.appendWorkflowComment(updated.id, `Returned from feature testing to development: ${comment}`);
   }
 
   /**
@@ -751,9 +1084,10 @@ export class WorkflowService {
 
     const project = this.requireProject(taskSession.projectId);
     this.assertProjectLocalRepositoryPath(project);
+    const sprint = this.requireSprint(taskSession.sprintId);
     const repoPath = project.repository.localPath;
-    const base = project.repository.baseBranch;
-    const remoteRef = `origin/${base}`;
+    const trackBranch = taskSession.branchName ?? sprint.branchName;
+    const remoteRef = `origin/${trackBranch}`;
 
     await this.deps.gitService.fetchOrigin(repoPath);
     const currentSha = await this.deps.gitService.resolveRefSha(repoPath, remoteRef);
@@ -771,7 +1105,7 @@ export class WorkflowService {
     if (currentSha === baseline) {
       await this.appendWorkflowComment(
         taskSessionId,
-        `Regression check: ${base} unchanged (${currentSha.slice(0, 7)}).`,
+        `Regression check: ${trackBranch} unchanged (${currentSha.slice(0, 7)}).`,
       );
       return this.requireTaskSession(taskSessionId);
     }
@@ -780,14 +1114,14 @@ export class WorkflowService {
       ...taskSession,
       regressionMasterSha: currentSha,
       handoffComment: [
-        `主分支 ${base} 已前进（${baseline.slice(0, 7)} → ${currentSha.slice(0, 7)}）。`,
-        '请废弃当前用于回归的测试分支或旧 checkout，从 origin 拉取最新代码后重新执行全量回归测试；勿在过时检出上继续补测。',
+        `集成分支 ${trackBranch} 在 origin 上已前进（${baseline.slice(0, 7)} → ${currentSha.slice(0, 7)}）。`,
+        '请拉取最新代码后重新执行全量回归测试；勿在过时检出上继续补测。',
       ].join(' '),
     });
 
     await this.appendWorkflowComment(
       taskSessionId,
-        `主分支 ${base} 有新合并；已废弃基于旧 SHA 的回归基线。请拉取 ${base} @ ${currentSha.slice(0, 7)} 后重新跑回归。`,
+      `origin/${trackBranch} 有新提交；已更新回归基线。请拉取 ${trackBranch} @ ${currentSha.slice(0, 7)} 后重新跑回归。`,
     );
 
     await this.deps.instanceManager.upsertAndStart(this.buildAgentInstance(next, 'tester'));
@@ -795,9 +1129,104 @@ export class WorkflowService {
     return next;
   }
 
+  /**
+   * Post a comment on the open PR/MR and append the same text as a workflow line on the task (Kanban “issue” comment).
+   */
+  async syncReviewCommentToPrAndTask(taskSessionId: string, body: string): Promise<void> {
+    const text = body.trim();
+    if (!text) throw new Error('body is required');
+    const taskSession = this.requireTaskSession(taskSessionId);
+    if (taskSession.workflowState !== 'review') {
+      throw new Error('syncReviewCommentToPrAndTask requires workflowState=review');
+    }
+    const n = taskSession.pullRequestNumber;
+    if (n == null) {
+      throw new Error('pullRequestNumber missing — submit review (create PR) first');
+    }
+    const project = this.requireProject(taskSession.projectId);
+    await this.deps.scmClient.postPullRequestDiscussionComment(project, n, text);
+    await this.appendWorkflowComment(taskSessionId, `Review (synced to PR #${n}):\n${text}`);
+  }
+
+  /**
+   * Before closing from regression: ensure an open PR exists from sprint merge target → repository base (e.g. master).
+   * Only creates the PR; humans merge. Skips if merge target equals base or an open PR already exists.
+   */
+  private async ensureReleasePullRequestMergeTargetToBase(taskSession: TaskSession): Promise<Partial<TaskSession>> {
+    const project = this.requireProject(taskSession.projectId);
+    const sprint = this.requireSprint(taskSession.sprintId);
+    const mergeTarget = sprint.branchName;
+    const baseBranch = project.repository.baseBranch;
+
+    if (mergeTarget === baseBranch) {
+      await this.appendWorkflowComment(
+        taskSession.id,
+        `Release PR: merge target branch is the same as the repo base (\`${baseBranch}\`); no separate PR to open.`,
+      );
+      return {};
+    }
+
+    const existing = await this.deps.scmClient.findOpenPullRequest({
+      project,
+      sourceBranch: mergeTarget,
+      targetBranch: baseBranch,
+    });
+
+    if (existing?.url) {
+      await this.appendWorkflowComment(
+        taskSession.id,
+        `Release PR: open PR already exists (${existing.url}). Merge manually to integrate \`${mergeTarget}\` into \`${baseBranch}\`.`,
+      );
+      return {
+        releasePullRequestUrl: existing.url,
+        ...(existing.number !== undefined ? { releasePullRequestNumber: existing.number } : {}),
+      };
+    }
+
+    const title = `[${taskSession.issueId}] Merge ${mergeTarget} → ${baseBranch}`;
+    const body = [
+      `Kanban: regression passed for **${taskSession.issueId}** (${taskSession.title}).`,
+      '',
+      `Merge **${mergeTarget}** into **${baseBranch}** to ship integration. Opened automatically; merge manually when ready.`,
+    ].join('\n');
+
+    try {
+      const pr = await this.deps.scmClient.createPullRequest({
+        project,
+        title,
+        body,
+        sourceBranch: mergeTarget,
+        targetBranch: baseBranch,
+      });
+      await this.appendWorkflowComment(
+        taskSession.id,
+        `Release PR created: ${pr.url} — merge \`${mergeTarget}\` into \`${baseBranch}\` (human merge).`,
+      );
+      return {
+        releasePullRequestUrl: pr.url,
+        ...(pr.number !== undefined ? { releasePullRequestNumber: pr.number } : {}),
+      };
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      if (msg.includes('422') || /no commits between|nothing to merge|already merged|identical/i.test(msg)) {
+        await this.appendWorkflowComment(
+          taskSession.id,
+          `Release PR: skipped (${msg.slice(0, 200)}). No new PR needed or branches already aligned.`,
+        );
+        return {};
+      }
+      throw e;
+    }
+  }
+
   async closeTask(taskSessionId: string, deferStopInstanceId?: string): Promise<TaskSession> {
     const taskSession = this.requireTaskSession(taskSessionId);
     this.assertTransition(taskSession.workflowState, 'closed');
+
+    let releasePatch: Partial<TaskSession> = {};
+    if (taskSession.workflowState === 'regression_testing') {
+      releasePatch = await this.ensureReleasePullRequestMergeTargetToBase(taskSession);
+    }
 
     await notifyWorkflowStateTransition({
       task: taskSession,
@@ -810,12 +1239,14 @@ export class WorkflowService {
     const { kanbanAssignees: _omitAssignees, ...taskRest } = taskSession;
     const updatedTaskSession = this.deps.store.upsertTaskSession({
       ...taskRest,
+      ...releasePatch,
       workflowState: 'closed',
     });
 
     await this.stopInstancesForTask(taskSession.id, deferStopInstanceId);
 
     await this.appendWorkflowComment(updatedTaskSession.id, 'Task closed.');
+    await this.processDeveloperAssignmentQueue(taskSession.sprintId);
     return updatedTaskSession;
   }
 
@@ -824,9 +1255,19 @@ export class WorkflowService {
    * Stops all agent runners / LLM providers for this task the same way as `closeTask` (no defer).
    */
   async deleteTask(taskSessionId: string): Promise<void> {
-    this.requireTaskSession(taskSessionId);
+    const task = this.requireTaskSession(taskSessionId);
     await this.stopInstancesForTask(taskSessionId);
+    const sprint = this.requireSprint(task.sprintId);
+    const q = sprint.pendingDeveloperAssignmentQueue?.filter((id) => id !== taskSessionId);
+    if (q && q.length !== (sprint.pendingDeveloperAssignmentQueue?.length ?? 0)) {
+      this.deps.store.upsertSprint({
+        ...sprint,
+        pendingDeveloperAssignmentQueue: q,
+        updatedAt: now(),
+      });
+    }
     this.deps.store.removeTaskSession(taskSessionId);
+    await this.processDeveloperAssignmentQueue(sprint.id);
   }
 
   /**
@@ -836,9 +1277,15 @@ export class WorkflowService {
    * `instanceManager.reconcile()`.
    */
   async resumeKanbanAfterRestart(): Promise<void> {
+    const sprints = this.deps.store.listSprints();
+    for (const sp of sprints) {
+      await this.processDeveloperAssignmentQueue(sp.id);
+    }
+
     const tasks = this.deps.store.listTaskSessions();
     for (const task of tasks) {
-      if (task.workflowState === 'todo' || task.workflowState === 'closed') continue;
+      if (task.workflowState === 'todo' || task.workflowState === 'pending_start' || task.workflowState === 'closed')
+        continue;
 
       if (task.workflowState === 'regression_testing') {
         const last = lastAssistantContentForRole(task, 'tester');
@@ -931,6 +1378,7 @@ export class WorkflowService {
     const tasks = this.deps.store.listTaskSessions();
     const emptyCounts = (): Record<TaskWorkflowState, number> => ({
       todo: 0,
+      pending_start: 0,
       in_progress: 0,
       review: 0,
       testing: 0,

@@ -7,6 +7,11 @@ import type { TaskConversationEntry } from './types';
 let memoProxyUrl: string | undefined;
 let memoProxyAgent: ProxyAgent | undefined;
 
+/** Collapse consecutive newlines so Telegram messages stay readable. */
+export function normalizeTelegramOutboundText(text: string): string {
+  return text.replace(/\n{2,}/g, '\n');
+}
+
 function kanbanTelegramDispatcher(): Dispatcher | undefined {
   const raw = process.env.CTI_KANBAN_TELEGRAM_PROXY?.trim();
   if (!raw) {
@@ -35,7 +40,7 @@ export async function notifyKanbanTelegram(message: string): Promise<void> {
   const url = `https://api.telegram.org/bot${token}/sendMessage`;
   const body: Record<string, string | number | boolean> = {
     chat_id: chatId,
-    text: message.slice(0, 4000),
+    text: normalizeTelegramOutboundText(message).slice(0, 4000),
     disable_web_page_preview: true,
   };
   const thread = process.env.CTI_KANBAN_TELEGRAM_MESSAGE_THREAD_ID?.trim();

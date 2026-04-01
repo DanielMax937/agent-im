@@ -35,6 +35,9 @@ import type {
   KanbanRoleMember,
   KanbanAgentTurnRecord,
 } from './types';
+import { defaultSkillLinesForLane } from './kanban-agents';
+import { listSkillCatalogEntries } from './skill-catalog';
+import { roleForActiveWorkflowState } from './workflow-service';
 
 const KANBAN_ROLE_KINDS: KanbanAgentKind[] = [
   'agent-dev',
@@ -75,6 +78,18 @@ function parseKanbanRoleMembersInput(raw: unknown): Partial<Record<KanbanAgentKi
     out[kind] = members;
   }
   return out;
+}
+
+function enrichTaskSessionForApi(store: PlatformStoreApi, task: TaskSession): TaskSession {
+  const role = roleForActiveWorkflowState(task.workflowState);
+  if (!role) {
+    return { ...task, agentGenerating: false };
+  }
+  const inst = store.listAgentInstances(task.id).find((i) => i.role === role);
+  return {
+    ...task,
+    agentGenerating: inst?.generating === true,
+  };
 }
 
 export interface PlatformStoreApi {
@@ -119,6 +134,7 @@ export interface WorkflowServiceApi {
   rejectReview(taskSessionId: string, comment: string): Promise<TaskSession>;
   handleTestFailure(input: { taskSessionId: string; summary: string; log: string }): Promise<TaskSession>;
   closeTask(taskSessionId: string): Promise<TaskSession>;
+  syncReviewCommentToPrAndTask(taskSessionId: string, body: string): Promise<void>;
   deleteTask(taskSessionId: string): Promise<void>;
   resolveApproval(approvalId: string, input: unknown): boolean;
   getKanbanStatus(): unknown;
@@ -127,6 +143,7 @@ export interface WorkflowServiceApi {
     role: AgentRole,
     runtimeProfileId?: string,
   ): Promise<AgentInstanceRecord>;
+  enqueueManualQueueMessage(taskSessionId: string, content: string): Promise<void>;
 }
 
 export interface InstanceManagerApi {
@@ -304,6 +321,10 @@ export function createPlatformApp(options: CreatePlatformAppOptions): PlatformAp
         return jsonResponse({ runners });
       }
 
+      if (request.method === 'GET' && pathname === '/api/skills/catalog') {
+        return jsonResponse({ skills: listSkillCatalogEntries() });
+      }
+
       if (request.method === 'GET' && pathname === '/api/projects') {
         return jsonResponse(options.store.listProjects());
       }
@@ -340,6 +361,10 @@ export function createPlatformApp(options: CreatePlatformAppOptions): PlatformAp
           runners,
           mapping: project.kanbanRoleRunners ?? {},
           members: project.kanbanRoleMembers ?? {},
+          defaultLaneSkills: Object.fromEntries(
+            KANBAN_ROLE_KINDS.map((k) => [k, defaultSkillLinesForLane(k, 0)]),
+          ) as Record<KanbanAgentKind, string[]>,
+          kanbanLaneSkills: project.kanbanLaneSkills ?? {},
         });
       }
 
@@ -349,9 +374,17 @@ export function createPlatformApp(options: CreatePlatformAppOptions): PlatformAp
         const body = await readRequestBody<{
           kanbanRoleRunners?: unknown;
           kanbanRoleMembers?: unknown;
+          kanbanLaneSkills?: unknown;
         }>(request);
-        if (body.kanbanRoleRunners === undefined && body.kanbanRoleMembers === undefined) {
-          return jsonResponse({ error: 'kanbanRoleRunners and/or kanbanRoleMembers is required' }, 400);
+        if (
+          body.kanbanRoleRunners === undefined &&
+          body.kanbanRoleMembers === undefined &&
+          body.kanbanLaneSkills === undefined
+        ) {
+          return jsonResponse(
+            { error: 'kanbanRoleRunners, kanbanRoleMembers, and/or kanbanLaneSkills is required' },
+            400,
+          );
         }
         const cfg = loadConfig();
         const validIds = new Set(normalizeRunners(cfg).map((r) => r.id));
@@ -401,6 +434,37 @@ export function createPlatformApp(options: CreatePlatformAppOptions): PlatformAp
           }
         }
 
+        if (body.kanbanLaneSkills !== undefined) {
+          const rawLaneSkills = body.kanbanLaneSkills;
+          if (typeof rawLaneSkills !== 'object' || rawLaneSkills === null || Array.isArray(rawLaneSkills)) {
+            return jsonResponse({ error: 'kanbanLaneSkills must be lane → string[] of skill ids' }, 400);
+          }
+          const nextLaneSkills: Partial<Record<KanbanAgentKind, string[]>> = {
+            ...(project.kanbanLaneSkills ?? {}),
+          };
+          for (const k of KANBAN_ROLE_KINDS) {
+            if (!Object.prototype.hasOwnProperty.call(rawLaneSkills, k)) continue;
+            const v = (rawLaneSkills as Record<string, unknown>)[k];
+            if (!Array.isArray(v)) {
+              return jsonResponse({ error: 'kanbanLaneSkills must be lane → string[] of skill ids' }, 400);
+            }
+            const ids: string[] = [];
+            for (const x of v) {
+              if (typeof x !== 'string' || !x.trim()) {
+                return jsonResponse({ error: 'kanbanLaneSkills must be lane → string[] of skill ids' }, 400);
+              }
+              ids.push(x.trim());
+            }
+            if (ids.length > 0) nextLaneSkills[k] = ids;
+            else delete nextLaneSkills[k];
+          }
+          if (Object.keys(nextLaneSkills).length === 0) {
+            delete next.kanbanLaneSkills;
+          } else {
+            next.kanbanLaneSkills = nextLaneSkills;
+          }
+        }
+
         options.store.upsertProject(next);
         return jsonResponse({ ok: true, project: options.store.getProject(project.id) });
       }
@@ -427,14 +491,15 @@ export function createPlatformApp(options: CreatePlatformAppOptions): PlatformAp
 
       if (request.method === 'GET' && pathname === '/api/tasks') {
         const filterProjectId = searchParams.get('projectId')?.trim();
-        return jsonResponse(options.store.listTaskSessions(filterProjectId || undefined));
+        const tasks = options.store.listTaskSessions(filterProjectId || undefined);
+        return jsonResponse(tasks.map((t) => enrichTaskSessionForApi(options.store, t)));
       }
 
       const taskParams = matchPath('/api/tasks/:taskSessionId', pathname);
       if (request.method === 'GET' && taskParams) {
         const taskSession = options.store.getTaskSession(taskParams.taskSessionId);
         return taskSession
-          ? jsonResponse(taskSession)
+          ? jsonResponse(enrichTaskSessionForApi(options.store, taskSession))
           : notFoundResponse('Task session', taskParams.taskSessionId);
       }
 
@@ -537,6 +602,18 @@ export function createPlatformApp(options: CreatePlatformAppOptions): PlatformAp
         );
       }
 
+      const queueManualParams = matchPath('/api/workflows/tasks/:taskSessionId/queue-message', pathname);
+      if (request.method === 'POST' && queueManualParams) {
+        const body = await readRequestBody<{ content?: string }>(request);
+        const content = typeof body.content === 'string' ? body.content : '';
+        try {
+          await options.workflowService.enqueueManualQueueMessage(queueManualParams.taskSessionId, content);
+          return jsonResponse({ ok: true });
+        } catch (e) {
+          return jsonResponse({ error: e instanceof Error ? e.message : String(e) }, 400);
+        }
+      }
+
       const submitReviewParams = matchPath('/api/workflows/tasks/:taskSessionId/submit-review', pathname);
       if (request.method === 'POST' && submitReviewParams) {
         const payload = await readRequestBody<{
@@ -596,6 +673,18 @@ export function createPlatformApp(options: CreatePlatformAppOptions): PlatformAp
             log: payload.log,
           }),
         );
+      }
+
+      const syncReviewParams = matchPath('/api/workflows/tasks/:taskSessionId/sync-review-comment', pathname);
+      if (request.method === 'POST' && syncReviewParams) {
+        const payload = await readRequestBody<{ body?: string }>(request);
+        const body = typeof payload.body === 'string' ? payload.body : '';
+        try {
+          await options.workflowService.syncReviewCommentToPrAndTask(syncReviewParams.taskSessionId, body);
+          return jsonResponse({ ok: true });
+        } catch (e) {
+          return jsonResponse({ error: e instanceof Error ? e.message : String(e) }, 400);
+        }
       }
 
       const closeTaskParams = matchPath('/api/workflows/tasks/:taskSessionId/close', pathname);

@@ -5,15 +5,19 @@ import { loadConfig, normalizeRunners, resolveRuntimeForPlatformInstance } from 
 import { PendingPermissions } from '../permission-gateway';
 import { resolveProvider } from '../runtime-provider';
 import {
+  buildKanbanMonitorTurnRecord,
   formatKanbanAgentFullPrompt,
-  formatKanbanTurnAgentLabel,
-  resolveKanbanTurnSource,
 } from './kanban-agent-turn';
 import { JsonPlatformStore } from './json-platform-store';
 import { notifyKanbanTelegram } from './kanban-notify';
 import { buildRolePrompt } from './prompts';
 import { consumeAgentStream, type StreamConsumeResult } from './stream-consumer';
-import type { AgentInstanceRecord, AgentRole, TaskConversationEntry, TaskQueueMessage } from './types';
+import type {
+  AgentInstanceRecord,
+  AgentRole,
+  TaskConversationEntry,
+  TaskQueueMessage,
+} from './types';
 
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -106,11 +110,7 @@ class TaskAgentRunner implements ManagedRunner {
 
       const queuedMessages = this.store.drainTaskQueue(taskSession.messageQueueKey);
       for (const queueMessage of queuedMessages) {
-        const assistantTurn = await this.processPrompt(
-          queueMessage.content,
-          queueMessage.type === 'directive' ? 'workflow' : instance.role,
-          queueMessage,
-        );
+        const assistantTurn = await this.processPrompt(queueMessage.content, queueMessage);
         if (assistantTurn && this.onAgentTurnComplete) {
           await this.onAgentTurnComplete(instance.taskSessionId, instance.role, instance.id);
         }
@@ -120,25 +120,24 @@ class TaskAgentRunner implements ManagedRunner {
     }
   }
 
-  private async processPrompt(
-    prompt: string,
-    source: 'workflow' | AgentInstanceRecord['role'],
-    queueMessage: TaskQueueMessage,
-  ): Promise<boolean> {
+  private async processPrompt(prompt: string, queueMessage: TaskQueueMessage): Promise<boolean> {
     const instance = this.requireInstance();
     const taskSession = this.requireTaskSession(instance.taskSessionId);
     const project = this.requireProject(taskSession.projectId);
     const sprint = this.requireSprint(taskSession.sprintId);
 
     const historyBeforeUser = [...taskSession.conversationHistory];
-    const { sourceAgent, sourceAgentResponse } = resolveKanbanTurnSource({
-      queueMessage,
-      historyBeforeUser,
-    });
+
+    const userLineSource: TaskConversationEntry['source'] =
+      queueMessage.type === 'human_followup'
+        ? 'human'
+        : queueMessage.type === 'directive' || queueMessage.type === 'system_check'
+          ? 'workflow'
+          : instance.role;
 
     this.store.appendConversationEntry(taskSession.id, {
       role: 'user',
-      source,
+      source: userLineSource,
       content: prompt,
     });
 
@@ -165,7 +164,13 @@ class TaskAgentRunner implements ManagedRunner {
       conversationHistory,
       userPrompt: prompt,
     });
-    const targetAgent = formatKanbanTurnAgentLabel(currentTaskSession.kanbanAgent, instance.role);
+    const { sourceAgent, sourceAgentResponse, targetAgent } = buildKanbanMonitorTurnRecord({
+      queueMessage,
+      taskSession,
+      instanceRole: instance.role,
+      runtime: instance.runtime,
+      historyBeforeUser,
+    });
     const turnId = crypto.randomUUID();
     const turnCreatedAt = new Date().toISOString();
 
@@ -182,6 +187,7 @@ class TaskAgentRunner implements ManagedRunner {
     });
 
     let result: StreamConsumeResult;
+    this.updateInstance({ generating: true });
     try {
       const stream = this.provider!.streamChat({
         prompt,
@@ -221,6 +227,8 @@ class TaskAgentRunner implements ManagedRunner {
       const msg = e instanceof Error ? e.message : String(e);
       this.store.updateKanbanAgentTurnStreamError(turnId, msg);
       throw e;
+    } finally {
+      this.updateInstance({ generating: false });
     }
 
     const nextTaskSession = this.requireTaskSession(instance.taskSessionId);

@@ -119,7 +119,7 @@ function Show-FailureHelp {
 function Get-NodePath {
     $nodePath = (Get-Command node -ErrorAction SilentlyContinue).Source
     if (-not $nodePath) {
-        Write-Error "Node.js not found in PATH. Install Node.js >= 20."
+        Write-Error "Node.js not found in PATH. Install Node.js >= 22.5 (node:sqlite requires 22.5+)."
         exit 1
     }
     return $nodePath

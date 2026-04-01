@@ -1,8 +1,12 @@
 export type AgentRuntime = 'claude' | 'codex' | 'cursor' | 'copilot';
 export type AgentRole = 'developer' | 'reviewer' | 'tester';
-/** Kanban columns: 待办 | 开发中 | 评审 | 测试中 | 回归测试中 | 完成 */
+/**
+ * Kanban columns: 待办 | 队列 | 开发中 | 测试中 | 评审 | 回归测试中 | 完成
+ * `pending_start`: assigned from todo, waiting in sprint FIFO until dependencies are closed (or no deps).
+ */
 export type TaskWorkflowState =
   | 'todo'
+  | 'pending_start'
   | 'in_progress'
   | 'review'
   | 'testing'
@@ -27,7 +31,13 @@ export interface KanbanRoleMember {
 }
 export type SprintStatus = 'planned' | 'active' | 'closed';
 export type AgentInstanceStatus = 'stopped' | 'starting' | 'running' | 'error';
-export type TaskMessageType = 'directive' | 'review_feedback' | 'test_failure' | 'system';
+export type TaskMessageType =
+  | 'directive'
+  | 'review_feedback'
+  | 'test_failure'
+  | 'system'
+  | 'system_check'
+  | 'human_followup';
 
 export interface ProjectAgentProfile {
   id: string;
@@ -69,6 +79,11 @@ export interface Project {
    * Multiple assignees per lane; each row has a runner. Used for auto (sticky + least-loaded) or manual pick.
    */
   kanbanRoleMembers?: Partial<Record<KanbanAgentKind, KanbanRoleMember[]>>;
+  /**
+   * Per-lane skill catalog ids (e.g. `cursor/foo`). When set and non-empty for a lane, replaces
+   * built-in default lines for that lane in prompts. Ids are resolved to labels via `/api/skills/catalog`.
+   */
+  kanbanLaneSkills?: Partial<Record<KanbanAgentKind, string[]>>;
   repository: ProjectRepository;
   agents: ProjectAgentProfile[];
   createdAt: string;
@@ -87,12 +102,17 @@ export interface Sprint {
   closedAt?: string;
   createdAt: string;
   updatedAt: string;
+  /**
+   * FIFO of `taskSessionId` values waiting for first developer execution after assign-from-todo.
+   * Head is processed first; blocked until its `dependsOnIssueIds` are all closed tasks.
+   */
+  pendingDeveloperAssignmentQueue?: string[];
 }
 
 export interface TaskConversationEntry {
   id: string;
   role: 'system' | 'user' | 'assistant';
-  source: 'kanban' | 'workflow' | 'developer' | 'reviewer' | 'tester';
+  source: 'kanban' | 'workflow' | 'human' | 'developer' | 'reviewer' | 'tester';
   content: string;
   createdAt: string;
 }
@@ -115,6 +135,11 @@ export interface TaskSession {
   kanbanAssignees?: Partial<Record<KanbanAgentKind, string>>;
   /** Review rounds pushed back to development (used to escalate to codex-senior). */
   reviewRejectionCount?: number;
+  /**
+   * Other tasks’ **issue ids** in the same project that must be `closed` before this task may
+   * leave the assignment queue and start development (first assign from todo).
+   */
+  dependsOnIssueIds?: string[];
   /** Read by the next agent at start (also mirrored into prompts). */
   handoffComment?: string;
   /** Skill hints appended to system prompt (from kanban agent presets). */
@@ -129,13 +154,22 @@ export interface TaskSession {
   branchName?: string;
   reviewBranchName?: string;
   pullRequestUrl?: string;
+  /** Set when a PR/MR is created (GitHub/GitLab number) — used to merge via API. */
+  pullRequestNumber?: number;
+  /** Open PR/MR to merge sprint integration branch into repository base (e.g. master); manual merge only. */
+  releasePullRequestUrl?: string;
+  releasePullRequestNumber?: number;
   messageQueueKey: string;
   approvalQueueKey: string;
+  /** Count of automated `system_check` prompts enqueued without a workflow transition; resets on transition or human queue. */
+  confirmationLoopCount?: number;
   lastError?: string;
   systemPrompt?: string;
   conversationHistory: TaskConversationEntry[];
   createdAt: string;
   updatedAt: string;
+  /** Set by GET /api/tasks when the active lane instance is streaming an LLM reply. */
+  agentGenerating?: boolean;
 }
 
 export interface AgentInstanceRecord {
@@ -157,6 +191,8 @@ export interface AgentInstanceRecord {
   startedAt?: string;
   stoppedAt?: string;
   lastError?: string;
+  /** True while this instance is inside an LLM stream for one turn. */
+  generating?: boolean;
 }
 
 export interface TaskQueueMessage {
@@ -202,6 +238,8 @@ export interface CreateTaskInput {
   /** Omit to auto-generate `{issueIdPrefix}-n` unique within this project. */
   issueId?: string;
   title: string;
+  /** Issue ids of existing tasks in the same project that must be closed before this task can start dev. */
+  dependsOnIssueIds?: string[];
 }
 
 export interface AssignTaskInput {
@@ -226,6 +264,11 @@ export interface AssignTaskInput {
   assigneeMemberId?: string;
   /** Default true. Set false to require `assigneeMemberId` when members exist. */
   autoAssign?: boolean;
+  /**
+   * When legacy assign creates a new task (no existing row for `issueId`), optional dependency list
+   * (same as `CreateTaskInput.dependsOnIssueIds`).
+   */
+  dependsOnIssueIds?: string[];
 }
 
 export interface SubmitTaskForReviewInput {

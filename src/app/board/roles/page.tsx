@@ -6,6 +6,8 @@ import type { KanbanAgentKind, KanbanRoleMember, Project } from '../../../platfo
 
 type RunnerOption = { id: string; label: string; runtime: string };
 
+type SkillCatalogOption = { id: string; label: string; source: string };
+
 type KanbanRolesPayload = {
   projectId: string;
   kinds: KanbanAgentKind[];
@@ -13,6 +15,8 @@ type KanbanRolesPayload = {
   runners: RunnerOption[];
   mapping: Partial<Record<KanbanAgentKind, string>>;
   members?: Partial<Record<KanbanAgentKind, KanbanRoleMember[]>>;
+  defaultLaneSkills?: Partial<Record<KanbanAgentKind, string[]>>;
+  kanbanLaneSkills?: Partial<Record<KanbanAgentKind, string[]>>;
 };
 
 const EMPTY_MAPPING: Record<KanbanAgentKind, string> = {
@@ -31,6 +35,89 @@ function emptyMembers(): Record<KanbanAgentKind, KanbanRoleMember[]> {
   };
 }
 
+function emptyLaneSkills(): Record<KanbanAgentKind, string[]> {
+  return {
+    'agent-dev': [],
+    'codex-senior': [],
+    'claude-review': [],
+    'copilot-test': [],
+  };
+}
+
+function LaneSkillPicker(props: {
+  laneLabel: string;
+  catalog: SkillCatalogOption[];
+  selectedIds: string[];
+  defaultLines: string[];
+  onChange: (ids: string[]) => void;
+}) {
+  const { laneLabel, catalog, selectedIds, defaultLines, onChange } = props;
+  const available = useMemo(
+    () =>
+      catalog
+        .filter((s) => !selectedIds.includes(s.id))
+        .sort((a, b) => a.label.localeCompare(b.label)),
+    [catalog, selectedIds],
+  );
+  return (
+    <div style={{ marginBottom: '1.5rem' }}>
+      <p className="ui-muted ui-small" style={{ marginBottom: '0.35rem' }}>
+        <strong>{laneLabel}</strong>
+        ：未选任何项时使用下方「代码内置默认」；选中后任务 prompt 会注入对应 skill 的展示名。
+      </p>
+      <div className="skill-tag-row" style={{ marginBottom: '0.35rem' }}>
+        {selectedIds.map((id) => {
+          const opt = catalog.find((o) => o.id === id);
+          return (
+            <span key={id} className="skill-tag">
+              <span>{opt?.label ?? id}</span>
+              {opt?.source ? (
+                <span className="ui-mono" style={{ opacity: 0.75, fontSize: '11px' }}>
+                  [{opt.source}]
+                </span>
+              ) : null}
+              <button
+                type="button"
+                aria-label={`移除 ${id}`}
+                onClick={() => onChange(selectedIds.filter((x) => x !== id))}
+              >
+                ×
+              </button>
+            </span>
+          );
+        })}
+      </div>
+      <label className="ui-small">
+        添加 skill
+        <select
+          className="ui-input"
+          value=""
+          onChange={(e) => {
+            const v = e.target.value;
+            if (v) onChange([...selectedIds, v]);
+            e.currentTarget.value = '';
+          }}
+        >
+          <option value="">选择…</option>
+          {available.map((s) => (
+            <option key={s.id} value={s.id}>
+              [{s.source}] {s.label} — {s.id}
+            </option>
+          ))}
+        </select>
+      </label>
+      <details className="ui-small" style={{ marginTop: '0.5rem' }}>
+        <summary className="ui-muted">本 lane 默认（代码内置）</summary>
+        <ul className="ui-muted" style={{ margin: '0.35rem 0 0', paddingLeft: '1.1rem' }}>
+          {defaultLines.map((line, i) => (
+            <li key={i}>{line}</li>
+          ))}
+        </ul>
+      </details>
+    </div>
+  );
+}
+
 export default function BoardRolesPage() {
   const [projects, setProjects] = useState<Project[]>([]);
   const [projectId, setProjectId] = useState('');
@@ -39,6 +126,11 @@ export default function BoardRolesPage() {
   const [roleLabels, setRoleLabels] = useState<Record<string, string>>({});
   const [mapping, setMapping] = useState<Record<KanbanAgentKind, string>>({ ...EMPTY_MAPPING });
   const [members, setMembers] = useState<Record<KanbanAgentKind, KanbanRoleMember[]>>(emptyMembers);
+  const [skillCatalog, setSkillCatalog] = useState<SkillCatalogOption[]>([]);
+  const [defaultLaneSkills, setDefaultLaneSkills] = useState<Partial<Record<KanbanAgentKind, string[]>> | null>(
+    null,
+  );
+  const [laneSkills, setLaneSkills] = useState<Record<KanbanAgentKind, string[]>>(emptyLaneSkills);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -56,6 +148,13 @@ export default function BoardRolesPage() {
     if (!res.ok) throw new Error(await res.text());
     const body = (await res.json()) as { runners?: RunnerOption[] };
     setRunners(Array.isArray(body.runners) ? body.runners : []);
+  }, []);
+
+  const loadSkillCatalog = useCallback(async () => {
+    const res = await fetch('/api/skills/catalog', { cache: 'no-store' });
+    if (!res.ok) throw new Error(await res.text());
+    const body = (await res.json()) as { skills?: SkillCatalogOption[] };
+    setSkillCatalog(Array.isArray(body.skills) ? body.skills : []);
   }, []);
 
   const loadKanbanRoles = useCallback(async (pid: string) => {
@@ -77,19 +176,27 @@ export default function BoardRolesPage() {
       nextM[k] = Array.isArray(list) ? [...list] : [];
     }
     setMembers(nextM);
+    setDefaultLaneSkills(data.defaultLaneSkills ?? null);
+    const nextLs = emptyLaneSkills();
+    const rawSkills = data.kanbanLaneSkills ?? {};
+    for (const k of data.kinds ?? []) {
+      const list = rawSkills[k];
+      nextLs[k] = Array.isArray(list) ? [...list] : [];
+    }
+    setLaneSkills(nextLs);
   }, []);
 
   const bootstrap = useCallback(async () => {
     setLoading(true);
     setError(null);
     try {
-      await Promise.all([loadProjects(), loadRunnersGlobal()]);
+      await Promise.all([loadProjects(), loadRunnersGlobal(), loadSkillCatalog()]);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
       setLoading(false);
     }
-  }, [loadProjects, loadRunnersGlobal]);
+  }, [loadProjects, loadRunnersGlobal, loadSkillCatalog]);
 
   useEffect(() => {
     void bootstrap();
@@ -171,10 +278,14 @@ export default function BoardRolesPage() {
             runnerProfileId: m.runnerProfileId.trim(),
           }));
       }
+      const kanbanLaneSkills: Record<string, string[]> = {};
+      for (const k of kinds) {
+        kanbanLaneSkills[k] = (laneSkills[k] ?? []).filter(Boolean);
+      }
       const res = await fetch(`/api/projects/${encodeURIComponent(projectId)}/kanban-roles`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ kanbanRoleRunners, kanbanRoleMembers }),
+        body: JSON.stringify({ kanbanRoleRunners, kanbanRoleMembers, kanbanLaneSkills }),
       });
       const body = (await res.json()) as { error?: string };
       if (!res.ok) throw new Error(body.error || (await res.text()));
@@ -301,6 +412,34 @@ export default function BoardRolesPage() {
                 添加人员
               </button>
             </div>
+          ))}
+          <h2 className="ui-h2" style={{ marginTop: '2rem' }}>
+            Lane skills（每 lane 可选）
+          </h2>
+          <p className="ui-muted ui-small" style={{ marginBottom: '1rem' }}>
+            扫描本机与项目目录下的 <code>.cursor/skills</code>、<code>.codex/skills</code>、<code>.claude/skills</code>、
+            <code>.agent/skills</code>（及 <code>.agents/skills</code>）中的 SKILL 文件夹。下拉多选以 tag 展示；未选则使用各 lane
+            的代码内置默认。
+          </p>
+          {skillCatalog.length === 0 ? (
+            <p className="ui-muted ui-small" style={{ marginBottom: '1rem' }}>
+              当前未扫描到任何 skill（或目录不存在）。配置好上述路径后刷新本页。
+            </p>
+          ) : null}
+          {kinds.map((kind) => (
+            <LaneSkillPicker
+              key={`lane-skills-${kind}`}
+              laneLabel={roleLabels[kind] ?? kind}
+              catalog={skillCatalog}
+              selectedIds={laneSkills[kind] ?? []}
+              defaultLines={defaultLaneSkills?.[kind] ?? []}
+              onChange={(ids) =>
+                setLaneSkills((prev) => ({
+                  ...prev,
+                  [kind]: ids,
+                }))
+              }
+            />
           ))}
           <h2 className="ui-h2" style={{ marginTop: '2rem' }}>
             单 lane 默认 runner（可选）

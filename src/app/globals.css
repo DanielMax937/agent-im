@@ -172,26 +172,57 @@ a {
   font-weight: 600;
 }
 
-.monitor-detail {
-  margin-top: 16px;
-  padding: 16px;
-  border-radius: 12px;
-  border: 1px solid rgba(56, 189, 248, 0.25);
-  background: rgba(15, 23, 42, 0.6);
+.monitor-modal-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 300;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px 16px;
+  background: rgba(2, 6, 23, 0.78);
+  backdrop-filter: blur(4px);
 }
 
-.monitor-detail-toolbar {
+.monitor-modal-panel {
+  display: flex;
+  flex-direction: column;
+  width: min(96vw, 1120px);
+  max-height: min(92vh, 900px);
+  margin: 0;
+  overflow: hidden;
+}
+
+.monitor-modal-header {
   display: flex;
   justify-content: space-between;
-  align-items: center;
-  margin-bottom: 12px;
-  gap: 12px;
+  align-items: flex-start;
+  gap: 16px;
+  flex-shrink: 0;
+  padding-bottom: 12px;
+  border-bottom: 1px solid rgba(148, 163, 184, 0.2);
 }
 
-.monitor-detail h3 {
-  margin: 12px 0 8px;
+.monitor-modal-title {
+  margin: 0;
+  font-size: 1.25rem;
+}
+
+.monitor-modal-body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding-top: 16px;
+}
+
+.monitor-modal-section-title {
+  margin: 16px 0 8px;
   font-size: 14px;
   color: #94a3b8;
+}
+
+.monitor-modal-section-title:first-of-type {
+  margin-top: 0;
 }
 
 .monitor-pre {
@@ -209,6 +240,14 @@ a {
 
 .monitor-pre-short {
   max-height: 120px;
+}
+
+.monitor-pre-tall {
+  max-height: min(36vh, 360px);
+}
+
+.monitor-pre-xl {
+  max-height: min(52vh, 560px);
 }
 
 .monitor-cell-clip {
@@ -692,6 +731,39 @@ a {
   background: rgba(15, 23, 42, 0.86);
   padding: 24px;
   box-shadow: 0 12px 40px rgba(15, 23, 42, 0.25);
+}
+
+.skill-tag-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+}
+
+.skill-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 4px 4px 10px;
+  border-radius: 999px;
+  font-size: 13px;
+  background: rgba(30, 41, 59, 0.9);
+  border: 1px solid rgba(148, 163, 184, 0.25);
+  color: #e2e8f0;
+}
+
+.skill-tag button {
+  border: none;
+  background: transparent;
+  cursor: pointer;
+  padding: 0 6px;
+  line-height: 1;
+  font-size: 16px;
+  color: #94a3b8;
+}
+
+.skill-tag button:hover {
+  color: #f1f5f9;
 }
 
 .ui-h2 {

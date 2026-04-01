@@ -5,6 +5,7 @@ import fs from 'node:fs';
 import { CompensationService } from '../platform/compensation-service';
 import { createPlatformApp } from '../platform/app';
 import { WorkflowService } from '../platform/workflow-service';
+import type { TaskSession } from '../platform/types';
 import {
   asGitService,
   asInstanceManager,
@@ -169,6 +170,8 @@ describe('Platform app integration', () => {
       assert.equal(getRes.status, 200);
       const runners = (getRes.body as { runners: { id: string }[] }).runners;
       assert.ok(Array.isArray(runners) && runners.some((r) => r.id === 'default'));
+      const defaults = (getRes.body as { defaultLaneSkills?: Record<string, string[]> }).defaultLaneSkills;
+      assert.ok(defaults && Array.isArray(defaults['agent-dev']) && defaults['agent-dev'].length > 0);
 
       const putRes = await fetchJson(server.baseUrl, `/api/projects/${encodeURIComponent(project.id)}/kanban-roles`, {
         method: 'PUT',
@@ -186,6 +189,22 @@ describe('Platform app integration', () => {
       const p = store.getProject(project.id);
       assert.equal(p?.kanbanRoleRunners?.['agent-dev'], 'default');
       assert.equal(p?.kanbanRoleRunners?.['claude-review'], 'default');
+
+      const putSkills = await fetchJson(server.baseUrl, `/api/projects/${encodeURIComponent(project.id)}/kanban-roles`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          kanbanLaneSkills: {
+            'agent-dev': ['cursor/fake-skill-for-test'],
+            'codex-senior': [],
+            'claude-review': [],
+            'copilot-test': [],
+          },
+        }),
+      });
+      assert.equal(putSkills.status, 200);
+      const p2 = store.getProject(project.id);
+      assert.deepEqual(p2?.kanbanLaneSkills?.['agent-dev'], ['cursor/fake-skill-for-test']);
     } finally {
       await server.close();
     }
@@ -296,55 +315,69 @@ describe('Platform app integration', () => {
     }
   });
 
-  it('submits review, starts testing, handles failure, and closes through the workflow APIs', async () => {
-    const { app, store, project, workflowService, instanceManager, scmClient } = (() => {
+  it('feature test → PR → regression → close, and feature-test failure path', async () => {
+    const { app, store, project, instanceManager, scmClient } = (() => {
       const harness = createHarness();
       const project = createProject(harness.store);
       return { ...harness, project };
     })();
     const sprint = createSprint(store, project.id);
-    const taskSession = createTaskSession(store, project.id, sprint.id, {
+    const now = new Date().toISOString();
+
+    const taskFail = createTaskSession(store, project.id, sprint.id, {
+      id: 'task-session-fail',
       workflowState: 'in_progress',
+      taskId: 'ISSUE-FAIL',
+      issueId: 'ISSUE-FAIL',
+      messageQueueKey: 'task:ISSUE-FAIL:inbox',
     });
     store.upsertAgentInstance({
-      id: 'developer-instance',
+      id: 'developer-instance-fail',
       projectId: project.id,
       sprintId: sprint.id,
-      taskId: taskSession.taskId,
-      taskSessionId: taskSession.id,
+      taskId: taskFail.taskId,
+      taskSessionId: taskFail.id,
       runtime: 'codex',
       role: 'developer',
       status: 'running',
-      branchName: taskSession.branchName,
+      branchName: taskFail.branchName,
       workingDirectory: '/tmp/agent-im',
       approvalsRequired: true,
-      createdAt: new Date().toISOString(),
-      updatedAt: new Date().toISOString(),
+      createdAt: now,
+      updatedAt: now,
     });
+
+    const taskHappy = createTaskSession(store, project.id, sprint.id, {
+      id: 'task-session-happy',
+      workflowState: 'in_progress',
+      taskId: 'ISSUE-OK',
+      issueId: 'ISSUE-OK',
+      messageQueueKey: 'task:ISSUE-OK:inbox',
+    });
+    store.upsertAgentInstance({
+      id: 'developer-instance-happy',
+      projectId: project.id,
+      sprintId: sprint.id,
+      taskId: taskHappy.taskId,
+      taskSessionId: taskHappy.id,
+      runtime: 'codex',
+      role: 'developer',
+      status: 'running',
+      branchName: taskHappy.branchName,
+      workingDirectory: '/tmp/agent-im',
+      approvalsRequired: true,
+      createdAt: now,
+      updatedAt: now,
+    });
+
     const server = await startHttpApp(app);
     try {
-      const submitReview = await fetchJson(server.baseUrl, `/api/workflows/tasks/${taskSession.id}/submit-review`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          commitMessage: 'feat(issue-101): submit review',
-          prTitle: '[ISSUE-101] Submit review',
-          prBody: 'Review body',
-        }),
-      });
-      assert.equal((submitReview.body as { taskSession: { workflowState: string } }).taskSession.workflowState, 'review');
-      assert.deepEqual(scmClient.calls, ['createPullRequest']);
-
-      store.upsertTaskSession({
-        ...store.getTaskSession(taskSession.id)!,
-        workflowState: 'review',
-      });
-      const startTesting = await fetchJson(server.baseUrl, `/api/workflows/tasks/${taskSession.id}/start-testing`, {
+      const startFeatureTest = await fetchJson(server.baseUrl, `/api/workflows/tasks/${taskFail.id}/start-testing`, {
         method: 'POST',
       });
-      assert.equal((startTesting.body as { workflowState: string }).workflowState, 'testing');
+      assert.equal((startFeatureTest.body as { workflowState: string }).workflowState, 'testing');
 
-      const failTesting = await fetchJson(server.baseUrl, `/api/workflows/tasks/${taskSession.id}/testing/fail`, {
+      const failTesting = await fetchJson(server.baseUrl, `/api/workflows/tasks/${taskFail.id}/testing/fail`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -354,14 +387,34 @@ describe('Platform app integration', () => {
       });
       assert.equal((failTesting.body as { workflowState: string }).workflowState, 'in_progress');
 
-      store.upsertTaskSession({
-        ...store.getTaskSession(taskSession.id)!,
-        workflowState: 'testing',
-      });
-      const closeTask = await fetchJson(server.baseUrl, `/api/workflows/tasks/${taskSession.id}/close`, {
+      await fetchJson(server.baseUrl, `/api/workflows/tasks/${taskHappy.id}/start-testing`, {
         method: 'POST',
       });
-      assert.equal((closeTask.body as { workflowState: string }).workflowState, 'closed');
+      const submitReview = await fetchJson(server.baseUrl, `/api/workflows/tasks/${taskHappy.id}/submit-review`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          commitMessage: 'feat(issue-ok): submit review',
+          prTitle: '[ISSUE-OK] Submit review',
+          prBody: 'Review body',
+        }),
+      });
+      assert.equal((submitReview.body as { taskSession: { workflowState: string } }).taskSession.workflowState, 'review');
+      assert.ok(scmClient.calls.includes('createPullRequest'));
+
+      const startRegression = await fetchJson(server.baseUrl, `/api/workflows/tasks/${taskHappy.id}/start-regression`, {
+        method: 'POST',
+      });
+      assert.equal((startRegression.body as { workflowState: string }).workflowState, 'regression_testing');
+      assert.ok(scmClient.calls.includes('mergePullRequest'));
+
+      const closeTask = await fetchJson(server.baseUrl, `/api/workflows/tasks/${taskHappy.id}/close`, {
+        method: 'POST',
+      });
+      const closed = closeTask.body as { workflowState: string; releasePullRequestUrl?: string };
+      assert.equal(closed.workflowState, 'closed');
+      assert.equal(closed.releasePullRequestUrl, 'https://example.test/pr/42');
+      assert.ok(scmClient.calls.some((c) => c.startsWith('findOpenPullRequest:')));
       assert.equal(instanceManager.stopped.length >= 1, true);
     } finally {
       await server.close();
@@ -430,6 +483,86 @@ describe('Platform app integration', () => {
       });
       assert.equal((stop.body as { ok: boolean }).ok, true);
       assert.deepEqual(instanceManager.stopped, ['instance-42']);
+    } finally {
+      await server.close();
+    }
+  });
+
+  it('GET /api/tasks includes agentGenerating from the active lane instance', async () => {
+    const { store, app } = createHarness();
+    const project = createProject(store);
+    const sprint = createSprint(store, project.id);
+    const taskSession = createTaskSession(store, project.id, sprint.id, {
+      workflowState: 'in_progress',
+      role: 'developer',
+    });
+    store.upsertAgentInstance({
+      id: 'dev-inst',
+      projectId: project.id,
+      sprintId: sprint.id,
+      taskId: taskSession.taskId,
+      taskSessionId: taskSession.id,
+      runtime: 'codex',
+      role: 'developer',
+      status: 'running',
+      branchName: taskSession.branchName,
+      workingDirectory: '/tmp/agent-im',
+      approvalsRequired: true,
+      generating: true,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    });
+    const server = await startHttpApp(app);
+    try {
+      const tasks = await fetchJson(server.baseUrl, '/api/tasks');
+      assert.equal(tasks.status, 200);
+      const list = tasks.body as TaskSession[];
+      const row = list.find((t) => t.id === taskSession.id);
+      assert.ok(row);
+      assert.equal(row!.agentGenerating, true);
+    } finally {
+      await server.close();
+    }
+  });
+
+  it('POST /api/workflows/tasks/:taskSessionId/queue-message enqueues a human_followup', async () => {
+    const { store, app, instanceManager } = createHarness();
+    const project = createProject(store);
+    const sprint = createSprint(store, project.id);
+    const taskSession = createTaskSession(store, project.id, sprint.id, {
+      workflowState: 'in_progress',
+      role: 'developer',
+    });
+    store.upsertAgentInstance({
+      id: 'dev-inst',
+      projectId: project.id,
+      sprintId: sprint.id,
+      taskId: taskSession.taskId,
+      taskSessionId: taskSession.id,
+      runtime: 'codex',
+      role: 'developer',
+      status: 'running',
+      branchName: taskSession.branchName,
+      workingDirectory: '/tmp/agent-im',
+      approvalsRequired: true,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    });
+    const server = await startHttpApp(app);
+    try {
+      const res = await fetchJson(
+        server.baseUrl,
+        `/api/workflows/tasks/${encodeURIComponent(taskSession.id)}/queue-message`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ content: 'Please fix lint' }),
+        },
+      );
+      assert.equal(res.status, 200);
+      const q = store.peekTaskQueue(taskSession.messageQueueKey);
+      assert.ok(q.some((m) => m.type === 'human_followup' && m.content.includes('lint')));
+      assert.ok(instanceManager.restarted.includes('dev-inst'));
     } finally {
       await server.close();
     }

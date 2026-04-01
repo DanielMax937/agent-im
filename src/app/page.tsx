@@ -1,5 +1,6 @@
 const platformEndpoints = [
   'GET /health',
+  'GET /api/skills/catalog',
   'GET /api/projects',
   'GET /api/projects/:projectId/next-issue-id',
   'GET /api/projects/:projectId/kanban-roles',

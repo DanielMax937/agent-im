@@ -1,8 +1,7 @@
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
-
-import Database from 'better-sqlite3';
+import { DatabaseSync } from 'node:sqlite';
 
 import { getCtiHome } from '../config';
 import { scheduleConversationEntryTelegram } from './kanban-notify';
@@ -75,7 +74,7 @@ export type JsonPlatformStoreOptions = {
  * Legacy `*.json` files in the same directory are imported once when the DB is empty, then renamed to `*.migrated.bak`.
  */
 export class JsonPlatformStore {
-  private readonly db: Database.Database;
+  private readonly db: DatabaseSync;
   private readonly baseDir: string;
 
   private projects = new Map<string, Project>();
@@ -92,13 +91,29 @@ export class JsonPlatformStore {
     if (dbPath !== ':memory:') {
       ensureDir(path.dirname(dbPath));
     }
-    this.db = new Database(dbPath);
-    this.db.pragma('journal_mode = WAL');
-    this.db.pragma('foreign_keys = ON');
+    this.db = new DatabaseSync(dbPath);
+    this.db.exec('PRAGMA journal_mode = WAL;');
+    this.db.exec('PRAGMA foreign_keys = ON;');
     this.initSchema();
     this.migrateKanbanAgentTurnsIfLegacy();
     this.migrateFromJsonIfNeeded();
     this.loadFromDb();
+  }
+
+  /** `node:sqlite` has no `transaction()` helper; mirror better-sqlite3 behavior with explicit BEGIN/COMMIT. */
+  private runInTransaction(fn: () => void): void {
+    this.db.exec('BEGIN IMMEDIATE');
+    try {
+      fn();
+      this.db.exec('COMMIT');
+    } catch (err) {
+      try {
+        this.db.exec('ROLLBACK');
+      } catch {
+        /* ignore */
+      }
+      throw err;
+    }
   }
 
   /** Replace pre-schema-rename `kanban_agent_turns` (e.g. `full_prompt`) with the handoff-oriented columns. */
@@ -196,7 +211,9 @@ export class JsonPlatformStore {
     const projectsPath = path.join(this.baseDir, 'projects.json');
     if (!fs.existsSync(projectsPath)) return;
 
-    const count = (this.db.prepare('SELECT COUNT(*) AS c FROM projects').get() as { c: number }).c;
+    const count = Number(
+      (this.db.prepare('SELECT COUNT(*) AS c FROM projects').get() as { c: number | bigint }).c,
+    );
     if (count > 0) return;
 
     const projectRows = readJson<Project[]>(projectsPath, []);
@@ -225,7 +242,7 @@ export class JsonPlatformStore {
       'INSERT OR REPLACE INTO approvals (id, task_session_id, status, payload) VALUES (?, ?, ?, ?)',
     );
 
-    const tx = this.db.transaction(() => {
+    this.runInTransaction(() => {
       for (const p of projectRows) insertProject.run(p.id, JSON.stringify(p));
       for (const s of sprintRows) insertSprint.run(s.id, s.projectId, JSON.stringify(s));
       for (const t of taskRows) insertTask.run(t.id, t.projectId, JSON.stringify(t));
@@ -237,7 +254,6 @@ export class JsonPlatformStore {
         insertApproval.run(ap.id, ap.taskSessionId, ap.status, JSON.stringify(ap));
       }
     });
-    tx();
 
     for (const name of [
       'projects.json',
@@ -291,10 +307,9 @@ export class JsonPlatformStore {
 
   private persistProjects(): void {
     const stmt = this.db.prepare('INSERT OR REPLACE INTO projects (id, payload) VALUES (?, ?)');
-    const tx = this.db.transaction(() => {
+    this.runInTransaction(() => {
       for (const p of this.projects.values()) stmt.run(p.id, JSON.stringify(p));
     });
-    tx();
     this.pruneByIdColumn('projects', Array.from(this.projects.keys()));
   }
 
@@ -302,10 +317,9 @@ export class JsonPlatformStore {
     const stmt = this.db.prepare(
       'INSERT OR REPLACE INTO sprints (id, project_id, payload) VALUES (?, ?, ?)',
     );
-    const tx = this.db.transaction(() => {
+    this.runInTransaction(() => {
       for (const s of this.sprints.values()) stmt.run(s.id, s.projectId, JSON.stringify(s));
     });
-    tx();
     this.pruneByIdColumn('sprints', Array.from(this.sprints.keys()));
   }
 
@@ -313,10 +327,9 @@ export class JsonPlatformStore {
     const stmt = this.db.prepare(
       'INSERT OR REPLACE INTO task_sessions (id, project_id, payload) VALUES (?, ?, ?)',
     );
-    const tx = this.db.transaction(() => {
+    this.runInTransaction(() => {
       for (const t of this.taskSessions.values()) stmt.run(t.id, t.projectId, JSON.stringify(t));
     });
-    tx();
     this.pruneByIdColumn('task_sessions', Array.from(this.taskSessions.keys()));
   }
 
@@ -324,21 +337,19 @@ export class JsonPlatformStore {
     const stmt = this.db.prepare(
       'INSERT OR REPLACE INTO agent_instances (id, task_session_id, payload) VALUES (?, ?, ?)',
     );
-    const tx = this.db.transaction(() => {
+    this.runInTransaction(() => {
       for (const a of this.agentInstances.values()) stmt.run(a.id, a.taskSessionId, JSON.stringify(a));
     });
-    tx();
     this.pruneByIdColumn('agent_instances', Array.from(this.agentInstances.keys()));
   }
 
   private persistQueues(): void {
     const stmt = this.db.prepare('INSERT OR REPLACE INTO queues (queue_key, payload) VALUES (?, ?)');
-    const tx = this.db.transaction(() => {
+    this.runInTransaction(() => {
       for (const [queueKey, messages] of this.queues.entries()) {
         stmt.run(queueKey, JSON.stringify(messages));
       }
     });
-    tx();
     const keys = Array.from(this.queues.keys());
     if (keys.length === 0) {
       this.db.prepare('DELETE FROM queues').run();
@@ -352,12 +363,11 @@ export class JsonPlatformStore {
     const stmt = this.db.prepare(
       'INSERT OR REPLACE INTO approvals (id, task_session_id, status, payload) VALUES (?, ?, ?, ?)',
     );
-    const tx = this.db.transaction(() => {
+    this.runInTransaction(() => {
       for (const a of this.approvals.values()) {
         stmt.run(a.id, a.taskSessionId, a.status, JSON.stringify(a));
       }
     });
-    tx();
     this.pruneByIdColumn('approvals', Array.from(this.approvals.keys()));
   }
 
@@ -706,7 +716,7 @@ export class JsonPlatformStore {
     const limit = Math.min(Math.max(filters.limit ?? 100, 1), 500);
     const offset = Math.max(filters.offset ?? 0, 0);
     const clauses: string[] = [];
-    const params: unknown[] = [];
+    const params: string[] = [];
     if (filters.projectId) {
       clauses.push('project_id = ?');
       params.push(filters.projectId);
@@ -721,7 +731,7 @@ export class JsonPlatformStore {
     }
     const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
     const countRow = this.db.prepare(`SELECT COUNT(*) AS c FROM kanban_agent_turns ${where}`).get(...params) as {
-      c: number;
+      c: number | bigint;
     };
     const rows = this.db
       .prepare(
@@ -744,7 +754,7 @@ export class JsonPlatformStore {
       stream_error: string | null;
     }>;
     return {
-      total: countRow.c,
+      total: Number(countRow.c),
       rows: rows.map((row) => ({
         id: row.id,
         projectId: row.project_id,

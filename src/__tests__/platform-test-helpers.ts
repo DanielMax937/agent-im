@@ -5,7 +5,7 @@ import type { AddressInfo } from 'node:net';
 import { JsonPlatformStore, platformDataDir } from '../platform/json-platform-store';
 import type { GitService } from '../platform/git-service';
 import type { InstanceManager } from '../platform/instance-manager';
-import type { PullRequestRef, ScmClient } from '../platform/scm-client';
+import type { FindOpenPullRequestInput, PullRequestRef, ScmClient } from '../platform/scm-client';
 import type { AgentInstanceRecord, PendingApprovalRecord, Project, Sprint, TaskSession } from '../platform/types';
 
 export const PLATFORM_DIR = platformDataDir();
@@ -59,6 +59,10 @@ export class FakeGitService {
   async pushBranch(): Promise<void> {
     this.calls.push('pushBranch');
   }
+
+  async checkoutOriginTrackingBranch(repoPath: string, branch: string): Promise<void> {
+    this.calls.push(`checkoutOriginTrackingBranch:${branch}`);
+  }
 }
 
 export class FakeScmClient implements ScmClient {
@@ -68,9 +72,25 @@ export class FakeScmClient implements ScmClient {
     number: 42,
   };
 
+  /** When null, `findOpenPullRequest` returns null (no existing release PR). */
+  public findOpenPullRequestResult: PullRequestRef | null = null;
+
   async createPullRequest(): Promise<PullRequestRef> {
     this.calls.push('createPullRequest');
     return this.pullRequest;
+  }
+
+  async mergePullRequest(): Promise<void> {
+    this.calls.push('mergePullRequest');
+  }
+
+  async postPullRequestDiscussionComment(): Promise<void> {
+    this.calls.push('postPullRequestDiscussionComment');
+  }
+
+  async findOpenPullRequest(input: FindOpenPullRequestInput): Promise<PullRequestRef | null> {
+    this.calls.push(`findOpenPullRequest:${input.sourceBranch}->${input.targetBranch}`);
+    return this.findOpenPullRequestResult;
   }
 }
 
@@ -187,6 +207,9 @@ export function createTaskSession(
     branchName: overrides.branchName ?? 'dev/issue-101',
     reviewBranchName: overrides.reviewBranchName,
     pullRequestUrl: overrides.pullRequestUrl,
+    pullRequestNumber: overrides.pullRequestNumber,
+    releasePullRequestUrl: overrides.releasePullRequestUrl,
+    releasePullRequestNumber: overrides.releasePullRequestNumber,
     messageQueueKey: overrides.messageQueueKey ?? 'task:ISSUE-101:inbox',
     approvalQueueKey: overrides.approvalQueueKey ?? 'task:ISSUE-101:approvals',
     lastError: overrides.lastError,

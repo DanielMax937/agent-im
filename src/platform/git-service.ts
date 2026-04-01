@@ -172,6 +172,16 @@ export class GitService {
     return result.stdout.trim();
   }
 
+  /**
+   * Checkout local branch tracking `origin/<branch>` (e.g. main/master) after fetch.
+   * Used for final regression testing on the integration branch in the main repo clone.
+   */
+  async checkoutOriginTrackingBranch(repoPath: string, branch: string): Promise<void> {
+    await this.runGit(repoPath, ['fetch', 'origin', branch]);
+    await this.runGit(repoPath, ['checkout', branch]);
+    await this.runGit(repoPath, ['pull', '--ff-only', 'origin', branch]);
+  }
+
   private runGit(repoPath: string, args: string[], allowedExitCodes?: number[]): Promise<CommandResult> {
     return this.runner.run('git', args, repoPath, allowedExitCodes);
   }

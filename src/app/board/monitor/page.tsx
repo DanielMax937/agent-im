@@ -13,7 +13,7 @@ export default function KanbanMonitorPage() {
   const [data, setData] = useState<MonitorResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [expandedId, setExpandedId] = useState<string | null>(null);
+  const [detailModalId, setDetailModalId] = useState<string | null>(null);
 
   useEffect(() => {
     void fetch('/api/projects')
@@ -53,14 +53,44 @@ export default function KanbanMonitorPage() {
     void load();
   }, [load]);
 
+  const detailModalRow = useMemo(() => {
+    if (!detailModalId || !data) return null;
+    return data.rows.find((r) => r.id === detailModalId) ?? null;
+  }, [detailModalId, data]);
+
+  useEffect(() => {
+    if (!detailModalId || !data) return;
+    if (!data.rows.some((r) => r.id === detailModalId)) {
+      setDetailModalId(null);
+    }
+  }, [data, detailModalId]);
+
+  useEffect(() => {
+    if (!detailModalRow) return;
+    const onKey = (e: globalThis.KeyboardEvent) => {
+      if (e.key === 'Escape') setDetailModalId(null);
+    };
+    const prevOverflow = document.body.style.overflow;
+    document.body.style.overflow = 'hidden';
+    window.addEventListener('keydown', onKey);
+    return () => {
+      document.body.style.overflow = prevOverflow;
+      window.removeEventListener('keydown', onKey);
+    };
+  }, [detailModalRow]);
+
   return (
     <main className="page-shell ui-board ui-board-monitor">
       <header className="ui-admin-header">
         <p className="eyebrow">运维</p>
         <h1>Kanban 监控 — Agent 调用记录</h1>
         <p className="lead ui-muted">
-          按项目与 <code>taskId</code>（Issue）筛选。每行在<strong>目标 Agent 即将执行</strong>时写入（含完整 prompt）；流式结束后若失败会更新
-          <code>stream_error</code>。初次分配时 source / 上一轮回复为空，target 与 prompt 仍有值。数据表 <code>kanban_agent_turns</code>。
+          按项目与 <code>taskId</code>（Issue）筛选。每行在<strong>目标 Agent 即将执行一轮</strong>时写入（含完整 prompt）。语义：
+          <strong>source agent</strong> / <strong>target agent</strong> 对<strong>模型侧 agent</strong>统一为
+          <strong> 角色名 / runner 类型</strong>（如 <code>开发/claude</code>、<code>评审/codex</code>）；人为跟进为{' '}
+          <code>Human</code>；自动确认轮为 <code>system check</code>。
+          <strong>target agent prompt</strong> 即本回合发给运行时的全文。流式失败会写入 <code>stream_error</code>。数据表{' '}
+          <code>kanban_agent_turns</code>。
         </p>
         <nav className="ui-nav">
           <a href="/">首页</a>
@@ -124,7 +154,7 @@ export default function KanbanMonitorPage() {
                 <th>source agent</th>
                 <th>target agent</th>
                 <th>source 回复（摘要）</th>
-                <th>展开</th>
+                <th>详情</th>
               </tr>
             </thead>
             <tbody>
@@ -139,32 +169,37 @@ export default function KanbanMonitorPage() {
                   <td>
                     <code>{row.taskId}</code>
                   </td>
-                  <td>{row.sourceAgent || '—'}</td>
-                  <td>{row.targetAgent}</td>
+                  <td>{formatMonitorAgentColumn(row.sourceAgent)}</td>
+                  <td>{formatMonitorAgentColumn(row.targetAgent)}</td>
                   <td className="monitor-cell-clip">{clipText(row.sourceAgentResponse, 120)}</td>
                   <td>
                     <button
                       type="button"
                       className="ui-btn ghost"
-                      onClick={() => setExpandedId((id) => (id === row.id ? null : row.id))}
+                      onClick={() => setDetailModalId(row.id)}
                     >
-                      {expandedId === row.id ? '收起' : '详情'}
+                      详情
                     </button>
                   </td>
                 </tr>
               ))}
             </tbody>
           </table>
-          {expandedId ? (
-            <MonitorDetail
-              row={data.rows.find((r) => r.id === expandedId) ?? null}
-              onClose={() => setExpandedId(null)}
-            />
-          ) : null}
         </div>
+      ) : null}
+
+      {detailModalRow ? (
+        <MonitorDetailModal row={detailModalRow} onClose={() => setDetailModalId(null)} />
       ) : null}
     </main>
   );
+}
+
+/** 表格/弹层：与后端一致；空串用占位；非 agent 文案原样展示 */
+function formatMonitorAgentColumn(s: string, emptyLabel = '—'): string {
+  const t = s?.trim();
+  if (!t) return emptyLabel;
+  return t;
 }
 
 function clipText(s: string, max: number): string {
@@ -174,36 +209,52 @@ function clipText(s: string, max: number): string {
   return `${t.slice(0, max)}…`;
 }
 
-function MonitorDetail(props: { row: KanbanAgentTurnRecord | null; onClose: () => void }) {
+function MonitorDetailModal(props: { row: KanbanAgentTurnRecord; onClose: () => void }) {
   const { row, onClose } = props;
-  if (!row) return null;
   return (
-    <div className="monitor-detail" role="dialog" aria-label="调用详情">
-      <div className="monitor-detail-toolbar">
-        <span>
-          <code>{row.id}</code>
-        </span>
-        <button type="button" onClick={onClose}>
-          关闭
-        </button>
+    <div className="monitor-modal-backdrop" role="presentation" onClick={onClose}>
+      <div
+        className="ui-panel monitor-modal-panel"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="monitor-detail-modal-title"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="monitor-modal-header">
+          <div>
+            <h2 id="monitor-detail-modal-title" className="ui-h2 monitor-modal-title">
+              调用详情
+            </h2>
+            <p className="ui-muted ui-small" style={{ margin: '0.35rem 0 0' }}>
+              <code>{row.id}</code>
+            </p>
+          </div>
+          <button type="button" className="ui-btn ghost" onClick={onClose}>
+            关闭
+          </button>
+        </div>
+        <div className="monitor-modal-body">
+          {row.streamError ? (
+            <p className="ui-banner" style={{ marginTop: 0 }}>
+              <strong>流式错误：</strong> {row.streamError}
+            </p>
+          ) : null}
+          <p className="ui-muted">
+            <strong>projectId</strong> <code>{row.projectId}</code> · <strong>taskId</strong>{' '}
+            <code>{row.taskId}</code>
+          </p>
+          <h3 className="monitor-modal-section-title">source agent</h3>
+          <pre className="monitor-pre monitor-pre-short">
+            {formatMonitorAgentColumn(row.sourceAgent, '（初次分配，无来源）')}
+          </pre>
+          <h3 className="monitor-modal-section-title">target agent</h3>
+          <pre className="monitor-pre monitor-pre-short">{formatMonitorAgentColumn(row.targetAgent)}</pre>
+          <h3 className="monitor-modal-section-title">source agent 回复（转交前）</h3>
+          <pre className="monitor-pre monitor-pre-tall">{row.sourceAgentResponse || '（空）'}</pre>
+          <h3 className="monitor-modal-section-title">target agent prompt</h3>
+          <pre className="monitor-pre monitor-pre-xl">{row.targetAgentPrompt}</pre>
+        </div>
       </div>
-      {row.streamError ? (
-        <p className="ui-banner">
-          <strong>流式错误：</strong> {row.streamError}
-        </p>
-      ) : null}
-      <p className="ui-muted">
-        <strong>projectId</strong> <code>{row.projectId}</code> · <strong>taskId</strong>{' '}
-        <code>{row.taskId}</code>
-      </p>
-      <h3>source agent</h3>
-      <pre className="monitor-pre monitor-pre-short">{row.sourceAgent || '（初次分配，无来源）'}</pre>
-      <h3>target agent</h3>
-      <pre className="monitor-pre monitor-pre-short">{row.targetAgent}</pre>
-      <h3>source agent 回复（转交前）</h3>
-      <pre className="monitor-pre">{row.sourceAgentResponse || '（空）'}</pre>
-      <h3>target agent prompt</h3>
-      <pre className="monitor-pre">{row.targetAgentPrompt}</pre>
     </div>
   );
 }

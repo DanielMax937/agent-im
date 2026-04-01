@@ -1,4 +1,5 @@
-import type { AgentRole, AgentRuntime, KanbanAgentKind } from './types';
+import { resolveSkillIdToPromptLine } from './skill-catalog';
+import type { AgentRole, AgentRuntime, KanbanAgentKind, Project } from './types';
 
 export interface KanbanAgentResolution {
   role: AgentRole;
@@ -8,7 +9,8 @@ export interface KanbanAgentResolution {
   preferredSkills: string[];
 }
 
-const SKILL_PRESETS: Record<KanbanAgentKind, string[]> = {
+/** Built-in default lines when a project has no `kanbanLaneSkills` override for that lane. */
+export const DEFAULT_KANBAN_LANE_SKILL_LINES: Record<KanbanAgentKind, string[]> = {
   'agent-dev': [
     'vercel-react-best-practices（React 规范与性能）',
     'gof-patterns（设计模式精简：策略/工厂等，避免过度设计）',
@@ -44,7 +46,7 @@ export function resolveKanbanAgent(
       role: 'developer',
       runtime: 'codex',
       kanbanAgent: 'codex-senior',
-      preferredSkills: SKILL_PRESETS['codex-senior'],
+      preferredSkills: DEFAULT_KANBAN_LANE_SKILL_LINES['codex-senior'],
     };
   }
 
@@ -54,28 +56,50 @@ export function resolveKanbanAgent(
         role: 'developer',
         runtime: 'claude',
         kanbanAgent: 'agent-dev',
-        preferredSkills: SKILL_PRESETS['agent-dev'],
+        preferredSkills: DEFAULT_KANBAN_LANE_SKILL_LINES['agent-dev'],
       };
     case 'codex-senior':
       return {
         role: 'developer',
         runtime: 'codex',
         kanbanAgent: 'codex-senior',
-        preferredSkills: SKILL_PRESETS['codex-senior'],
+        preferredSkills: DEFAULT_KANBAN_LANE_SKILL_LINES['codex-senior'],
       };
     case 'claude-review':
       return {
         role: 'reviewer',
         runtime: 'claude',
         kanbanAgent: 'claude-review',
-        preferredSkills: SKILL_PRESETS['claude-review'],
+        preferredSkills: DEFAULT_KANBAN_LANE_SKILL_LINES['claude-review'],
       };
     case 'copilot-test':
       return {
         role: 'tester',
         runtime: 'copilot',
         kanbanAgent: 'copilot-test',
-        preferredSkills: SKILL_PRESETS['copilot-test'],
+        preferredSkills: DEFAULT_KANBAN_LANE_SKILL_LINES['copilot-test'],
       };
   }
+}
+
+/** Default prompt lines for a lane (same as built-in presets for that resolved agent). */
+export function defaultSkillLinesForLane(kind: KanbanAgentKind, reviewRejectionCount = 0): string[] {
+  return resolveKanbanAgent(kind, reviewRejectionCount).preferredSkills;
+}
+
+/**
+ * Effective skill lines for prompts: project `kanbanLaneSkills[lane]` as catalog ids → labels when set;
+ * otherwise built-in defaults from {@link resolveKanbanAgent}.
+ */
+export function preferredSkillsForProjectLane(
+  project: Project,
+  kind: KanbanAgentKind,
+  reviewRejectionCount = 0,
+): string[] {
+  const resolved = resolveKanbanAgent(kind, reviewRejectionCount);
+  const custom = project.kanbanLaneSkills?.[resolved.kanbanAgent];
+  if (custom && custom.length > 0) {
+    return custom.map((id) => resolveSkillIdToPromptLine(id));
+  }
+  return resolved.preferredSkills;
 }

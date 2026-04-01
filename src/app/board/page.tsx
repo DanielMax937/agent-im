@@ -11,11 +11,13 @@ import type {
   TaskWorkflowState,
 } from '../../platform/types';
 
+/** Order matches pipeline: 开发 → 功能测试 → PR 评审 → 合并后回归 → 完成 */
 const COLUMNS: { key: TaskWorkflowState; label: string }[] = [
   { key: 'todo', label: '待办' },
+  { key: 'pending_start', label: '队列' },
   { key: 'in_progress', label: '开发中' },
-  { key: 'review', label: '评审中' },
   { key: 'testing', label: '测试中' },
+  { key: 'review', label: '评审中' },
   { key: 'regression_testing', label: '回归测试中' },
   { key: 'closed', label: '完成' },
 ];
@@ -79,6 +81,8 @@ export default function BoardPage() {
   const [nextIssueHint, setNextIssueHint] = useState('');
   const [newSprintName, setNewSprintName] = useState('');
   const [createTitle, setCreateTitle] = useState('');
+  /** Comma or space separated issue ids of tasks in the same project that must close first */
+  const [createDependsOn, setCreateDependsOn] = useState('');
   /** 待办领取弹窗：当前选中的任务；null 表示关闭 */
   const [assignModalTask, setAssignModalTask] = useState<TaskSession | null>(null);
   const [modalHandoff, setModalHandoff] = useState('');
@@ -90,6 +94,9 @@ export default function BoardPage() {
   /** `kind:memberId` for manual pick; lane inferred from which roster the person belongs to */
   const [modalAssigneeOptionValue, setModalAssigneeOptionValue] = useState('');
   const [kanbanStatus, setKanbanStatus] = useState<KanbanStatus | null>(null);
+  /** 非待办 / 非完成列：手动向消息队列写入内容，驱动当前 lane agent 继续 */
+  const [manualModalTask, setManualModalTask] = useState<TaskSession | null>(null);
+  const [manualQueueText, setManualQueueText] = useState('');
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -126,6 +133,20 @@ export default function BoardPage() {
     }
   }, [filterProjectId]);
 
+  const silentRefreshTasks = useCallback(async () => {
+    try {
+      const taskUrl = filterProjectId
+        ? `/api/tasks?projectId=${encodeURIComponent(filterProjectId)}`
+        : '/api/tasks';
+      const taskRes = await fetch(taskUrl, { cache: 'no-store' });
+      if (!taskRes.ok) return;
+      const taskBody = (await taskRes.json()) as TaskSession[];
+      setTasks(Array.isArray(taskBody) ? taskBody : []);
+    } catch {
+      /* ignore transient poll errors */
+    }
+  }, [filterProjectId]);
+
   const loadSprints = useCallback(async (pid: string) => {
     if (!pid) {
       setSprints([]);
@@ -149,6 +170,11 @@ export default function BoardPage() {
   }, [load]);
 
   useEffect(() => {
+    const id = setInterval(() => void silentRefreshTasks(), 5000);
+    return () => clearInterval(id);
+  }, [silentRefreshTasks]);
+
+  useEffect(() => {
     if (createProjectId) void loadSprints(createProjectId);
   }, [createProjectId, loadSprints]);
 
@@ -165,6 +191,18 @@ export default function BoardPage() {
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
   }, [assignModalTask]);
+
+  useEffect(() => {
+    if (!manualModalTask) return;
+    const onKey = (e: globalThis.KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        setManualModalTask(null);
+        setManualQueueText('');
+      }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [manualModalTask]);
 
   useEffect(() => {
     if (!createProjectId) {
@@ -231,6 +269,10 @@ export default function BoardPage() {
     setBusy(true);
     setError(null);
     try {
+      const depRaw = createDependsOn.trim();
+      const dependsOnIssueIds = depRaw
+        ? [...new Set(depRaw.split(/[,;\s]+/).map((s) => s.trim()).filter(Boolean))]
+        : undefined;
       const res = await fetch('/api/workflows/tasks/create', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -238,10 +280,12 @@ export default function BoardPage() {
           projectId: createProjectId,
           sprintId,
           title: createTitle.trim(),
+          ...(dependsOnIssueIds?.length ? { dependsOnIssueIds } : {}),
         }),
       });
       if (!res.ok) throw new Error(await res.text());
       setCreateTitle('');
+      setCreateDependsOn('');
       await load();
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
@@ -361,7 +405,46 @@ export default function BoardPage() {
     }
   }
 
+  async function submitManualQueue() {
+    if (!manualModalTask) return;
+    const text = manualQueueText.trim();
+    if (!text) {
+      setError('请输入要入队的消息');
+      return;
+    }
+    setBusy(true);
+    setError(null);
+    try {
+      const res = await fetch(
+        `/api/workflows/tasks/${encodeURIComponent(manualModalTask.id)}/queue-message`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ content: text }),
+        },
+      );
+      if (!res.ok) {
+        const errBody = (await res.json().catch(() => null)) as { error?: string } | null;
+        throw new Error(errBody?.error ?? (await res.text()));
+      }
+      setManualModalTask(null);
+      setManualQueueText('');
+      await load();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
   function formatResponsibleAgent(task: TaskSession): string {
+    if (task.workflowState === 'pending_start') {
+      const lane = task.kanbanAgent ? KANBAN_AGENT_LABELS[task.kanbanAgent] : '—';
+      const deps = task.dependsOnIssueIds?.length
+        ? ` · 依赖: ${task.dependsOnIssueIds.join(', ')}`
+        : '';
+      return `队列中 · ${lane}${deps}`;
+    }
     if (task.workflowState === 'todo' && !task.kanbanAgent) {
       return '未分配';
     }
@@ -374,14 +457,29 @@ export default function BoardPage() {
     return projects.find((p) => p.id === projectId)?.name ?? projectId;
   }
 
+  function canManualAdvance(task: TaskSession): boolean {
+    return (
+      task.workflowState !== 'todo' &&
+      task.workflowState !== 'pending_start' &&
+      task.workflowState !== 'closed'
+    );
+  }
+
+  const manualModalTaskLive = manualModalTask
+    ? tasks.find((t) => t.id === manualModalTask.id) ?? manualModalTask
+    : null;
+  const manualModalGenerating = !!manualModalTaskLive?.agentGenerating;
+
   return (
     <main className="page-shell ui-board ui-board-fluid">
       <header className="ui-admin-header">
         <p className="eyebrow">任务</p>
         <h1>Local Kanban</h1>
         <p className="lead ui-muted">
-          列：<code>todo → in_progress → review → testing → regression_testing → closed</code>。
-          <strong>卡片上只保留「删除」</strong>；待办卡片点击标题区仍可领取并分配 lane。提交评审、commit/PR、进入测试/回归、关单等由<strong>各 lane 的 agent</strong>通过工具或自动化调用平台 API 完成，本页不再提供对应按钮。
+          列：<code>todo → 队列(pending_start) → in_progress → review → testing → regression_testing → closed</code>
+          。从待办分配后先入队，依赖项未全部完成时阻塞；队首就绪后才开始开发。
+          待办卡片点击标题领取；<strong>活跃列卡片可「手动推进」</strong>（向当前 lane 入队用户消息）。自动推进失败时由 <code>system_check</code> 循环确认，上限{' '}
+          <code>CTI_KANBAN_CONFIRMATION_MAX_LOOPS</code>（默认 100）。提交评审、PR、测试/回归、关单等仍由各 lane agent 调 API 完成。
         </p>
         <p className="lead ui-muted" style={{ marginTop: '0.75rem' }}>
           Telegram：<code>CTI_KANBAN_TELEGRAM_*</code>；worktree：<code>CTI_KANBAN_USE_WORKTREE=1</code>。Slave goal 与 <code>CTI_SLAVE_REPORT_GOAL</code> 等同原说明。
@@ -407,9 +505,10 @@ export default function BoardPage() {
         <section className="ui-panel" style={{ marginBottom: '1.5rem' }}>
           <h2 className="ui-h2">项目与任务计数</h2>
           <p className="ui-muted">
-            待办 {kanbanStatus.tasksByState.todo} · 开发中 {kanbanStatus.tasksByState.in_progress} · 评审{' '}
-            {kanbanStatus.tasksByState.review} · 测试 {kanbanStatus.tasksByState.testing} · 回归{' '}
-            {kanbanStatus.tasksByState.regression_testing} · 完成 {kanbanStatus.tasksByState.closed}
+            待办 {kanbanStatus.tasksByState.todo} · 队列 {kanbanStatus.tasksByState.pending_start ?? 0} · 开发中{' '}
+            {kanbanStatus.tasksByState.in_progress} · 评审 {kanbanStatus.tasksByState.review} · 测试{' '}
+            {kanbanStatus.tasksByState.testing} · 回归 {kanbanStatus.tasksByState.regression_testing} · 完成{' '}
+            {kanbanStatus.tasksByState.closed}
           </p>
           <p className="ui-muted">运行中实例数：{kanbanStatus.instances.length}</p>
           <ul className="ui-list">
@@ -419,9 +518,9 @@ export default function BoardPage() {
                     <strong>{row.name}</strong>
                     {row.owner ? <span className="ui-muted"> — 负责人 {row.owner}</span> : null}
                     <span className="ui-muted" style={{ display: 'block', marginTop: '0.25rem' }}>
-                      待办 {row.tasksByState.todo} · 开发中 {row.tasksByState.in_progress} · 评审 {row.tasksByState.review}{' '}
-                      · 测试 {row.tasksByState.testing} · 回归 {row.tasksByState.regression_testing} · 完成{' '}
-                      {row.tasksByState.closed}
+                      待办 {row.tasksByState.todo} · 队列 {row.tasksByState.pending_start ?? 0} · 开发中{' '}
+                      {row.tasksByState.in_progress} · 评审 {row.tasksByState.review} · 测试 {row.tasksByState.testing} · 回归{' '}
+                      {row.tasksByState.regression_testing} · 完成 {row.tasksByState.closed}
                     </span>
                   </li>
                 ))
@@ -560,6 +659,16 @@ export default function BoardPage() {
               placeholder="任务描述"
             />
           </label>
+          <label>
+            依赖 Issue（可选）
+            <input
+              className="ui-input"
+              value={createDependsOn}
+              onChange={(e) => setCreateDependsOn(e.target.value)}
+              placeholder="同项目已存在任务的 Issue ID，逗号或空格分隔"
+              style={{ minWidth: 280 }}
+            />
+          </label>
           <button type="button" className="ui-btn" disabled={busy || !projects.length} onClick={() => void createTask()}>
             创建
           </button>
@@ -603,10 +712,33 @@ export default function BoardPage() {
                       }
                     >
                       <p className="ui-card-title">{task.title}</p>
+                      {task.dependsOnIssueIds?.length ? (
+                        <p className="ui-card-meta ui-muted">依赖: {task.dependsOnIssueIds.join(', ')}</p>
+                      ) : null}
+                      {task.agentGenerating ? (
+                        <p className="ui-card-meta" style={{ color: 'var(--ui-accent, #38bdf8)' }}>
+                          Agent 正在生成回复…
+                        </p>
+                      ) : null}
                       <p className="ui-card-meta ui-muted">项目：{projectLabel(task.projectId)}</p>
                       <p className="ui-card-meta ui-card-kanban-agent">负责：{formatResponsibleAgent(task)}</p>
                     </div>
                     <div className="ui-card-kanban-toolbar">
+                      {canManualAdvance(task) ? (
+                        <button
+                          type="button"
+                          className="ui-btn ghost ui-btn-tiny"
+                          disabled={busy || !!task.agentGenerating}
+                          title={task.agentGenerating ? 'Agent 正在生成回复，请稍后再手动推进' : undefined}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            setManualModalTask(task);
+                            setManualQueueText('');
+                          }}
+                        >
+                          手动推进
+                        </button>
+                      ) : null}
                       <button
                         type="button"
                         className="ui-btn ghost ui-btn-tiny"
@@ -722,6 +854,80 @@ export default function BoardPage() {
               </button>
               <button type="button" className="ui-btn primary" disabled={busy} onClick={() => void confirmAssignFromTodo()}>
                 分配并启动 runner
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
+
+      {manualModalTask ? (
+        <div
+          role="presentation"
+          style={{
+            position: 'fixed',
+            inset: 0,
+            zIndex: 200,
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            padding: '16px',
+            background: 'rgba(2, 6, 23, 0.72)',
+          }}
+          onClick={() => {
+            setManualModalTask(null);
+            setManualQueueText('');
+          }}
+        >
+          <div
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="manual-queue-modal-title"
+            className="ui-panel"
+            style={{ maxWidth: 480, width: '100%' }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <h2 id="manual-queue-modal-title" className="ui-h2" style={{ marginTop: 0 }}>
+              手动推进：{manualModalTask.issueId}
+            </h2>
+            <p className="ui-muted ui-small" style={{ marginBottom: '1rem' }}>
+              文本将作为 <strong>用户消息</strong> 入队，由当前列（lane）对应的 agent 继续处理。用于补充说明或人工指令。
+            </p>
+            {manualModalGenerating ? (
+              <p className="ui-muted ui-small" style={{ marginBottom: '0.75rem' }}>
+                Agent 正在生成回复，请结束后再入队。
+              </p>
+            ) : null}
+            <label style={{ display: 'block' }}>
+              消息内容
+              <textarea
+                className="ui-input"
+                style={{ width: '100%', minHeight: 120, marginTop: 4 }}
+                value={manualQueueText}
+                onChange={(e) => setManualQueueText(e.target.value)}
+                placeholder="输入要发送给 agent 的内容"
+                autoFocus
+              />
+            </label>
+            <div className="ui-actions-bar" style={{ marginTop: '1.25rem', display: 'flex', gap: '0.5rem', flexWrap: 'wrap' }}>
+              <button
+                type="button"
+                className="ui-btn ghost"
+                disabled={busy}
+                onClick={() => {
+                  setManualModalTask(null);
+                  setManualQueueText('');
+                }}
+              >
+                取消
+              </button>
+              <button
+                type="button"
+                className="ui-btn primary"
+                disabled={busy || manualModalGenerating}
+                title={manualModalGenerating ? 'Agent 正在生成回复' : undefined}
+                onClick={() => void submitManualQueue()}
+              >
+                入队并继续
               </button>
             </div>
           </div>
