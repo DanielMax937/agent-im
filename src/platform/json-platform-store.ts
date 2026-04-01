@@ -474,11 +474,17 @@ export class JsonPlatformStore {
 
   upsertTaskSession(taskSession: TaskSession): TaskSession {
     const existing = this.taskSessions.get(taskSession.id);
-    const nextTaskSession = {
+    let nextTaskSession: TaskSession = {
       ...taskSession,
       createdAt: existing?.createdAt ?? taskSession.createdAt ?? now(),
       updatedAt: now(),
     };
+    if (existing && existing.workflowState !== nextTaskSession.workflowState) {
+      nextTaskSession = {
+        ...nextTaskSession,
+        confirmationLoopCount: 0,
+      };
+    }
     this.taskSessions.set(nextTaskSession.id, nextTaskSession);
     this.persistTaskSessions();
     return nextTaskSession;

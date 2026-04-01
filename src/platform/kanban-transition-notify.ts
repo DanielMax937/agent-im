@@ -1,5 +1,7 @@
+import crypto from 'node:crypto';
+
 import { notifyKanbanTelegram } from './kanban-notify';
-import type { AgentRole, TaskSession, TaskWorkflowState } from './types';
+import type { AgentRole, TaskHistoryComment, TaskSession, TaskWorkflowState } from './types';
 
 const ROLE_CN: Record<AgentRole, string> = {
   developer: '开发',
@@ -29,6 +31,28 @@ export function buildOutgoingAgentSummaryFromConversation(
     return `${text.slice(0, 3500)}…`;
   }
   return text;
+}
+
+/** One persisted handoff row (same summary text as Telegram uses for the outgoing role). */
+export function buildTransitionHistoryComment(
+  task: TaskSession,
+  from: TaskWorkflowState,
+  to: TaskWorkflowState,
+  outgoingRole: AgentRole | null,
+  actionLabel: string,
+): TaskHistoryComment {
+  const content =
+    outgoingRole === null
+      ? '（本步无前序负责 agent 的会话输出。）'
+      : buildOutgoingAgentSummaryFromConversation(task, outgoingRole);
+  return {
+    id: crypto.randomUUID(),
+    role: outgoingRole,
+    kind: 'transition',
+    content,
+    createdAt: new Date().toISOString(),
+    transition: { from, to, actionLabel },
+  };
 }
 
 /**

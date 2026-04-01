@@ -406,7 +406,13 @@ describe('Platform app integration', () => {
         method: 'POST',
       });
       assert.equal((startRegression.body as { workflowState: string }).workflowState, 'regression_testing');
+      assert.ok(scmClient.calls.includes('getPullRequestMergeStatus'));
       assert.ok(scmClient.calls.includes('mergePullRequest'));
+
+      const proceedRelease = await fetchJson(server.baseUrl, `/api/workflows/tasks/${taskHappy.id}/proceed-to-release`, {
+        method: 'POST',
+      });
+      assert.equal((proceedRelease.body as { workflowState: string }).workflowState, 'pending_release');
 
       const closeTask = await fetchJson(server.baseUrl, `/api/workflows/tasks/${taskHappy.id}/close`, {
         method: 'POST',
@@ -520,6 +526,36 @@ describe('Platform app integration', () => {
       const row = list.find((t) => t.id === taskSession.id);
       assert.ok(row);
       assert.equal(row!.agentGenerating, true);
+    } finally {
+      await server.close();
+    }
+  });
+
+  it('POST /api/workflows/tasks/:taskSessionId/comments appends a manual history comment', async () => {
+    const { store, app } = createHarness();
+    const project = createProject(store);
+    const sprint = createSprint(store, project.id);
+    const taskSession = createTaskSession(store, project.id, sprint.id, {
+      workflowState: 'in_progress',
+    });
+    const server = await startHttpApp(app);
+    try {
+      const res = await fetchJson(
+        server.baseUrl,
+        `/api/workflows/tasks/${encodeURIComponent(taskSession.id)}/comments`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ content: 'Manual audit passed', role: 'reviewer' }),
+        },
+      );
+      assert.equal(res.status, 201);
+      const body = res.body as { historyComments?: { content: string; kind: string }[] };
+      assert.ok(body.historyComments?.length === 1);
+      assert.equal(body.historyComments![0].kind, 'manual');
+      assert.equal(body.historyComments![0].content, 'Manual audit passed');
+      const persisted = store.getTaskSession(taskSession.id);
+      assert.ok(persisted?.historyComments?.length === 1);
     } finally {
       await server.close();
     }

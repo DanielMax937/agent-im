@@ -48,6 +48,37 @@ export function buildRolePrompt({
     ? ['Handoff comment (read before acting):', taskSession.handoffComment, '']
     : [];
 
+  /** Same data as board “交接记录”: each transition stores the outgoing role’s last assistant reply as summary. */
+  const historyLogBlock =
+    taskSession.historyComments && taskSession.historyComments.length > 0
+      ? [
+          'Task transition log (per step: what the previous lane last said when the card moved; complements chat messages below):',
+          ...taskSession.historyComments.slice(-40).map((h) => {
+            const head = h.transition
+              ? `${h.transition.from} → ${h.transition.to} · ${h.transition.actionLabel}`
+              : 'note';
+            const roleLabel = h.role ?? '—';
+            const body = h.content.length > 4000 ? `${h.content.slice(0, 4000)}…` : h.content;
+            return `[${roleLabel}] ${head}\n${body}`;
+          }),
+          '',
+        ]
+      : [];
+
+  /** `appendWorkflowComment` stores `role: system` — those rows are omitted from LLM chat history; surface here. */
+  const workflowNotesBlock = (() => {
+    const lines = taskSession.conversationHistory
+      .filter((e) => e.role === 'system' && e.source === 'workflow')
+      .slice(-25)
+      .map((e) => e.content.trim());
+    if (lines.length === 0) return [];
+    return [
+      'Platform workflow notes (automated system lines; not repeated as chat turns below):',
+      ...lines.map((c) => (c.length > 1200 ? `${c.slice(0, 1200)}…` : c)),
+      '',
+    ];
+  })();
+
   const testingScopeBlock =
     taskSession.workflowState === 'testing' && role === 'tester'
       ? [
@@ -64,6 +95,7 @@ export function buildRolePrompt({
           `Final regression phase: the platform has merged the PR and checked out the **integration branch** \`${sprint.branchName}\` in the main repo clone (see working directory).`,
           '**Pull latest** (`git fetch` / `git pull`) on that branch before running suites. Update whole-application tests when behavior changes.',
           `Compare new commits on origin/${sprint.branchName} to \`regressionMasterSha\`; if the branch advanced, re-fetch and re-run full suites — or call POST .../regression/refresh when configured.`,
+          'When regression is green, end with `KANBAN_ACTION:PROCEED_TO_RELEASE` to move to the **pending_release** column; the platform then ensures a release PR (sprint branch → repo base) if one is not already open.',
           '',
         ]
       : [];
@@ -73,6 +105,8 @@ export function buildRolePrompt({
     '',
     ...skillBlock,
     ...handoffBlock,
+    ...historyLogBlock,
+    ...workflowNotesBlock,
     ...testingScopeBlock,
     ...regressionBlock,
     'Execution context:',
@@ -94,9 +128,10 @@ export function buildRolePrompt({
     `To advance the Kanban board without a separate API call, end your reply with a final line exactly like one of the following (no extra text on that line):`,
     '- `KANBAN_ACTION:START_TESTING` — **developer** in **in_progress** (hand off to feature testing on the task branch).',
     '- `KANBAN_ACTION:SUBMIT_REVIEW` — **tester** in **testing** (commit/push + **create PR** → **review** column).',
-    '- `KANBAN_ACTION:REJECT_REVIEW` — **reviewer** in **review** (back to development); optional lines after the action = rejection comment.',
-    '- `KANBAN_ACTION:APPROVE_MERGE` — **reviewer** in **review** after PR is acceptable (**merge PR via API**, then **regression** on integration branch).',
+    '- `KANBAN_ACTION:REJECT_REVIEW` — **reviewer** in **review** when the PR must go back to development; put the reason on the lines after the action (conflicts, failing CI, design issues, etc.).',
+    '- `KANBAN_ACTION:APPROVE_MERGE` — **reviewer** in **review** only when the PR exists on the host, is **not** draft, and is **merge-ready** (no conflicts; required checks/reviews satisfied — the server checks this before merging). If the PR cannot be merged yet, do **not** use this line; use `REJECT_REVIEW` with an explanation instead.',
     '- `KANBAN_ACTION:RETURN_TO_DEVELOPMENT` — **tester** in **testing** if feature tests fail before PR.',
-    '- `KANBAN_ACTION:CLOSE` — **tester** in **regression_testing** when final validation is done (platform opens a **release PR** from sprint/integration branch → repo **base** if none exists; you merge it on the host).',
+    '- `KANBAN_ACTION:PROCEED_TO_RELEASE` — **tester** in **regression_testing** when regression is OK (moves to **pending_release**; platform ensures release PR, posts on the PR, **no** agent in that column — humans merge and **close via API**).',
+    '- **pending_release** has no runner — close the card with **POST `/api/workflows/tasks/:taskSessionId/close`** after you merge the release PR on the host (not a chat action).',
   ].join('\n');
 }

@@ -12,17 +12,20 @@ export interface StreamConsumeResult {
   hasError: boolean;
   errorMessage: string;
   providerSessionId: string | null;
+  /** Set when optional `timeoutMs` elapsed before the stream finished. */
+  timedOut?: boolean;
 }
 
 export interface ConsumeAgentStreamOptions {
   onPermissionRequest?: (permission: PermissionRequestInfo) => Promise<void>;
+  /** If set, cancel the stream reader after this many ms (Kanban agent / system_check turns). */
+  timeoutMs?: number;
 }
 
-export async function consumeAgentStream(
-  stream: ReadableStream<string>,
-  options: ConsumeAgentStreamOptions = {},
+async function runConsume(
+  reader: ReadableStreamDefaultReader<string>,
+  options: ConsumeAgentStreamOptions,
 ): Promise<StreamConsumeResult> {
-  const reader = stream.getReader();
   let responseText = '';
   let hasError = false;
   let errorMessage = '';
@@ -86,4 +89,40 @@ export async function consumeAgentStream(
     errorMessage,
     providerSessionId,
   };
+}
+
+export async function consumeAgentStream(
+  stream: ReadableStream<string>,
+  options: ConsumeAgentStreamOptions = {},
+): Promise<StreamConsumeResult> {
+  const reader = stream.getReader();
+  const timeoutMs = options.timeoutMs ?? 0;
+
+  if (timeoutMs <= 0) {
+    return runConsume(reader, options);
+  }
+
+  let timeoutId: ReturnType<typeof setTimeout> | undefined;
+  const timeoutPromise = new Promise<StreamConsumeResult>((resolve) => {
+    timeoutId = setTimeout(() => {
+      void reader.cancel();
+      resolve({
+        responseText: '',
+        hasError: true,
+        errorMessage: `Kanban stream timed out after ${timeoutMs}ms`,
+        providerSessionId: null,
+        timedOut: true,
+      });
+    }, timeoutMs);
+  });
+
+  const consumePromise = runConsume(reader, options).finally(() => {
+    if (timeoutId !== undefined) clearTimeout(timeoutId);
+  });
+
+  try {
+    return await Promise.race([consumePromise, timeoutPromise]);
+  } finally {
+    await consumePromise.catch(() => {});
+  }
 }

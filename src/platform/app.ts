@@ -130,6 +130,7 @@ export interface WorkflowServiceApi {
   }): Promise<unknown>;
   startTesting(taskSessionId: string): Promise<TaskSession>;
   startRegressionTesting(taskSessionId: string): Promise<TaskSession>;
+  proceedToPendingRelease(taskSessionId: string): Promise<TaskSession>;
   refreshRegressionIfMasterAdvanced(taskSessionId: string): Promise<TaskSession>;
   rejectReview(taskSessionId: string, comment: string): Promise<TaskSession>;
   handleTestFailure(input: { taskSessionId: string; summary: string; log: string }): Promise<TaskSession>;
@@ -144,6 +145,10 @@ export interface WorkflowServiceApi {
     runtimeProfileId?: string,
   ): Promise<AgentInstanceRecord>;
   enqueueManualQueueMessage(taskSessionId: string, content: string): Promise<void>;
+  addTaskHistoryComment(
+    taskSessionId: string,
+    input: { content: string; role?: AgentRole | null },
+  ): Promise<TaskSession>;
 }
 
 export interface InstanceManagerApi {
@@ -614,6 +619,21 @@ export function createPlatformApp(options: CreatePlatformAppOptions): PlatformAp
         }
       }
 
+      const taskCommentsParams = matchPath('/api/workflows/tasks/:taskSessionId/comments', pathname);
+      if (request.method === 'POST' && taskCommentsParams) {
+        const body = await readRequestBody<{ content?: string; role?: AgentRole | null }>(request);
+        const content = typeof body.content === 'string' ? body.content : '';
+        try {
+          const task = await options.workflowService.addTaskHistoryComment(taskCommentsParams.taskSessionId, {
+            content,
+            ...(body.role !== undefined ? { role: body.role } : {}),
+          });
+          return jsonResponse(task, 201);
+        } catch (e) {
+          return jsonResponse({ error: e instanceof Error ? e.message : String(e) }, 400);
+        }
+      }
+
       const submitReviewParams = matchPath('/api/workflows/tasks/:taskSessionId/submit-review', pathname);
       if (request.method === 'POST' && submitReviewParams) {
         const payload = await readRequestBody<{
@@ -649,6 +669,13 @@ export function createPlatformApp(options: CreatePlatformAppOptions): PlatformAp
       if (request.method === 'POST' && regressionRefreshParams) {
         return jsonResponse(
           await options.workflowService.refreshRegressionIfMasterAdvanced(regressionRefreshParams.taskSessionId),
+        );
+      }
+
+      const proceedReleaseParams = matchPath('/api/workflows/tasks/:taskSessionId/proceed-to-release', pathname);
+      if (request.method === 'POST' && proceedReleaseParams) {
+        return jsonResponse(
+          await options.workflowService.proceedToPendingRelease(proceedReleaseParams.taskSessionId),
         );
       }
 

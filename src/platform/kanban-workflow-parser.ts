@@ -5,7 +5,10 @@
 export function parseKanbanAction(content: string): { action: string; payload?: string } | null {
   const idx = content.lastIndexOf('KANBAN_ACTION:');
   if (idx === -1) return null;
-  const after = content.slice(idx + 'KANBAN_ACTION:'.length).trim();
+  let after = content.slice(idx + 'KANBAN_ACTION:'.length).trim();
+  if (after.indexOf('\n') === -1) {
+    after = after.replace(/[`]+$/, ''); // 去掉结尾的反引号
+  }
   const nl = after.indexOf('\n');
   if (nl === -1) {
     const action = after.replace(/\s+/g, '').toUpperCase();

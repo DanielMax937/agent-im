@@ -1,8 +1,9 @@
 export type AgentRuntime = 'claude' | 'codex' | 'cursor' | 'copilot';
 export type AgentRole = 'developer' | 'reviewer' | 'tester';
 /**
- * Kanban columns: 待办 | 队列 | 开发中 | 测试中 | 评审 | 回归测试中 | 完成
- * `pending_start`: assigned from todo, waiting in sprint FIFO until dependencies are closed (or no deps).
+ * Kanban columns: 待办 | 队列 | 开发中 | 测试中 | 评审 | 回归测试中 | 合并主干 | 完成
+ * `pending_start`: assigned from todo, waiting in sprint FIFO until dependencies are satisfied
+ * (`pending_release` or `closed`, or no deps).
  */
 export type TaskWorkflowState =
   | 'todo'
@@ -11,6 +12,8 @@ export type TaskWorkflowState =
   | 'review'
   | 'testing'
   | 'regression_testing'
+  /** Sprint/integration → base release PR ensured when entering; then human merges on host and tester closes. */
+  | 'pending_release'
   | 'closed';
 
 /**
@@ -103,8 +106,9 @@ export interface Sprint {
   createdAt: string;
   updatedAt: string;
   /**
-   * FIFO of `taskSessionId` values waiting for first developer execution after assign-from-todo.
-   * Head is processed first; blocked until its `dependsOnIssueIds` are all closed tasks.
+   * Ordered list of `taskSessionId` values waiting for first developer execution after assign-from-todo.
+   * The server scans this list (also on a timer) and starts each `pending_start` task whose dependencies
+   * are satisfied; blocked entries stay listed until ready — others behind them can still start.
    */
   pendingDeveloperAssignmentQueue?: string[];
 }
@@ -115,6 +119,21 @@ export interface TaskConversationEntry {
   source: 'kanban' | 'workflow' | 'human' | 'developer' | 'reviewer' | 'tester';
   content: string;
   createdAt: string;
+}
+
+/** Persisted handoff / manual notes on a task (shown in board detail → 交接记录). */
+export interface TaskHistoryComment {
+  id: string;
+  /** Role whose work is summarized when `kind === 'transition'`; null for system-only steps or manual notes without role. */
+  role: AgentRole | null;
+  kind: 'transition' | 'manual';
+  content: string;
+  createdAt: string;
+  transition?: {
+    from: TaskWorkflowState;
+    to: TaskWorkflowState;
+    actionLabel: string;
+  };
 }
 
 export interface TaskSession {
@@ -136,8 +155,8 @@ export interface TaskSession {
   /** Review rounds pushed back to development (used to escalate to codex-senior). */
   reviewRejectionCount?: number;
   /**
-   * Other tasks’ **issue ids** in the same project that must be `closed` before this task may
-   * leave the assignment queue and start development (first assign from todo).
+   * Other tasks’ **issue ids** in the same project that must reach **pending_release** or **closed**
+   * before this task may leave the assignment queue and start development (first assign from todo).
    */
   dependsOnIssueIds?: string[];
   /** Read by the next agent at start (also mirrored into prompts). */
@@ -166,6 +185,8 @@ export interface TaskSession {
   lastError?: string;
   systemPrompt?: string;
   conversationHistory: TaskConversationEntry[];
+  /** Chronological handoff summaries (per transition) and manual API comments; also appended to each role’s system prompt. */
+  historyComments?: TaskHistoryComment[];
   createdAt: string;
   updatedAt: string;
   /** Set by GET /api/tasks when the active lane instance is streaming an LLM reply. */
@@ -238,7 +259,7 @@ export interface CreateTaskInput {
   /** Omit to auto-generate `{issueIdPrefix}-n` unique within this project. */
   issueId?: string;
   title: string;
-  /** Issue ids of existing tasks in the same project that must be closed before this task can start dev. */
+  /** Issue ids of existing tasks in the same project that must reach pending_release or closed before this task can start dev. */
   dependsOnIssueIds?: string[];
 }
 

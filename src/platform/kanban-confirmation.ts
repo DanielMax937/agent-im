@@ -10,9 +10,12 @@ const WORKFLOW_STATE_HINT: Record<TaskWorkflowState, string> = {
   pending_start: 'pending_start (queued for first dev run; dependencies + FIFO)',
   in_progress: 'in_progress (developer: START_TESTING → testing)',
   testing: 'testing (tester: SUBMIT_REVIEW → PR + review, or RETURN_TO_DEVELOPMENT)',
-  review: 'review (reviewer: REJECT_REVIEW, APPROVE_MERGE → merge + regression)',
+  review:
+    'review (reviewer: REJECT_REVIEW → dev with comment; APPROVE_MERGE only when PR merge-ready on host → merge + regression)',
   regression_testing:
-    'regression_testing (tester: CLOSE → ensures release PR merge-target→base, then closes)',
+    'regression_testing (tester: PROCEED_TO_RELEASE when regression OK → pending_release + release PR)',
+  pending_release:
+    'pending_release (no agent — merge release PR on host, then close task via API)',
   closed: 'closed',
 };
 

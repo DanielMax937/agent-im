@@ -136,6 +136,16 @@ export class GitService {
     ]);
   }
 
+  /**
+   * Unregisters a linked worktree and deletes its directory. Run from the **main** repo (`repoPath`).
+   * `--force` drops uncommitted/untracked changes in that worktree so removal always succeeds when possible.
+   */
+  async removeTaskWorktree(repoPath: string, worktreePath: string): Promise<void> {
+    const wt = worktreePath.trim();
+    if (!wt) return;
+    await this.runGit(repoPath, ['worktree', 'remove', '--force', wt]);
+  }
+
   async commitAll(input: CommitChangesInput): Promise<{ committed: boolean }> {
     await this.runGit(input.repoPath, ['add', '.']);
     const diffResult = await this.runGit(

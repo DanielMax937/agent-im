@@ -46,8 +46,20 @@ export interface FindOpenPullRequestInput {
   targetBranch: string;
 }
 
+/** Whether the host considers the PR/MR safe to merge (no conflicts; checks/reviews as required by host). */
+export interface PullRequestMergeStatus {
+  canMerge: boolean;
+  /** Set when `canMerge` is false (draft, conflicts, blocked checks, etc.). */
+  reason?: string;
+}
+
 export interface ScmClient {
   createPullRequest(input: CreatePullRequestInput): Promise<PullRequestRef>;
+  /**
+   * Whether the open PR/MR can be merged right now (GitHub: mergeable + mergeable_state clean;
+   * GitLab: merge_status can_be_merged). Call before `mergePullRequest` so reviewers only approve when ready.
+   */
+  getPullRequestMergeStatus(project: Project, pullNumber: number): Promise<PullRequestMergeStatus>;
   /** Merge an open PR/MR (GitHub: merge API; GitLab: merge). */
   mergePullRequest(project: Project, pullNumber: number): Promise<void>;
   /** Post a top-level comment on the PR/MR (issue comment on GitHub). */
@@ -60,6 +72,24 @@ export interface ScmClient {
  * Resolves the SCM API token: explicit `repository.scmTokenEnvVar` wins; then env vars;
  * for GitHub only, finally `gh auth token` when the GitHub CLI is logged in.
  */
+/**
+ * True when merge failed because the PR/MR cannot be merged (e.g. conflicts, dirty merge state).
+ * Used to route workflow back to the developer instead of surfacing a hard failure.
+ */
+export function isScmMergeNotMergeableError(project: Project, error: unknown): boolean {
+  const msg = error instanceof Error ? error.message : String(error);
+  if (project.repository.scmProvider === 'github') {
+    return /\b405\b/.test(msg) && /not mergeable/i.test(msg);
+  }
+  if (project.repository.scmProvider === 'gitlab') {
+    return (
+      /\b409\b/.test(msg) &&
+      /merge_conflict|cannot be merged|conflicts must be resolved/i.test(msg)
+    );
+  }
+  return false;
+}
+
 export async function resolveScmTokenForProject(project: Project): Promise<string> {
   const repo = project.repository;
   const explicit = repo.scmTokenEnvVar?.trim();
@@ -96,6 +126,13 @@ export class HttpScmClient implements ScmClient {
       return this.createGitHubPullRequest(input);
     }
     return this.createGitLabMergeRequest(input);
+  }
+
+  async getPullRequestMergeStatus(project: Project, pullNumber: number): Promise<PullRequestMergeStatus> {
+    if (project.repository.scmProvider === 'github') {
+      return this.getGitHubPullRequestMergeStatus(project, pullNumber);
+    }
+    return this.getGitLabMergeRequestMergeStatus(project, pullNumber);
   }
 
   async mergePullRequest(project: Project, pullNumber: number): Promise<void> {
@@ -165,6 +202,94 @@ export class HttpScmClient implements ScmClient {
     const items = (await response.json()) as Array<{ web_url: string; iid: number }>;
     if (items.length === 0) return null;
     return { url: items[0].web_url, number: items[0].iid };
+  }
+
+  private async getGitHubPullRequestMergeStatus(project: Project, pullNumber: number): Promise<PullRequestMergeStatus> {
+    const token = await resolveScmTokenForProject(project);
+    const base = project.repository.scmApiBaseUrl || 'https://api.github.com';
+    const url = `${base}/repos/${project.repository.scmProject}/pulls/${pullNumber}`;
+    for (let attempt = 0; attempt < 6; attempt++) {
+      const response = await fetch(url, {
+        headers: {
+          Accept: 'application/vnd.github+json',
+          Authorization: `Bearer ${token}`,
+        },
+      });
+      if (!response.ok) {
+        const text = await response.text();
+        throw new Error(`GitHub get PR failed: ${response.status} ${text.slice(0, 500)}`);
+      }
+      const pr = (await response.json()) as {
+        mergeable: boolean | null;
+        mergeable_state: string;
+        draft?: boolean;
+      };
+      if (pr.draft) {
+        return { canMerge: false, reason: 'PR is still a draft' };
+      }
+      if (pr.mergeable === null) {
+        if (attempt < 5) {
+          await new Promise((r) => setTimeout(r, 500));
+          continue;
+        }
+        return {
+          canMerge: false,
+          reason: 'PR mergeability is still computing on GitHub; retry APPROVE_MERGE in a moment',
+        };
+      }
+      if (pr.mergeable === false) {
+        return {
+          canMerge: false,
+          reason: `mergeable_state=${pr.mergeable_state} (conflicts or cannot merge with base)`,
+        };
+      }
+      if (pr.mergeable_state === 'clean') {
+        return { canMerge: true };
+      }
+      return {
+        canMerge: false,
+        reason: `not merge-ready yet (mergeable_state=${pr.mergeable_state}; need clean: no conflicts, blocking checks/reviews resolved)`,
+      };
+    }
+    return { canMerge: false, reason: 'could not determine GitHub PR mergeability' };
+  }
+
+  private async getGitLabMergeRequestMergeStatus(project: Project, mergeRequestIid: number): Promise<PullRequestMergeStatus> {
+    const token = await resolveScmTokenForProject(project);
+    const baseUrl = project.repository.scmApiBaseUrl || 'https://gitlab.com/api/v4';
+    const url = `${baseUrl}/projects/${encodeURIComponent(project.repository.scmProject)}/merge_requests/${mergeRequestIid}`;
+    for (let attempt = 0; attempt < 6; attempt++) {
+      const response = await fetch(url, {
+        headers: { 'PRIVATE-TOKEN': token },
+      });
+      if (!response.ok) {
+        throw new Error(`GitLab get MR failed: ${response.status} ${await response.text()}`);
+      }
+      const mr = (await response.json()) as {
+        draft?: boolean;
+        merge_status?: string;
+        work_in_progress?: boolean;
+      };
+      if (mr.draft || mr.work_in_progress) {
+        return { canMerge: false, reason: 'MR is draft or WIP' };
+      }
+      const ms = mr.merge_status;
+      if (ms === 'can_be_merged') {
+        return { canMerge: true };
+      }
+      if (ms === 'cannot_be_merged') {
+        return { canMerge: false, reason: 'cannot_be_merged (conflicts or failing pipeline)' };
+      }
+      if (attempt < 5) {
+        await new Promise((r) => setTimeout(r, 500));
+        continue;
+      }
+      return {
+        canMerge: false,
+        reason: 'merge_status still unchecked on GitLab; retry APPROVE_MERGE in a moment',
+      };
+    }
+    return { canMerge: false, reason: 'could not determine GitLab MR merge status' };
   }
 
   private async mergeGitHubPullRequest(project: Project, pullNumber: number): Promise<void> {
@@ -262,6 +387,16 @@ export class HttpScmClient implements ScmClient {
       const repo = input.project.repository.scmProject;
       const head = input.sourceBranch;
       const base = input.targetBranch;
+      if (response.status === 422) {
+        const existing = await this.findGitHubOpenPullRequest({
+          project: input.project,
+          sourceBranch: input.sourceBranch,
+          targetBranch: input.targetBranch,
+        });
+        if (existing) {
+          return existing;
+        }
+      }
       let hint = '';
       if (response.status === 404) {
         hint =
@@ -269,7 +404,8 @@ export class HttpScmClient implements ScmClient {
           `token can access this repo (private 仓库无权限时 GitHub 也返回 404), ` +
           `and "${head}" exists on origin after push. PR: base="${base}" head="${head}".`;
       } else if (response.status === 422) {
-        hint = ` Hint (422): often head branch "${head}" is missing on GitHub or base "${base}" is invalid. Body: ${body.slice(0, 500)}`;
+        hint =
+          ` Hint (422): no matching open PR found to reuse; often head branch "${head}" is missing on GitHub, base "${base}" is invalid, or validation failed. Body: ${body.slice(0, 500)}`;
       }
       throw new Error(`GitHub pull request failed: ${response.status} ${body}${hint}`);
     }

@@ -5,7 +5,12 @@ import type { AddressInfo } from 'node:net';
 import { JsonPlatformStore, platformDataDir } from '../platform/json-platform-store';
 import type { GitService } from '../platform/git-service';
 import type { InstanceManager } from '../platform/instance-manager';
-import type { FindOpenPullRequestInput, PullRequestRef, ScmClient } from '../platform/scm-client';
+import type {
+  FindOpenPullRequestInput,
+  PullRequestMergeStatus,
+  PullRequestRef,
+  ScmClient,
+} from '../platform/scm-client';
 import type { AgentInstanceRecord, PendingApprovalRecord, Project, Sprint, TaskSession } from '../platform/types';
 
 export const PLATFORM_DIR = platformDataDir();
@@ -63,6 +68,10 @@ export class FakeGitService {
   async checkoutOriginTrackingBranch(repoPath: string, branch: string): Promise<void> {
     this.calls.push(`checkoutOriginTrackingBranch:${branch}`);
   }
+
+  async removeTaskWorktree(_repoPath: string, worktreePath: string): Promise<void> {
+    this.calls.push(`removeTaskWorktree:${worktreePath}`);
+  }
 }
 
 export class FakeScmClient implements ScmClient {
@@ -72,8 +81,18 @@ export class FakeScmClient implements ScmClient {
     number: 42,
   };
 
+  /** When set, `mergePullRequest` throws (e.g. simulate GitHub 405 not mergeable). */
+  public mergePullRequestError: Error | null = null;
+
   /** When null, `findOpenPullRequest` returns null (no existing release PR). */
   public findOpenPullRequestResult: PullRequestRef | null = null;
+
+  public mergeStatusResult: PullRequestMergeStatus = { canMerge: true };
+
+  async getPullRequestMergeStatus(): Promise<PullRequestMergeStatus> {
+    this.calls.push('getPullRequestMergeStatus');
+    return this.mergeStatusResult;
+  }
 
   async createPullRequest(): Promise<PullRequestRef> {
     this.calls.push('createPullRequest');
@@ -82,6 +101,7 @@ export class FakeScmClient implements ScmClient {
 
   async mergePullRequest(): Promise<void> {
     this.calls.push('mergePullRequest');
+    if (this.mergePullRequestError) throw this.mergePullRequestError;
   }
 
   async postPullRequestDiscussionComment(): Promise<void> {
@@ -204,6 +224,7 @@ export function createTaskSession(
     sessionId: overrides.sessionId ?? 'session-1',
     providerSessionId: overrides.providerSessionId,
     workingDirectory: overrides.workingDirectory ?? '/tmp/agent-im',
+    worktreePath: overrides.worktreePath,
     branchName: overrides.branchName ?? 'dev/issue-101',
     reviewBranchName: overrides.reviewBranchName,
     pullRequestUrl: overrides.pullRequestUrl,

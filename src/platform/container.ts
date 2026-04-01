@@ -85,6 +85,19 @@ async function createPlatformContainer(): Promise<PlatformContainer> {
   });
 
   await workflowService.resumeKanbanAfterRestart();
+
+  const queuePollRaw = process.env.CTI_KANBAN_QUEUE_POLL_MS ?? '5000';
+  const queuePollMs = parseInt(queuePollRaw, 10);
+  if (Number.isFinite(queuePollMs) && queuePollMs > 0) {
+    const interval = setInterval(() => {
+      void workflowService.processAllDeveloperAssignmentQueues().catch((err) => {
+        logger.warn({ err }, 'Kanban developer queue poll failed');
+      });
+    }, queuePollMs);
+    if (typeof interval.unref === 'function') interval.unref();
+    logger.info({ ms: queuePollMs }, 'Kanban developer queue poll enabled');
+  }
+
   logger.info('Initialized Next.js platform container');
 
   return {

@@ -140,6 +140,45 @@ describe('WorkflowService', () => {
     }
   });
 
+  it('addTaskHistoryComment appends manual history entry', async () => {
+    const { workflowService, project, store } = createHarness();
+    const sprint = createSprint(store, project.id);
+    const taskSession = createTaskSession(store, project.id, sprint.id, {
+      workflowState: 'in_progress',
+    });
+    const next = await workflowService.addTaskHistoryComment(taskSession.id, {
+      content: 'Ship checklist ok',
+      role: 'tester',
+    });
+    assert.equal(next.historyComments?.length, 1);
+    assert.equal(next.historyComments![0].kind, 'manual');
+    assert.equal(next.historyComments![0].content, 'Ship checklist ok');
+    assert.equal(next.historyComments![0].role, 'tester');
+  });
+
+  it('startTesting appends transition history with outgoing developer summary', async () => {
+    const { workflowService, project, store } = createHarness();
+    const sprint = createSprint(store, project.id);
+    const taskSession = createTaskSession(store, project.id, sprint.id, {
+      workflowState: 'in_progress',
+      conversationHistory: [
+        {
+          id: 'a1',
+          role: 'assistant',
+          source: 'developer',
+          content: 'Implemented the API endpoint.',
+          createdAt: new Date().toISOString(),
+        },
+      ],
+    });
+    const next = await workflowService.startTesting(taskSession.id);
+    assert.equal(next.workflowState, 'testing');
+    assert.ok(next.historyComments && next.historyComments.length >= 1);
+    const h = next.historyComments![next.historyComments!.length - 1]!;
+    assert.equal(h.kind, 'transition');
+    assert.ok(h.content.includes('Implemented the API endpoint'));
+  });
+
   it('starts feature testing from development and creates a tester instance', async () => {
     const { workflowService, project, store, instanceManager } = createHarness();
     const sprint = createSprint(store, project.id);
@@ -186,7 +225,7 @@ describe('WorkflowService', () => {
     assert.deepEqual(instanceManager.restarted, ['developer-instance-1']);
   });
 
-  it('closes a regression-tested task, ensures release PR to base, and stops instances', async () => {
+  it('proceedToPendingRelease then closeTask ensures release PR to base and stops instances', async () => {
     const { workflowService, project, store, instanceManager, scmClient } = createHarness();
     const sprint = createSprint(store, project.id);
     const taskSession = createTaskSession(store, project.id, sprint.id, {
@@ -210,44 +249,49 @@ describe('WorkflowService', () => {
       });
     }
 
-    const closedTask = await workflowService.closeTask(taskSession.id);
-    assert.equal(closedTask.workflowState, 'closed');
-    assert.equal(closedTask.releasePullRequestUrl, 'https://example.test/pr/42');
-    assert.equal(closedTask.releasePullRequestNumber, 42);
+    const pending = await workflowService.proceedToPendingRelease(taskSession.id);
+    assert.equal(pending.workflowState, 'pending_release');
+    assert.equal(pending.releasePullRequestUrl, 'https://example.test/pr/42');
+    assert.equal(pending.releasePullRequestNumber, 42);
     assert.ok(scmClient.calls.some((c) => c.startsWith('findOpenPullRequest:')));
     assert.ok(scmClient.calls.includes('createPullRequest'));
-    assert.deepEqual(instanceManager.stopped, [
-      'developer-instance',
-      'reviewer-instance',
-      'tester-instance',
-    ]);
+    assert.ok(scmClient.calls.includes('postPullRequestDiscussionComment'));
+
+    const closedTask = await workflowService.closeTask(taskSession.id);
+    assert.equal(closedTask.workflowState, 'closed');
+    assert.ok(instanceManager.stopped.includes('developer-instance'));
+    assert.ok(instanceManager.stopped.includes('reviewer-instance'));
+    assert.ok(instanceManager.stopped.includes('tester-instance'));
   });
 
-  it('closeTask reuses existing release PR when findOpenPullRequest returns one', async () => {
+  it('proceedToPendingRelease reuses existing release PR when findOpenPullRequest returns one', async () => {
     const { workflowService, project, store, scmClient } = createHarness();
     scmClient.findOpenPullRequestResult = { url: 'https://example.test/pr/existing', number: 99 };
     const sprint = createSprint(store, project.id);
     const taskSession = createTaskSession(store, project.id, sprint.id, {
       workflowState: 'regression_testing',
     });
-    const closedTask = await workflowService.closeTask(taskSession.id);
-    assert.equal(closedTask.workflowState, 'closed');
-    assert.equal(closedTask.releasePullRequestUrl, 'https://example.test/pr/existing');
-    assert.equal(closedTask.releasePullRequestNumber, 99);
+    const pending = await workflowService.proceedToPendingRelease(taskSession.id);
+    assert.equal(pending.workflowState, 'pending_release');
+    assert.equal(pending.releasePullRequestUrl, 'https://example.test/pr/existing');
+    assert.equal(pending.releasePullRequestNumber, 99);
     assert.ok(scmClient.calls.includes('findOpenPullRequest:feature/sprint-alpha->master'));
     assert.ok(!scmClient.calls.includes('createPullRequest'));
+    assert.ok(scmClient.calls.includes('postPullRequestDiscussionComment'));
+    await workflowService.closeTask(taskSession.id);
   });
 
-  it('closeTask skips release PR when sprint branch equals repo base', async () => {
+  it('proceedToPendingRelease skips release PR when sprint branch equals repo base', async () => {
     const { workflowService, project, store, scmClient } = createHarness();
     const sprint = createSprint(store, project.id, { branchName: 'master' });
     const taskSession = createTaskSession(store, project.id, sprint.id, {
       workflowState: 'regression_testing',
     });
-    const closedTask = await workflowService.closeTask(taskSession.id);
-    assert.equal(closedTask.workflowState, 'closed');
-    assert.equal(closedTask.releasePullRequestUrl, undefined);
+    const pending = await workflowService.proceedToPendingRelease(taskSession.id);
+    assert.equal(pending.workflowState, 'pending_release');
+    assert.equal(pending.releasePullRequestUrl, undefined);
     assert.deepEqual(scmClient.calls, []);
+    await workflowService.closeTask(taskSession.id);
   });
 
   it('resolves approvals through the instance manager', () => {
@@ -296,7 +340,7 @@ describe('WorkflowService', () => {
     assert.ok(!sp.taskIds.includes(task.id));
   });
 
-  it('resumeKanbanAfterRestart closes regression task when tester last reply contains CLOSE', async () => {
+  it('resumeKanbanAfterRestart moves regression task to pending_release when last reply has PROCEED_TO_RELEASE or legacy CLOSE', async () => {
     const { workflowService, project, store } = createHarness();
     const sprint = createSprint(store, project.id);
     const iso = new Date().toISOString();
@@ -310,7 +354,33 @@ describe('WorkflowService', () => {
           id: 'e1',
           role: 'assistant',
           source: 'tester',
-          content: 'Regression passed.\nKANBAN_ACTION:CLOSE',
+          content: 'Regression passed.\nKANBAN_ACTION:PROCEED_TO_RELEASE',
+          createdAt: iso,
+        },
+      ],
+    });
+
+    await workflowService.resumeKanbanAfterRestart();
+
+    const t = store.getTaskSession(taskSession.id);
+    assert.equal(t?.workflowState, 'pending_release');
+  });
+
+  it('resumeKanbanAfterRestart closes task when pending_release and last reply contains CLOSE', async () => {
+    const { workflowService, project, store } = createHarness();
+    const sprint = createSprint(store, project.id);
+    const iso = new Date().toISOString();
+    const taskSession = createTaskSession(store, project.id, sprint.id, {
+      workflowState: 'pending_release',
+      role: 'tester',
+      kanbanAgent: 'copilot-test',
+      kanbanAssignees: { 'copilot-test': 'm1' },
+      conversationHistory: [
+        {
+          id: 'e1',
+          role: 'assistant',
+          source: 'tester',
+          content: 'Merged.\nKANBAN_ACTION:CLOSE',
           createdAt: iso,
         },
       ],
@@ -450,7 +520,51 @@ describe('WorkflowService', () => {
     );
   });
 
-  it('assign from todo stays pending_start when dependency task is not closed', async () => {
+  it('queue skips blocked head: later task with satisfied deps starts in same sprint', async () => {
+    const { workflowService, project, store, instanceManager, gitService } = createHarness();
+    const sprint = createSprint(store, project.id);
+    const blocker = await workflowService.createTask({
+      projectId: project.id,
+      sprintId: sprint.id,
+      issueId: 'ISSUE-BLOCK',
+      title: 'Blocker',
+    });
+    const dependent = await workflowService.createTask({
+      projectId: project.id,
+      sprintId: sprint.id,
+      issueId: 'ISSUE-DEP',
+      title: 'Depends on blocker',
+      dependsOnIssueIds: [blocker.issueId],
+    });
+    await workflowService.assignTask({
+      projectId: project.id,
+      sprintId: sprint.id,
+      issueId: dependent.issueId,
+      taskSessionId: dependent.id,
+      kanbanAgent: 'agent-dev',
+    });
+    assert.equal(store.getTaskSession(dependent.id)!.workflowState, 'pending_start');
+
+    const independent = await workflowService.createTask({
+      projectId: project.id,
+      sprintId: sprint.id,
+      issueId: 'ISSUE-IND',
+      title: 'No deps',
+    });
+    const after = await workflowService.assignTask({
+      projectId: project.id,
+      sprintId: sprint.id,
+      issueId: independent.issueId,
+      taskSessionId: independent.id,
+      kanbanAgent: 'agent-dev',
+    });
+    assert.equal(after.workflowState, 'in_progress');
+    assert.equal(store.getTaskSession(dependent.id)!.workflowState, 'pending_start');
+    assert.ok(instanceManager.started.some((s) => s.startsWith('developer:')));
+    assert.ok(gitService.calls.includes('createTaskWorktree'));
+  });
+
+  it('assign from todo stays pending_start when dependency task is not yet pending_release or closed', async () => {
     const { workflowService, project, store, gitService } = createHarness();
     const sprint = createSprint(store, project.id);
     await workflowService.createTask({
@@ -475,6 +589,38 @@ describe('WorkflowService', () => {
     });
     assert.equal(assigned.workflowState, 'pending_start');
     assert.deepEqual(gitService.calls, []);
+  });
+
+  it('assign from todo starts in_progress when dependency task is already pending_release', async () => {
+    const { workflowService, project, store, gitService, instanceManager } = createHarness();
+    const sprint = createSprint(store, project.id);
+    const blocker = await workflowService.createTask({
+      projectId: project.id,
+      sprintId: sprint.id,
+      issueId: 'ISSUE-REL',
+      title: 'In merge lane',
+    });
+    store.upsertTaskSession({
+      ...store.getTaskSession(blocker.id)!,
+      workflowState: 'pending_release',
+    });
+    const dependent = await workflowService.createTask({
+      projectId: project.id,
+      sprintId: sprint.id,
+      issueId: 'ISSUE-AFTER',
+      title: 'After blocker',
+      dependsOnIssueIds: [blocker.issueId],
+    });
+    const assigned = await workflowService.assignTask({
+      projectId: project.id,
+      sprintId: sprint.id,
+      issueId: dependent.issueId,
+      taskSessionId: dependent.id,
+      kanbanAgent: 'agent-dev',
+    });
+    assert.equal(assigned.workflowState, 'in_progress');
+    assert.deepEqual(gitService.calls, ['createTaskWorktree']);
+    assert.ok(instanceManager.started.some((s) => s.startsWith('developer:')));
   });
 
   it('assign from todo starts in_progress when dependency tasks are already closed', async () => {
@@ -593,10 +739,79 @@ describe('WorkflowService', () => {
     const next = await workflowService.startRegressionTesting(taskSession.id);
     assert.equal(next.workflowState, 'regression_testing');
     assert.equal(next.regressionMasterSha, 'sha-default');
-    assert.deepEqual(scmClient.calls, ['mergePullRequest']);
+    assert.deepEqual(scmClient.calls, ['getPullRequestMergeStatus', 'mergePullRequest']);
     assert.ok(instanceManager.started.some((s) => s.startsWith('tester:')));
     assert.ok(gitService.calls.includes('fetchOrigin'));
     assert.ok(gitService.calls.some((c) => c.startsWith('resolveRefSha:')));
+    assert.ok(!gitService.calls.some((c) => c.startsWith('removeTaskWorktree:')));
+  });
+
+  it('removes linked task worktree after successful merge (before fetch)', async () => {
+    const { workflowService, project, store, gitService } = createHarness();
+    const sprint = createSprint(store, project.id);
+    const taskSession = createTaskSession(store, project.id, sprint.id, {
+      workflowState: 'review',
+      pullRequestNumber: 42,
+      pullRequestUrl: 'https://example.test/pr/42',
+      worktreePath: '/tmp/wt-issue-101',
+    });
+    await workflowService.startRegressionTesting(taskSession.id);
+    const idxRemove = gitService.calls.findIndex((c) => c === 'removeTaskWorktree:/tmp/wt-issue-101');
+    const idxFetch = gitService.calls.indexOf('fetchOrigin');
+    assert.ok(idxRemove >= 0);
+    assert.ok(idxRemove < idxFetch);
+  });
+
+  it('merge API 405 not mergeable leaves task in review; reviewer uses REJECT_REVIEW to send back', async () => {
+    const { workflowService, project, store, instanceManager, gitService, scmClient } = createHarness();
+    scmClient.mergePullRequestError = new Error(
+      'GitHub merge PR failed: 405 {"message":"Pull Request is not mergeable","documentation_url":"https://docs.github.com/rest/pulls/pulls#merge-a-pull-request","status":"405"}',
+    );
+    const sprint = createSprint(store, project.id);
+    const taskSession = createTaskSession(store, project.id, sprint.id, {
+      workflowState: 'review',
+      pullRequestNumber: 42,
+      pullRequestUrl: 'https://example.test/pr/42',
+      kanbanAgent: 'claude-review',
+    });
+    await assert.rejects(() => workflowService.startRegressionTesting(taskSession.id), /Merge failed \(PR not mergeable\)/);
+    assert.equal(store.getTaskSession(taskSession.id)!.workflowState, 'review');
+    assert.deepEqual(scmClient.calls, ['getPullRequestMergeStatus', 'mergePullRequest']);
+    assert.ok(!instanceManager.started.some((s) => s.startsWith('developer:')));
+    assert.ok(!gitService.calls.includes('fetchOrigin'));
+    const t = store.getTaskSession(taskSession.id)!;
+    assert.ok(
+      t.conversationHistory.some(
+        (e) => e.source === 'workflow' && e.content.includes('Merge API failed') && e.content.includes('REJECT_REVIEW'),
+      ),
+    );
+  });
+
+  it('does not call merge when host reports PR not merge-ready', async () => {
+    const { workflowService, project, store, scmClient } = createHarness();
+    scmClient.mergeStatusResult = { canMerge: false, reason: 'mergeable_state=dirty (conflicts)' };
+    const sprint = createSprint(store, project.id);
+    const taskSession = createTaskSession(store, project.id, sprint.id, {
+      workflowState: 'review',
+      pullRequestNumber: 42,
+    });
+    await assert.rejects(() => workflowService.startRegressionTesting(taskSession.id), /not ready to merge/);
+    assert.deepEqual(scmClient.calls, ['getPullRequestMergeStatus']);
+    const t = store.getTaskSession(taskSession.id)!;
+    assert.ok(t.conversationHistory.some((e) => e.source === 'workflow' && e.content.includes('Merge was not run')));
+  });
+
+  it('rethrows merge failure when not a not-mergeable error', async () => {
+    const { workflowService, project, store, scmClient } = createHarness();
+    scmClient.mergePullRequestError = new Error('GitHub merge PR failed: 403 forbidden');
+    const sprint = createSprint(store, project.id);
+    const taskSession = createTaskSession(store, project.id, sprint.id, {
+      workflowState: 'review',
+      pullRequestNumber: 42,
+    });
+    await assert.rejects(() => workflowService.startRegressionTesting(taskSession.id), /403/);
+    assert.equal(store.getTaskSession(taskSession.id)!.workflowState, 'review');
+    assert.deepEqual(scmClient.calls, ['getPullRequestMergeStatus', 'mergePullRequest']);
   });
 
   it('detects merge-target advance during regression and refreshes tester', async () => {
@@ -678,10 +893,14 @@ describe('WorkflowService', () => {
     const regressionResult = await workflowService.startRegressionTesting(taskSession.id);
     assert.equal(regressionResult.workflowState, 'regression_testing');
 
+    const pendingResult = await workflowService.proceedToPendingRelease(taskSession.id);
+    assert.equal(pendingResult.workflowState, 'pending_release');
+
     const closeResult = await workflowService.closeTask(taskSession.id);
     assert.equal(closeResult.workflowState, 'closed');
     assert.equal(closeResult.releasePullRequestUrl, 'https://example.test/pr/42');
     assert.ok(scmClient.calls.filter((c) => c === 'createPullRequest').length >= 2);
     assert.ok(scmClient.calls.some((c) => c.startsWith('findOpenPullRequest:')));
+    assert.ok(scmClient.calls.includes('postPullRequestDiscussionComment'));
   });
 });

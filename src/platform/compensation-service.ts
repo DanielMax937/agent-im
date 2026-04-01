@@ -1,4 +1,4 @@
-import { notifyWorkflowStateTransition } from './kanban-transition-notify';
+import { buildTransitionHistoryComment, notifyWorkflowStateTransition } from './kanban-transition-notify';
 import { JsonPlatformStore } from './json-platform-store';
 import type { TaskFailurePayload } from './types';
 import { InstanceManager } from './instance-manager';
@@ -50,6 +50,16 @@ export class CompensationService {
       ...taskSession,
       workflowState: 'in_progress',
       lastError: payload.summary,
+      historyComments: [
+        ...(taskSession.historyComments ?? []),
+        buildTransitionHistoryComment(
+          taskSession,
+          taskSession.workflowState,
+          'in_progress',
+          'tester',
+          '测试失败退回开发',
+        ),
+      ],
     });
 
     const developerInstance = this.store.findAgentInstance(taskSession.id, 'developer');
