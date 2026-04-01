@@ -99,6 +99,9 @@ const IM_CHANNEL_LABELS: Record<ImInstanceChannel, string> = {
   qq: 'QQ',
 };
 
+/** Slug for the Kanban platform data dir — IM bridge start/stop/delete are managed elsewhere. */
+const KANBAN_BRIDGE_SLUG = 'kanban';
+
 function defaultConfig(): Config {
   return {
     runtime: 'claude',
@@ -106,6 +109,7 @@ function defaultConfig(): Config {
     defaultWorkDir: '',
     defaultMode: 'code',
     autoApprove: false,
+    autoLogStreamChunks: true,
     runners: [{ id: 'default', runtime: 'claude', label: '默认' }],
   };
 }
@@ -628,6 +632,12 @@ export default function AdminPage() {
               const showAccordionChevron = canSwitchBridges && displayBridgeList.length > 1;
               const bridgePanelOpen = showAccordionChevron ? isBridgePanelExpanded(b) : true;
               const cfgB = bridgeConfigs[b] ?? defaultConfig();
+              const updateBridgeConfig = (patch: Partial<Config>) => {
+                setBridgeConfigs((prev) => {
+                  const cur = prev[b] ?? defaultConfig();
+                  return { ...prev, [b]: { ...cur, ...patch } };
+                });
+              };
               const updateImBot = (patch: Partial<ImInstanceSpec>) => {
                 setBridgeConfigs((prev) => {
                   const cur = prev[b] ?? defaultConfig();
@@ -691,6 +701,7 @@ export default function AdminPage() {
               const startDisabledB = bridgeActionsLocked || configLoading || anyRunningB;
               const canStopB = anyRunningB;
               const stopDisabledB = bridgeActionsLocked || configLoading || !canStopB;
+              const isKanbanBridgeRow = b === KANBAN_BRIDGE_SLUG;
               return (
               <div
                 key={b}
@@ -1050,6 +1061,48 @@ export default function AdminPage() {
                       onChange={(e) => updateImBot({ autoApprove: e.target.checked })}
                     />
                     <span>自动批准工具（CTI_AUTO_APPROVE）</span>
+                  </label>
+                  <label className="ui-field">
+                    <span>Auto Master 回复超时（毫秒，留空=不限制，CTI_AUTO_MASTER_REPLY_TIMEOUT_MS）</span>
+                    <input
+                      type="number"
+                      min={1}
+                      value={cfgB.autoMasterReplyTimeoutMs ?? ''}
+                      onChange={(e) =>
+                        updateBridgeConfig({
+                          autoMasterReplyTimeoutMs: e.target.value
+                            ? Number(e.target.value)
+                            : undefined,
+                        })
+                      }
+                      placeholder="例如 120000"
+                    />
+                  </label>
+                  <label className="ui-field">
+                    <span>Auto Slave 回复超时（毫秒，留空=不限制，CTI_AUTO_SLAVE_REPLY_TIMEOUT_MS）</span>
+                    <input
+                      type="number"
+                      min={1}
+                      value={cfgB.autoSlaveReplyTimeoutMs ?? ''}
+                      onChange={(e) =>
+                        updateBridgeConfig({
+                          autoSlaveReplyTimeoutMs: e.target.value
+                            ? Number(e.target.value)
+                            : undefined,
+                        })
+                      }
+                      placeholder="例如 120000"
+                    />
+                  </label>
+                  <label className="ui-field ui-check">
+                    <input
+                      type="checkbox"
+                      checked={cfgB.autoLogStreamChunks !== false}
+                      onChange={(e) =>
+                        updateBridgeConfig({ autoLogStreamChunks: e.target.checked })
+                      }
+                    />
+                    <span>Auto 模式记录 SSE 分片日志（关则 CTI_AUTO_LOG_STREAM_CHUNKS=0）</span>
                   </label>
                 </div>
                 <p className="ui-muted ui-small" style={{ marginTop: '0.5rem' }}>
@@ -1568,7 +1621,11 @@ export default function AdminPage() {
             alignItems: 'flex-end',
           }}
         >
-          {!canSwitchBridges ? (
+          {isKanbanBridgeRow ? (
+            <p className="ui-muted ui-small" style={{ margin: 0, flex: '1 1 200px' }}>
+              Kanban 平台目录：仅可保存 <code>config.env</code>；启动与停止由平台进程管理，不在此操作。
+            </p>
+          ) : !canSwitchBridges ? (
             <p className="ui-muted ui-small" style={{ margin: 0, flex: '1 1 200px' }}>
               已设置 <code>CTI_HOME</code> 时由环境固定目录，无法在此新建多个桥接目录。
             </p>
@@ -1592,21 +1649,25 @@ export default function AdminPage() {
           >
             {saving ? '保存中…' : '保存 config.env'}
           </button>
-          <button type="button" className="ui-btn secondary" disabled={startDisabledB} onClick={() => void bridgeAction('start', b)}>
-            启动桥接
-          </button>
-          <button type="button" className="ui-btn secondary" disabled={stopDisabledB} onClick={() => void bridgeAction('stop', b)}>
-            停止桥接
-          </button>
-          {canSwitchBridges ? (
-            <button
-              type="button"
-              className="ui-btn secondary"
-              disabled={saving || newBridging || deletingBridge}
-              onClick={() => void removeBridgeDirectory(b)}
-            >
-              {deletingBridge ? '正在删除…' : '删除桥接'}
-            </button>
+          {!isKanbanBridgeRow ? (
+            <>
+              <button type="button" className="ui-btn secondary" disabled={startDisabledB} onClick={() => void bridgeAction('start', b)}>
+                启动桥接
+              </button>
+              <button type="button" className="ui-btn secondary" disabled={stopDisabledB} onClick={() => void bridgeAction('stop', b)}>
+                停止桥接
+              </button>
+              {canSwitchBridges ? (
+                <button
+                  type="button"
+                  className="ui-btn secondary"
+                  disabled={saving || newBridging || deletingBridge}
+                  onClick={() => void removeBridgeDirectory(b)}
+                >
+                  {deletingBridge ? '正在删除…' : '删除桥接'}
+                </button>
+              ) : null}
+            </>
           ) : null}
         </div>
                   </div>

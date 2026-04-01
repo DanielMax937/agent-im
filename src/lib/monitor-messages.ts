@@ -12,6 +12,8 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { getCtiHome } from '../config';
+import type { BridgeDaemonDiskStatus } from './bridge-daemon-status';
+import { readBridgeDaemonDiskStatus } from './bridge-daemon-status';
 
 const MAX_ENTRIES = 200;
 
@@ -109,6 +111,39 @@ export function readRunnerStatus(ctiHomeOverride?: string): RunnerStatus {
   } catch {
     return { masterBusy: false, slaveBusy: false, updatedAt: 0 };
   }
+}
+
+/**
+ * When the bridge daemon for this home is not running, disk `runner-status.json` can still
+ * show master/slave busy from an aborted turn — treat those sides as idle for the monitor UI.
+ */
+export function runnerStatusIdleWhenBridgeNotRunning(
+  raw: RunnerStatus,
+  disk: BridgeDaemonDiskStatus,
+): RunnerStatus {
+  const masterStopped = !disk.effectiveRunning;
+  const slaveStopped = disk.slave
+    ? !disk.slave.effectiveRunning
+    : !disk.effectiveRunning;
+
+  if (!masterStopped && !slaveStopped) return raw;
+
+  const next: RunnerStatus = {
+    ...raw,
+    masterBusy: masterStopped ? false : raw.masterBusy,
+    slaveBusy: slaveStopped ? false : raw.slaveBusy,
+    masterSince: masterStopped ? undefined : raw.masterSince,
+    slaveSince: slaveStopped ? undefined : raw.slaveSince,
+  };
+  if (next.updatedAt === 0) next.updatedAt = Date.now();
+  return next;
+}
+
+/** Same as {@link readRunnerStatus} but clears stale busy flags when the daemon is stopped. */
+export function readRunnerStatusForMonitor(ctiHomeOverride?: string): RunnerStatus {
+  const raw = readRunnerStatus(ctiHomeOverride);
+  const disk = readBridgeDaemonDiskStatus(ctiHomeOverride);
+  return runnerStatusIdleWhenBridgeNotRunning(raw, disk);
 }
 
 /** Update runner working status (partial merge). */

@@ -157,6 +157,31 @@ export function buildSlaveEnvFromRunner(
   if (spec.autoMaxTurns !== undefined) env.CTI_AUTO_MAX_TURNS = String(spec.autoMaxTurns);
   // Carry forward proxy
   if (parentConfig.proxy) env.CTI_PROXY = parentConfig.proxy;
+  // Auto-mode timeouts + chunk logging (from saved config; else legacy: inherit generating process env)
+  if (
+    parentConfig.autoMasterReplyTimeoutMs !== undefined &&
+    parentConfig.autoMasterReplyTimeoutMs > 0
+  ) {
+    env.CTI_AUTO_MASTER_REPLY_TIMEOUT_MS = String(parentConfig.autoMasterReplyTimeoutMs);
+  } else if (parentConfig.autoMasterReplyTimeoutMs === undefined) {
+    const v = process.env.CTI_AUTO_MASTER_REPLY_TIMEOUT_MS;
+    if (v !== undefined && v !== "") env.CTI_AUTO_MASTER_REPLY_TIMEOUT_MS = v;
+  }
+  if (
+    parentConfig.autoSlaveReplyTimeoutMs !== undefined &&
+    parentConfig.autoSlaveReplyTimeoutMs > 0
+  ) {
+    env.CTI_AUTO_SLAVE_REPLY_TIMEOUT_MS = String(parentConfig.autoSlaveReplyTimeoutMs);
+  } else if (parentConfig.autoSlaveReplyTimeoutMs === undefined) {
+    const v = process.env.CTI_AUTO_SLAVE_REPLY_TIMEOUT_MS;
+    if (v !== undefined && v !== "") env.CTI_AUTO_SLAVE_REPLY_TIMEOUT_MS = v;
+  }
+  if (parentConfig.autoLogStreamChunks === false) {
+    env.CTI_AUTO_LOG_STREAM_CHUNKS = "0";
+  } else if (parentConfig.autoLogStreamChunks === undefined) {
+    const v = process.env.CTI_AUTO_LOG_STREAM_CHUNKS;
+    if (v !== undefined && v !== "") env.CTI_AUTO_LOG_STREAM_CHUNKS = v;
+  }
   // Merge runner-level subprocess env last (overrides)
   if (runner.subprocessEnv) Object.assign(env, runner.subprocessEnv);
   return env;
@@ -321,8 +346,16 @@ export function deleteBridge(slug: string): { ctiHome: string; configPath: strin
   return createNewBridge();
 }
 
-/** Display label: explicit CTI_BOT_NAME, or basename of resolved home. */
+/**
+ * Display label for the active data directory.
+ * When `CTI_HOME` is set (e.g. embedded bridge child), use that directory's basename — do not trust
+ * inherited `CTI_BOT_NAME` from the parent process (it may point at another bridge, e.g. kanban).
+ * Otherwise prefer `CTI_BOT_NAME`, then basename of resolved `getCtiHome()`.
+ */
 export function getCtiBotDisplayName(): string {
+  if (process.env.CTI_HOME?.trim()) {
+    return path.basename(getCtiHome());
+  }
   const fromEnv = process.env.CTI_BOT_NAME?.trim();
   if (fromEnv) return fromEnv;
   return path.basename(getCtiHome());
@@ -980,6 +1013,21 @@ export function loadConfig(ctiHomeOverride?: string): Config {
       ? Number(env.get("CTI_AGENT_MAX_TURNS"))
       : undefined,
     proxy: env.get("CTI_PROXY") || undefined,
+    autoMasterReplyTimeoutMs: (() => {
+      const raw = env.get("CTI_AUTO_MASTER_REPLY_TIMEOUT_MS")?.trim();
+      if (!raw) return undefined;
+      const n = Number.parseInt(raw, 10);
+      return Number.isFinite(n) && n > 0 ? n : undefined;
+    })(),
+    autoSlaveReplyTimeoutMs: (() => {
+      const raw = env.get("CTI_AUTO_SLAVE_REPLY_TIMEOUT_MS")?.trim();
+      if (!raw) return undefined;
+      const n = Number.parseInt(raw, 10);
+      return Number.isFinite(n) && n > 0 ? n : undefined;
+    })(),
+    autoLogStreamChunks: env.has("CTI_AUTO_LOG_STREAM_CHUNKS")
+      ? env.get("CTI_AUTO_LOG_STREAM_CHUNKS")?.trim() !== "0"
+      : true,
     autoApprove: env.get("CTI_AUTO_APPROVE") === "true",
     agentEnvSlots: parseAgentSlotsFromEnv(env),
     runners,
@@ -1062,6 +1110,21 @@ export function saveConfig(config: Config, ctiHomeOverride?: string): void {
   if (config.qqMaxImageSize !== undefined)
     out += formatEnvLine("CTI_QQ_MAX_IMAGE_SIZE", String(config.qqMaxImageSize));
   out += formatEnvLine("CTI_PROXY", config.proxy);
+  if (config.autoMasterReplyTimeoutMs !== undefined && config.autoMasterReplyTimeoutMs > 0) {
+    out += formatEnvLine(
+      "CTI_AUTO_MASTER_REPLY_TIMEOUT_MS",
+      String(config.autoMasterReplyTimeoutMs),
+    );
+  }
+  if (config.autoSlaveReplyTimeoutMs !== undefined && config.autoSlaveReplyTimeoutMs > 0) {
+    out += formatEnvLine(
+      "CTI_AUTO_SLAVE_REPLY_TIMEOUT_MS",
+      String(config.autoSlaveReplyTimeoutMs),
+    );
+  }
+  if (config.autoLogStreamChunks === false) {
+    out += formatEnvLine("CTI_AUTO_LOG_STREAM_CHUNKS", "0");
+  }
 
   // Agent
   out += formatEnvLine("CTI_AGENT_REDIS_URL", config.agentRedisUrl);

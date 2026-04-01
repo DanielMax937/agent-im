@@ -742,6 +742,16 @@ export class TelegramAdapter extends BaseChannelAdapter {
     writeRunnerStatus({ slaveBusy: false, slaveSince: undefined });
   }
 
+  override async recordAutoModeTurnFailed(source: 'master' | 'slave'): Promise<void> {
+    if (!this.autoModeRedis) return;
+    if (source === 'master') {
+      writeRunnerStatus({ masterBusy: false, masterSince: undefined });
+      return;
+    }
+    await this.autoModeRedis.clearSlaveBusy().catch(() => {});
+    writeRunnerStatus({ slaveBusy: false, slaveSince: undefined });
+  }
+
   override async resetAutoModeState(): Promise<string | null> {
     if (!this.autoModeRedis) return null;
 
@@ -933,19 +943,23 @@ export class TelegramAdapter extends BaseChannelAdapter {
         `[telegram-adapter] Master received ${isSlaveReport ? 'slave report' : 'verification walkthrough'}, ` +
           `enqueueing for LLM. len=${msg.text.length}, preview=${JSON.stringify(msg.text.slice(0, 120))}`,
       );
-      writeRunnerStatus({ masterBusy: true, masterSince: Date.now() });
+      writeRunnerStatus({
+        masterBusy: true,
+        masterSince: Date.now(),
+        slaveBusy: false,
+        slaveSince: undefined,
+      });
       this.enqueue(msg);
     } else {
       // User message from Telegram → forward directly to slave, no LLM call
       const chatId = msg.outboundChatId || this.hybridMirrorChatId || this.imGet('telegram_chat_id') || undefined;
+      this.resetAutoModeTaskSessions(msg, chatId);
 
-      // Store user's original goal in session summary for later evaluation.
-      // Truncate the rolling `User goal` block first, then append Kanban (g) supplement — otherwise a
+      // Each Telegram user message starts a brand-new auto-mode task.
+      // Replace the rolling summary instead of appending older task context.
+      // Truncate the `User goal` block first, then append Kanban (g) supplement — otherwise a
       // 2000-char tail cut could strip the supplement (see kanban-redis-supplement).
-      const prevSummary = await rt.getSessionSummary().catch(() => null);
-      const base = prevSummary
-        ? `${prevSummary}\n---\nUser goal: ${msg.text.slice(0, 500)}`
-        : `User goal: ${msg.text.slice(0, 500)}`;
+      const base = `User goal: ${msg.text.slice(0, 500)}`;
       const trimmedBase = truncateRollingSessionSummary(base);
       const withG = appendKanbanRequirementGIfMissing(trimmedBase);
       const finalSummary = truncateSessionSummaryAfterGIfNeeded(withG);
@@ -955,7 +969,12 @@ export class TelegramAdapter extends BaseChannelAdapter {
 
       // Set slave busy
       await rt.setSlaveBusy(600).catch(() => {});
-      writeRunnerStatus({ slaveBusy: true, slaveSince: Date.now() });
+      writeRunnerStatus({
+        masterBusy: false,
+        masterSince: undefined,
+        slaveBusy: true,
+        slaveSince: Date.now(),
+      });
 
       // Build slave handoff with user's original text
       const handoff =
@@ -982,6 +1001,33 @@ export class TelegramAdapter extends BaseChannelAdapter {
 
       console.log(`[telegram-adapter] Auto mode: user message forwarded directly to slave (no master LLM)`);
     }
+  }
+
+  private resetAutoModeTaskSessions(msg: InboundMessage, outboundChatId?: string): void {
+    const rt = this.autoModeRedis;
+    if (!rt) return;
+
+    const masterBinding = router.resolve(msg.address);
+    const prevMasterSessionId = masterBinding.codepilotSessionId;
+    router.recreateBindingSession(masterBinding);
+    const nextMasterBinding = router.resolve(msg.address);
+
+    const slaveAddress = {
+      channelType: this.channelType,
+      chatId: rt.buildSyntheticSlaveChatId(outboundChatId),
+      displayName: `Auto slave ${this.channelType}`,
+    };
+    const slaveBinding = router.resolve(slaveAddress);
+    const prevSlaveSessionId = slaveBinding.codepilotSessionId;
+    router.recreateBindingSession(slaveBinding);
+    const nextSlaveBinding = router.resolve(slaveAddress);
+
+    console.log(
+      `[telegram-adapter] Auto mode: started fresh task sessions, ` +
+        `master=${prevMasterSessionId}→${nextMasterBinding.codepilotSessionId}, ` +
+        `slave=${prevSlaveSessionId}→${nextSlaveBinding.codepilotSessionId}, ` +
+        `mirrorChat=${JSON.stringify(outboundChatId ?? null)}`,
+    );
   }
 
   private async notifyTelegramMasterRedisFetch(msg: InboundMessage): Promise<void> {

@@ -10,6 +10,7 @@ import {
   configForAdminResponse,
   saveConfig,
   loadConfig,
+  invalidateBridgePathsCache,
   normalizeRunnersForChannelType,
   type Config,
 } from '../config';
@@ -173,8 +174,11 @@ describe('configToSettings', () => {
   });
 
   it('maps imBot to bridge_telegram_instances and token keys', () => {
-    process.env.CTI_BOT_NAME = 'work';
+    const savedHome = process.env.CTI_HOME;
     try {
+      delete process.env.CTI_HOME;
+      invalidateBridgePathsCache();
+      process.env.CTI_BOT_NAME = 'work';
       const m = configToSettings({
         ...base,
         enabledChannels: ['telegram'],
@@ -198,6 +202,9 @@ describe('configToSettings', () => {
       assert.equal(m.has('bridge_telegram_work_allowed_runner_ids'), false);
     } finally {
       delete process.env.CTI_BOT_NAME;
+      if (savedHome === undefined) delete process.env.CTI_HOME;
+      else process.env.CTI_HOME = savedHome;
+      invalidateBridgePathsCache();
     }
   });
 });
@@ -217,12 +224,20 @@ describe('mergeConfigPatch imBot', () => {
     },
   };
 
+  let savedCtiHome: string | undefined;
+
   beforeEach(() => {
+    savedCtiHome = process.env.CTI_HOME;
+    delete process.env.CTI_HOME;
+    invalidateBridgePathsCache();
     process.env.CTI_BOT_NAME = 'test-bridge';
   });
 
   afterEach(() => {
     delete process.env.CTI_BOT_NAME;
+    if (savedCtiHome === undefined) delete process.env.CTI_HOME;
+    else process.env.CTI_HOME = savedCtiHome;
+    invalidateBridgePathsCache();
   });
 
   it('clears imBot when patch sends null', () => {
@@ -477,5 +492,45 @@ describe('loadConfig/saveConfig round-trip', () => {
         ),
       /unsupported runtime "unknown-runtime"/i,
     );
+  });
+
+  it('round-trips Auto mode CTI_AUTO_* timeout and chunk-log keys', () => {
+    const base: Config = {
+      runtime: 'claude',
+      enabledChannels: ['telegram'],
+      defaultWorkDir: process.cwd(),
+      defaultMode: 'code',
+      autoMasterReplyTimeoutMs: 111000,
+      autoSlaveReplyTimeoutMs: 222000,
+      autoLogStreamChunks: false,
+      imBot: {
+        id: 'bridge-test',
+        channel: 'telegram',
+        runners: [{ id: 'default', runtime: 'claude' }],
+      },
+    };
+    saveConfig(base, tmpDir);
+    const loaded = loadConfig(tmpDir);
+    assert.equal(loaded.autoMasterReplyTimeoutMs, 111000);
+    assert.equal(loaded.autoSlaveReplyTimeoutMs, 222000);
+    assert.equal(loaded.autoLogStreamChunks, false);
+  });
+
+  it('defaults autoLogStreamChunks to true when CTI_AUTO_LOG_STREAM_CHUNKS is absent', () => {
+    fs.writeFileSync(
+      path.join(tmpDir, 'config.env'),
+      [
+        'CTI_RUNNERS=[{"id":"default","runtime":"claude"}]',
+        'CTI_DEFAULT_RUNNER=default',
+        'CTI_RUNTIME=claude',
+        'CTI_ENABLED_CHANNELS=telegram',
+        `CTI_DEFAULT_WORKDIR=${process.cwd()}`,
+        'CTI_IM_BOT={"id":"t","channel":"telegram","runners":[{"id":"default","runtime":"claude"}]}',
+        '',
+      ].join('\n'),
+      'utf-8',
+    );
+    const loaded = loadConfig(tmpDir);
+    assert.equal(loaded.autoLogStreamChunks, true);
   });
 });

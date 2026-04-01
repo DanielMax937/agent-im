@@ -222,7 +222,12 @@ export async function startBridgeDaemonChild(ctiHomeOverride?: string): Promise<
   const { command, args } = resolveDaemonEntry();
   const child = spawn(command, args, {
     cwd: getProjectRoot(),
-    env: { ...process.env, CTI_HOME: home },
+    env: {
+      ...process.env,
+      CTI_HOME: home,
+      // Override parent CTI_BOT_NAME (e.g. Next/kanban) so child matches this bridge directory.
+      CTI_BOT_NAME: path.basename(home),
+    },
     stdio: 'inherit',
     detached: false,
   });

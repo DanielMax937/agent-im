@@ -22,7 +22,7 @@ import {
   loadConfig,
   normalizeRunners,
 } from '../config';
-import { readMonitorMessages, readRunnerStatus } from '../lib/monitor-messages';
+import { readMonitorMessages, readRunnerStatusForMonitor } from '../lib/monitor-messages';
 import { getLogger } from '../logger';
 import type {
   PendingApprovalRecord,
@@ -818,7 +818,7 @@ export function createPlatformApp(options: CreatePlatformAppOptions): PlatformAp
           if (slug) {
             const home = getCtiHomeForBridgeSlug(slug);
             const data = readMonitorMessages(home);
-            const status = readRunnerStatus(home);
+            const status = readRunnerStatusForMonitor(home);
             // Tag entries with source bridge
             const tag = (e: { text: string; ts: number; bridgeSlug?: string }) => ({ ...e, homeBridge: slug });
             return jsonResponse({ masterOut: data.master.map(tag), slaveOut: data.slave.map(tag), runnerStatus: { [slug]: status } });
@@ -835,14 +835,14 @@ export function createPlatformApp(options: CreatePlatformAppOptions): PlatformAp
               const tag = (e: { text: string; ts: number; bridgeSlug?: string }) => ({ ...e, homeBridge: s });
               masterOut = masterOut.concat(data.master.map(tag));
               slaveOut = slaveOut.concat(data.slave.map(tag));
-              runnerStatus[s] = readRunnerStatus(home);
+              runnerStatus[s] = readRunnerStatusForMonitor(home);
             } catch { /* skip */ }
           }
           if (allSlugs.length === 0) {
             const data = readMonitorMessages();
             masterOut = data.master;
             slaveOut = data.slave;
-            runnerStatus['default'] = readRunnerStatus();
+            runnerStatus['default'] = readRunnerStatusForMonitor();
           }
           masterOut.sort((a, b) => a.ts - b.ts);
           slaveOut.sort((a, b) => a.ts - b.ts);

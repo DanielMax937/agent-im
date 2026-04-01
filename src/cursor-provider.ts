@@ -129,6 +129,17 @@ function extractToolResult(toolCall: Record<string, unknown>): { content: string
   return { content: 'Done', isError: false };
 }
 
+function createAbortError(): Error {
+  const err = new Error('AbortError');
+  err.name = 'AbortError';
+  return err;
+}
+
+function cursorKillGraceMs(): number {
+  const raw = Number(process.env.CTI_CURSOR_KILL_GRACE_MS || '2000');
+  return Number.isFinite(raw) && raw >= 0 ? raw : 2000;
+}
+
 export class CursorProvider implements LLMProvider {
   private spawnFn: SpawnFn;
   private agentPath?: string;
@@ -147,6 +158,12 @@ export class CursorProvider implements LLMProvider {
     return new ReadableStream<string>({
       start(controller) {
         (async () => {
+          let forceKillTimer: NodeJS.Timeout | null = null;
+          const clearForceKillTimer = () => {
+            if (!forceKillTimer) return;
+            clearTimeout(forceKillTimer);
+            forceKillTimer = null;
+          };
           try {
             const agentPath = resolveAgentPath(self.agentPath);
             const args = [
@@ -199,14 +216,26 @@ export class CursorProvider implements LLMProvider {
               stdio: ['pipe', 'pipe', 'pipe'],
             });
 
+            let aborted = params.abortController?.signal.aborted === true;
             if (params.abortController) {
               params.abortController.signal.addEventListener('abort', () => {
+                aborted = true;
                 child.kill('SIGTERM');
+                if (!forceKillTimer) {
+                  forceKillTimer = setTimeout(() => {
+                    try {
+                      child.kill('SIGKILL');
+                    } catch {
+                      /* already exited */
+                    }
+                  }, cursorKillGraceMs());
+                }
               });
             }
 
             const rl = createInterface({ input: child.stdout! });
             let sessionId: string | undefined;
+            let sawResult = false;
             // Dedup buffer: tracks text emitted in the current assistant turn.
             // If a new event's text matches the buffer exactly, it's a
             // duplicate final event — skip it and reset for the next turn.
@@ -274,6 +303,7 @@ export class CursorProvider implements LLMProvider {
                 }
 
                 case 'result': {
+                  sawResult = true;
                   const usage = event.usage as Record<string, unknown> | undefined;
                   controller.enqueue(sseEvent('result', {
                     usage: usage ? {
@@ -301,10 +331,27 @@ export class CursorProvider implements LLMProvider {
             });
 
             await new Promise<void>((resolve, reject) => {
-              child.on('close', (code) => {
+              child.on('close', (code, signal) => {
+                clearForceKillTimer();
+                if (aborted || params.abortController?.signal.aborted) {
+                  reject(createAbortError());
+                  return;
+                }
+                if (signal) {
+                  reject(new Error(
+                    `[cursor-provider] agent exited with signal ${signal}` +
+                    (stderr ? `\n${stderr.slice(0, 500)}` : '')
+                  ));
+                  return;
+                }
                 if (code && code !== 0 && !sessionId) {
                   reject(new Error(
                     `[cursor-provider] agent exited with code ${code}` +
+                    (stderr ? `\n${stderr.slice(0, 500)}` : '')
+                  ));
+                } else if (sessionId && !sawResult) {
+                  reject(new Error(
+                    '[cursor-provider] agent exited before emitting a terminal result event' +
                     (stderr ? `\n${stderr.slice(0, 500)}` : '')
                   ));
                 } else {
@@ -316,6 +363,7 @@ export class CursorProvider implements LLMProvider {
 
             controller.close();
           } catch (err) {
+            clearForceKillTimer();
             const message = err instanceof Error ? err.message : String(err);
             console.error('[cursor-provider] Error:', err instanceof Error ? err.stack || err.message : err);
             try {

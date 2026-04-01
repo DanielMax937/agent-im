@@ -93,6 +93,21 @@ export interface Config {
   agentMaxTurns?: number;
   // HTTP(S) proxy URL for outbound API calls (Telegram, Feishu, etc.)
   proxy?: string;
+  /**
+   * Auto mode: max wall time (ms) for master reply generation. Maps to `CTI_AUTO_MASTER_REPLY_TIMEOUT_MS`.
+   * Omitted or ≤0 = no limit (key not written).
+   */
+  autoMasterReplyTimeoutMs?: number;
+  /**
+   * Auto mode: max wall time (ms) for slave reply generation. Maps to `CTI_AUTO_SLAVE_REPLY_TIMEOUT_MS`.
+   * Omitted or ≤0 = no limit (key not written).
+   */
+  autoSlaveReplyTimeoutMs?: number;
+  /**
+   * Auto mode: log each SSE chunk to the bridge log. `false` writes `CTI_AUTO_LOG_STREAM_CHUNKS=0`.
+   * `true` (default when key absent) omits the key — same as engine treating non-`0` as enabled.
+   */
+  autoLogStreamChunks?: boolean;
   // Auto-approve all tool permission requests without user confirmation
   autoApprove?: boolean;
   /**

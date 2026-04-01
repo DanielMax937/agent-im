@@ -553,6 +553,12 @@ export class AutoModeRedisTransport {
     return `auto:${this.bridgeSlug}:${this.channelType}:${this.slaveRunnerId}`;
   }
 
+  buildSyntheticSlaveChatId(outboundChatId?: string): string {
+    return outboundChatId
+      ? `auto:${this.bridgeSlug}:${this.channelType}:${encodeChatSegment(outboundChatId)}:${this.slaveRunnerId}`
+      : this.syntheticChatId;
+  }
+
   get pollSessionId(): string {
     return this.sessionId;
   }

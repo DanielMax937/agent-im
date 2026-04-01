@@ -18,6 +18,8 @@ import type {
 import { getBridgeContext } from './context';
 import { resolveRunnerForChannelBinding } from './im-instance-settings';
 import crypto from 'crypto';
+import { getLogger, maskSecrets } from '../../logger';
+import { MASTER_VERIFICATION_WALKTHROUGH_PREFIX } from './master-verification-walkthrough';
 
 export interface PermissionRequestInfo {
   permissionRequestId: string;
@@ -44,6 +46,119 @@ export interface ProcessMessageOptions {
   disableLlmStreaming?: boolean;
   /** `runner` = IM chat; `master` = Redis master coordinator; `slave` = Redis slave (tools). */
   deliverySource?: 'runner' | 'master' | 'slave';
+}
+
+interface AutoModeToolTelemetry {
+  id: string;
+  name: string;
+  startedAt: number;
+}
+
+/** Max milliseconds for master/slave auto-mode LLM turns; 0 = disabled. Read from env at call time. */
+function getAutoModeReplyTimeoutMs(
+  deliverySource: ProcessMessageOptions['deliverySource'],
+): number {
+  if (deliverySource === 'master') {
+    const v = Number.parseInt(process.env.CTI_AUTO_MASTER_REPLY_TIMEOUT_MS ?? '', 10);
+    return Number.isFinite(v) && v > 0 ? v : 0;
+  }
+  if (deliverySource === 'slave') {
+    const v = Number.parseInt(process.env.CTI_AUTO_SLAVE_REPLY_TIMEOUT_MS ?? '', 10);
+    return Number.isFinite(v) && v > 0 ? v : 0;
+  }
+  return 0;
+}
+
+/** Log each SSE chunk for auto master/slave unless CTI_AUTO_LOG_STREAM_CHUNKS=0 */
+function shouldLogAutoModeStreamChunks(deliverySource: ProcessMessageOptions['deliverySource']): boolean {
+  if (deliverySource !== 'master' && deliverySource !== 'slave') return false;
+  const off = process.env.CTI_AUTO_LOG_STREAM_CHUNKS?.trim() === '0';
+  return !off;
+}
+
+function logAutoModeSseChunk(
+  deliverySource: 'master' | 'slave',
+  index: number,
+  sseType: string,
+  data: string,
+): void {
+  const preview = maskSecrets(data.length > 220 ? `${data.slice(0, 220)}…` : data);
+  getLogger().info(
+    {
+      event: 'auto_mode_sse_chunk',
+      deliverySource,
+      chunkIndex: index,
+      sseType,
+      dataLen: data.length,
+      preview,
+    },
+    `[conversation-engine] auto-mode SSE chunk #${index} type=${sseType}`,
+  );
+}
+
+function logAutoModeToolStarted(
+  deliverySource: 'master' | 'slave',
+  toolId: string,
+  toolName: string,
+  verificationRound: boolean,
+): void {
+  getLogger().info(
+    {
+      event: 'auto_mode_tool_started',
+      deliverySource,
+      toolId,
+      toolName,
+      verificationRound,
+    },
+    `[conversation-engine] auto-mode tool started ${toolName} (${toolId})`,
+  );
+}
+
+function logAutoModeToolFinished(
+  deliverySource: 'master' | 'slave',
+  toolId: string,
+  toolName: string,
+  durationMs: number | null,
+  isError: boolean,
+  verificationRound: boolean,
+): void {
+  getLogger().info(
+    {
+      event: 'auto_mode_tool_finished',
+      deliverySource,
+      toolId,
+      toolName,
+      durationMs,
+      isError,
+      verificationRound,
+    },
+    `[conversation-engine] auto-mode tool finished ${toolName} (${toolId})`,
+  );
+}
+
+function logAutoModeTurnSummary(payload: {
+  deliverySource: 'master' | 'slave';
+  verificationRound: boolean;
+  completed: boolean;
+  sawStatus: boolean;
+  sawResult: boolean;
+  sawErrorEvent: boolean;
+  textChars: number;
+  toolStarted: number;
+  toolFinished: number;
+  pendingTools: string[];
+  errorMessage?: string;
+}): void {
+  const logFn = payload.completed
+    ? getLogger().info.bind(getLogger())
+    : getLogger().warn.bind(getLogger());
+  logFn(
+    {
+      event: payload.completed ? 'auto_mode_turn_summary' : 'auto_mode_turn_failed_summary',
+      ...payload,
+    },
+    `[conversation-engine] auto-mode turn ${payload.completed ? 'completed' : 'failed'} (${payload.deliverySource})`,
+  );
 }
 
 export interface ConversationResult {
@@ -193,6 +308,24 @@ export async function processMessage(
       }
     }
 
+    const replyTimeoutMs = getAutoModeReplyTimeoutMs(options?.deliverySource);
+    const replyTimeoutState = { fired: false };
+    let replyTimeoutId: ReturnType<typeof setTimeout> | undefined;
+    if (replyTimeoutMs > 0) {
+      replyTimeoutId = setTimeout(() => {
+        replyTimeoutState.fired = true;
+        abortController.abort();
+      }, replyTimeoutMs);
+      getLogger().info(
+        {
+          event: 'auto_mode_reply_timeout_armed',
+          deliverySource: options?.deliverySource,
+          timeoutMs: replyTimeoutMs,
+        },
+        `[conversation-engine] auto-mode reply timeout armed (${replyTimeoutMs}ms)`,
+      );
+    }
+
     let systemPrompt = session?.system_prompt || undefined;
     let allowedTools: string[] | undefined;
     if (options?.deliverySource === 'master') {
@@ -213,29 +346,40 @@ export async function processMessage(
       allowedTools = [];
     }
 
-    const stream = effectiveLlm.streamChat({
-      prompt: text,
-      sessionId,
-      sdkSessionId: binding.sdkSessionId || undefined,
-      model: effectiveModel,
-      systemPrompt,
-      workingDirectory: binding.workingDirectory || session?.working_directory || undefined,
-      abortController,
-      permissionMode,
-      provider: resolvedProvider,
-      conversationHistory: historyMsgs,
-      files,
-      onRuntimeStatusChange: (status: string) => {
-        try { store.setSessionRuntimeStatus(sessionId, status); } catch { /* best effort */ }
-      },
-      disableLlmStreaming: options?.disableLlmStreaming,
-      allowedTools,
-    });
+    try {
+      const stream = effectiveLlm.streamChat({
+        prompt: text,
+        sessionId,
+        sdkSessionId: binding.sdkSessionId || undefined,
+        model: effectiveModel,
+        systemPrompt,
+        workingDirectory: binding.workingDirectory || session?.working_directory || undefined,
+        abortController,
+        permissionMode,
+        provider: resolvedProvider,
+        conversationHistory: historyMsgs,
+        files,
+        onRuntimeStatusChange: (status: string) => {
+          try { store.setSessionRuntimeStatus(sessionId, status); } catch { /* best effort */ }
+        },
+        disableLlmStreaming: options?.disableLlmStreaming,
+        allowedTools,
+      });
 
-    // Consume the stream server-side (replicate collectStreamResponse pattern).
-    // Permission requests are forwarded immediately via the callback during streaming
-    // because the stream blocks until permission is resolved — we can't wait until after.
-    return await consumeStream(stream, sessionId, onPermissionRequest, onPartialText);
+      // Consume the stream server-side (replicate collectStreamResponse pattern).
+      // Permission requests are forwarded immediately via the callback during streaming
+      // because the stream blocks until permission is resolved — we can't wait until after.
+      return await consumeStream(stream, sessionId, onPermissionRequest, onPartialText, {
+        deliverySource: options?.deliverySource,
+        logStreamChunks: shouldLogAutoModeStreamChunks(options?.deliverySource),
+        replyTimeoutState,
+        verificationRound:
+          options?.deliverySource === 'master' &&
+          text.startsWith(MASTER_VERIFICATION_WALKTHROUGH_PREFIX),
+      });
+    } finally {
+      if (replyTimeoutId) clearTimeout(replyTimeoutId);
+    }
   } finally {
     clearInterval(renewalInterval);
     store.releaseSessionLock(sessionId, lockId);
@@ -247,11 +391,19 @@ export async function processMessage(
  * Consume an SSE stream and extract response data.
  * Mirrors the collectStreamResponse() logic from chat/route.ts.
  */
+interface ConsumeStreamOptions {
+  deliverySource?: ProcessMessageOptions['deliverySource'];
+  logStreamChunks?: boolean;
+  replyTimeoutState?: { fired: boolean };
+  verificationRound?: boolean;
+}
+
 async function consumeStream(
   stream: ReadableStream<string>,
   sessionId: string,
   onPermissionRequest?: OnPermissionRequest,
   onPartialText?: OnPartialText,
+  consumeOpts?: ConsumeStreamOptions,
 ): Promise<ConversationResult> {
   const { store } = getBridgeContext();
   const reader = stream.getReader();
@@ -265,6 +417,16 @@ async function consumeStream(
   const seenToolResultIds = new Set<string>();
   const permissionRequests: PermissionRequestInfo[] = [];
   let capturedSdkSessionId: string | null = null;
+  let sseChunkIndex = 0;
+  const ds = consumeOpts?.deliverySource;
+  const logChunks = Boolean(consumeOpts?.logStreamChunks && (ds === 'master' || ds === 'slave'));
+  const verificationRound = consumeOpts?.verificationRound === true;
+  const activeTools = new Map<string, AutoModeToolTelemetry>();
+  let sawStatus = false;
+  let sawResult = false;
+  let sawErrorEvent = false;
+  let toolStartedCount = 0;
+  let toolFinishedCount = 0;
 
   try {
     while (true) {
@@ -280,6 +442,11 @@ async function consumeStream(
           event = JSON.parse(line.slice(6));
         } catch {
           continue;
+        }
+
+        if (logChunks && (ds === 'master' || ds === 'slave')) {
+          sseChunkIndex += 1;
+          logAutoModeSseChunk(ds, sseChunkIndex, event.type, event.data);
         }
 
         switch (event.type) {
@@ -298,6 +465,13 @@ async function consumeStream(
             }
             try {
               const toolData = JSON.parse(event.data);
+              if (ds === 'master' || ds === 'slave') {
+                const toolId = String(toolData.id || `tool-${toolStartedCount + 1}`);
+                const toolName = String(toolData.name || 'Unknown');
+                activeTools.set(toolId, { id: toolId, name: toolName, startedAt: Date.now() });
+                toolStartedCount += 1;
+                logAutoModeToolStarted(ds, toolId, toolName, verificationRound);
+              }
               contentBlocks.push({
                 type: 'tool_use',
                 id: toolData.id,
@@ -311,6 +485,22 @@ async function consumeStream(
           case 'tool_result': {
             try {
               const resultData = JSON.parse(event.data);
+              if (ds === 'master' || ds === 'slave') {
+                const toolId = String(resultData.tool_use_id || `tool-result-${toolFinishedCount + 1}`);
+                const telemetry = activeTools.get(toolId);
+                const toolName = telemetry?.name || 'Unknown';
+                const durationMs = telemetry ? Date.now() - telemetry.startedAt : null;
+                activeTools.delete(toolId);
+                toolFinishedCount += 1;
+                logAutoModeToolFinished(
+                  ds,
+                  toolId,
+                  toolName,
+                  durationMs,
+                  Boolean(resultData.is_error),
+                  verificationRound,
+                );
+              }
               const newBlock = {
                 type: 'tool_result' as const,
                 tool_use_id: resultData.tool_use_id,
@@ -354,6 +544,7 @@ async function consumeStream(
           case 'status': {
             try {
               const statusData = JSON.parse(event.data);
+              sawStatus = true;
               if (statusData.session_id) {
                 capturedSdkSessionId = statusData.session_id;
                 store.updateSdkSessionId(sessionId, statusData.session_id);
@@ -377,11 +568,13 @@ async function consumeStream(
 
           case 'error':
             hasError = true;
+            sawErrorEvent = true;
             errorMessage = event.data || 'Unknown error';
             break;
 
           case 'result': {
             try {
+              sawResult = true;
               const resultData = JSON.parse(event.data) as {
                 usage?: TokenUsage;
                 is_error?: boolean;
@@ -448,6 +641,21 @@ async function consumeStream(
       .join('')
       .trim();
 
+    if (ds === 'master' || ds === 'slave') {
+      logAutoModeTurnSummary({
+        deliverySource: ds,
+        verificationRound,
+        completed: true,
+        sawStatus,
+        sawResult,
+        sawErrorEvent,
+        textChars: responseText.length,
+        toolStarted: toolStartedCount,
+        toolFinished: toolFinishedCount,
+        pendingTools: Array.from(activeTools.values()).map((tool) => `${tool.name}:${tool.id}`),
+      });
+    }
+
     return {
       responseText,
       tokenUsage,
@@ -480,11 +688,40 @@ async function consumeStream(
     const isAbort = e instanceof DOMException && e.name === 'AbortError'
       || e instanceof Error && e.name === 'AbortError';
 
+    let abortMsg = 'Task stopped by user';
+    if (isAbort && consumeOpts?.replyTimeoutState?.fired) {
+      const envKey =
+        consumeOpts.deliverySource === 'master'
+          ? 'CTI_AUTO_MASTER_REPLY_TIMEOUT_MS'
+          : 'CTI_AUTO_SLAVE_REPLY_TIMEOUT_MS';
+      abortMsg = `Auto mode reply timeout (${consumeOpts.deliverySource} runner exceeded ${envKey})`;
+      getLogger().warn(
+        { event: 'auto_mode_reply_timeout', deliverySource: consumeOpts.deliverySource },
+        `[conversation-engine] ${abortMsg}`,
+      );
+    }
+
+    if (ds === 'master' || ds === 'slave') {
+      logAutoModeTurnSummary({
+        deliverySource: ds,
+        verificationRound,
+        completed: false,
+        sawStatus,
+        sawResult,
+        sawErrorEvent,
+        textChars: currentText.trim().length,
+        toolStarted: toolStartedCount,
+        toolFinished: toolFinishedCount,
+        pendingTools: Array.from(activeTools.values()).map((tool) => `${tool.name}:${tool.id}`),
+        errorMessage: isAbort ? abortMsg : (e instanceof Error ? e.message : 'Stream consumption error'),
+      });
+    }
+
     return {
       responseText: '',
       tokenUsage,
       hasError: true,
-      errorMessage: isAbort ? 'Task stopped by user' : (e instanceof Error ? e.message : 'Stream consumption error'),
+      errorMessage: isAbort ? abortMsg : (e instanceof Error ? e.message : 'Stream consumption error'),
       permissionRequests,
       sdkSessionId: capturedSdkSessionId,
     };

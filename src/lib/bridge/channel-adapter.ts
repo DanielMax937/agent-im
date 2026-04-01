@@ -145,6 +145,11 @@ export abstract class BaseChannelAdapter {
     return;
   }
 
+  /** After an auto-mode master/slave turn fails or times out, clear adapter-specific busy state. */
+  async recordAutoModeTurnFailed(_source: 'master' | 'slave'): Promise<void> {
+    return;
+  }
+
   /**
    * Reset auto mode Redis state and restart slave process.
    * Returns a human-readable status message.  `null` means auto mode is not active.

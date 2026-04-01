@@ -178,4 +178,12 @@ describe('bridge admin status (real dirs under CTI_BASE)', () => {
     assert.equal(afterEmb['bridge-beta'].running, false);
     assert.equal(afterEmb['bridge-alpha'].running, true);
   });
+
+  it('with CTI_HOME set, ignores inherited CTI_BOT_NAME from parent (e.g. kanban) for display', () => {
+    ensureBridgeHome('bridge-alpha', base);
+    process.env.CTI_HOME = path.join(base, 'bridge-alpha');
+    process.env.CTI_BOT_NAME = 'kanban';
+    invalidateBridgePathsCache();
+    assert.equal(getCtiBotDisplayName(), 'bridge-alpha');
+  });
 });

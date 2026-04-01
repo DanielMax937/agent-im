@@ -55,6 +55,38 @@ function createMockSpawn(lines: Record<string, unknown>[], exitCode = 0, stderrT
   };
 }
 
+function createAbortAwareSpawn() {
+  return (_cmd: string, _args: string[], _opts: SpawnOptions): ChildProcess => {
+    const stdout = new Readable({ read() {} });
+    const stderr = new Readable({ read() {} });
+    const child = Object.assign(new EventEmitter(), {
+      stdout,
+      stderr,
+      stdin: new Writable({ write(_, __, cb) { cb(); } }),
+      kill: (_signal?: string) => {
+        setImmediate(() => {
+          stdout.push(null);
+          stderr.push(null);
+          (child as EventEmitter).emit('close', 143, 'SIGTERM');
+        });
+        return true;
+      },
+      pid: 99998,
+    }) as unknown as ChildProcess;
+
+    setImmediate(() => {
+      stdout.push(JSON.stringify({ type: 'system', subtype: 'init', session_id: 'abc' }) + '\n');
+      stdout.push(JSON.stringify({
+        type: 'assistant',
+        message: { role: 'assistant', content: [{ type: 'text', text: 'Working...' }] },
+        session_id: 'abc',
+      }) + '\n');
+    });
+
+    return child;
+  };
+}
+
 describe('CursorProvider', () => {
   it('is an LLMProvider (has streamChat method)', async () => {
     const { CursorProvider } = await import('../cursor-provider');
@@ -242,5 +274,61 @@ describe('CursorProvider stream-json event mapping', () => {
     assert.ok(!error, 'Should not emit error when session was established');
     const result = events.find(e => e.type === 'result');
     assert.ok(result);
+  });
+
+  it('emits error when session exits without a terminal result event', async () => {
+    const { CursorProvider } = await import('../cursor-provider');
+    const mockSpawn = createMockSpawn([
+      { type: 'system', subtype: 'init', session_id: 'abc' },
+      {
+        type: 'assistant',
+        message: { role: 'assistant', content: [{ type: 'text', text: 'Starting verification...' }] },
+        session_id: 'abc',
+      },
+      {
+        type: 'tool_call', subtype: 'started', call_id: 'tool-1',
+        tool_call: { shellToolCall: { args: { command: 'curl -I https://example.com' } } },
+        session_id: 'abc',
+      },
+      {
+        type: 'tool_call', subtype: 'completed', call_id: 'tool-1',
+        tool_call: {
+          shellToolCall: {
+            args: { command: 'curl -I https://example.com' },
+            result: { success: { stdout: 'HTTP/2 200', exitCode: 0 } },
+          },
+        },
+        session_id: 'abc',
+      },
+    ]);
+
+    const provider = new CursorProvider(mockSpawn);
+    const stream = provider.streamChat({ prompt: 'test', sessionId: 's1' });
+    const chunks = await collectStream(stream);
+    const events = parseSSEChunks(chunks);
+
+    const error = events.find(e => e.type === 'error');
+    assert.ok(error);
+    assert.ok(error!.data.includes('terminal result event'));
+  });
+
+  it('emits AbortError when aborted after session start', async () => {
+    const { CursorProvider } = await import('../cursor-provider');
+    const abortController = new AbortController();
+    const provider = new CursorProvider(createAbortAwareSpawn());
+    const stream = provider.streamChat({
+      prompt: 'test',
+      sessionId: 's1',
+      abortController,
+    });
+
+    setTimeout(() => abortController.abort(), 5);
+
+    const chunks = await collectStream(stream);
+    const events = parseSSEChunks(chunks);
+
+    const error = events.find(e => e.type === 'error');
+    assert.ok(error);
+    assert.equal(error!.data, 'AbortError');
   });
 });

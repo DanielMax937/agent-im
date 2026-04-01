@@ -59,6 +59,16 @@ function effectiveInboundChatId(msg: InboundMessage): string {
   return msg.outboundChatId ?? msg.address.chatId;
 }
 
+function effectiveReplyToMessageId(msg: InboundMessage): string | undefined {
+  // Auto-mode master/slave messages are synthesized from Redis queues. Their
+  // `messageId` values are bridge-local IDs, not real Telegram message IDs, so
+  // mirroring them back as replies can thread onto unrelated messages.
+  if (msg.deliverySource === 'master' || msg.deliverySource === 'slave') {
+    return undefined;
+  }
+  return msg.messageId;
+}
+
 function applyHybridDeliveryPrefix(adapter: BaseChannelAdapter, msg: InboundMessage, text: string): string {
   if (!msg.deliverySource) return text;
   const parsed = parseImBaseAndInstanceId(adapter.channelType);
@@ -534,6 +544,7 @@ async function handleMessage(
   const { store } = getBridgeContext();
   const outAddr = effectiveInboundAddress(msg);
   const outChat = effectiveInboundChatId(msg);
+  const replyToMessageId = effectiveReplyToMessageId(msg);
 
   // Update lastMessageAt for this adapter
   const adapterState = getState();
@@ -801,7 +812,7 @@ async function handleMessage(
           perm.toolInput,
           binding.codepilotSessionId,
           perm.suggestions,
-          msg.messageId,
+          replyToMessageId,
         );
       },
       taskAbort.signal,
@@ -817,6 +828,9 @@ async function handleMessage(
     if (msg.deliverySource === 'slave' && !result.hasError) {
       await adapter.recordAutoModeSlaveTurnCompleted?.();
     }
+    if (result.hasError && (msg.deliverySource === 'master' || msg.deliverySource === 'slave')) {
+      await adapter.recordAutoModeTurnFailed?.(msg.deliverySource);
+    }
 
     // Send response text — render via channel-appropriate format
     if (result.responseText) {
@@ -825,7 +839,7 @@ async function handleMessage(
         outAddr,
         applyHybridDeliveryPrefix(adapter, msg, result.responseText),
         binding.codepilotSessionId,
-        msg.messageId,
+        replyToMessageId,
         msg.deliverySource,
         msg.deliverySource === 'master' ? binding.runnerProfileId : undefined,
       );
@@ -845,7 +859,7 @@ async function handleMessage(
           `<b>Error:</b> ${escapeHtml(result.errorMessage?.trim() || 'Unknown error')}`,
         ),
         parseMode: 'HTML',
-        replyToMessageId: msg.messageId,
+        replyToMessageId,
       };
       await deliver(adapter, errorResponse);
     }
