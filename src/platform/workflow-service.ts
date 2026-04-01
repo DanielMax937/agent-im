@@ -1,6 +1,17 @@
 import crypto from 'node:crypto';
 import path from 'node:path';
 
+import { loadConfig, resolveRuntimeForPlatformInstance } from '../config';
+import { PendingPermissions } from '../permission-gateway';
+import { resolveProvider } from '../runtime-provider';
+import {
+  pickRunnerForCodexSenior,
+  parsePreviewBatchSpecBody,
+  runBatchTaskSpecLlm,
+  normalizeBatchTaskPlan,
+  type BatchTaskPlanItem,
+} from './batch-task-spec';
+import { BOARD_BRAINSTORM_SYSTEM, type BoardBrainstormChatInput } from './board-brainstorm';
 import { CompensationService } from './compensation-service';
 import { getKanbanLogger } from './kanban-logger';
 import { preferredSkillsForProjectLane, resolveKanbanAgent } from './kanban-agents';
@@ -1708,6 +1719,130 @@ export class WorkflowService {
       instances: this.deps.store.listAgentInstances(),
       tasksByProject,
     };
+  }
+
+  /**
+   * Uses the **codex-senior** (高级开发) runner to turn pasted text into a task plan with dependencies.
+   */
+  async previewBatchTasksFromSpec(input: unknown): Promise<{ tasks: BatchTaskPlanItem[] }> {
+    const { projectId, sprintId, rawText } = parsePreviewBatchSpecBody(input);
+    const project = this.requireProject(projectId);
+    this.assertProjectLocalRepositoryPath(project);
+    const sprint = this.requireSprint(sprintId);
+    if (sprint.projectId !== project.id) {
+      throw new Error('Sprint does not belong to the selected project');
+    }
+    const config = loadConfig();
+    const runner = pickRunnerForCodexSenior(project, config);
+    if (!runner) {
+      throw new Error(
+        'No runner for batch spec: configure CTI_RUNNERS with a Codex runtime, or set project Kanban role runner for codex-senior.',
+      );
+    }
+    const eff = resolveRuntimeForPlatformInstance(config, {
+      runtime: resolveKanbanAgent('codex-senior').runtime,
+      runtimeProfileId: runner.id,
+    });
+    const pendingPermissions = new PendingPermissions();
+    const provider = await resolveProvider({
+      config,
+      pendingPermissions,
+      runtimeOverride: eff,
+      runner,
+      /** Headless JSON extraction; allow runner to complete without blocking on tool approval. */
+      autoApproveOverride: true,
+    });
+    const tasks = await runBatchTaskSpecLlm({
+      provider,
+      rawText,
+      workingDirectory: project.repository.localPath,
+    });
+    return { tasks };
+  }
+
+  /** Persists a validated batch plan as **todo** tasks (dependencies refer to earlier rows by issue id). */
+  async createTasksFromBatchPlan(input: {
+    projectId: string;
+    sprintId: string;
+    tasks: BatchTaskPlanItem[];
+  }): Promise<{ created: TaskSession[] }> {
+    const project = this.requireProject(input.projectId);
+    const sprint = this.requireSprint(input.sprintId);
+    if (sprint.projectId !== project.id) {
+      throw new Error('Sprint does not belong to the selected project');
+    }
+    const plan = normalizeBatchTaskPlan({ tasks: input.tasks });
+    const created: TaskSession[] = [];
+    const issueIdsByIndex: string[] = [];
+    for (let i = 0; i < plan.length; i++) {
+      const item = plan[i]!;
+      const dependsOnIssueIds = item.dependsOnIndices.map((j) => {
+        const id = issueIdsByIndex[j];
+        if (!id) {
+          throw new Error(`Invalid plan: missing issue id for dependency index ${j}`);
+        }
+        return id;
+      });
+      const task = await this.createTask({
+        projectId: input.projectId,
+        sprintId: input.sprintId,
+        title: item.title,
+        ...(dependsOnIssueIds.length ? { dependsOnIssueIds } : {}),
+      });
+      created.push(task);
+      issueIdsByIndex[i] = task.issueId;
+    }
+    return { created };
+  }
+
+  /**
+   * Streamed chat with **codex-senior** (高级开发), guided by the brainstorming skill — board UI only (no task).
+   */
+  async streamBoardBrainstormChat(input: BoardBrainstormChatInput): Promise<ReadableStream<string>> {
+    const project = this.requireProject(input.projectId);
+    this.assertProjectLocalRepositoryPath(project);
+    const config = loadConfig();
+    const runner = pickRunnerForCodexSenior(project, config);
+    if (!runner) {
+      throw new Error(
+        'No runner for board brainstorm: configure CTI_RUNNERS with a Codex runtime, or set project Kanban role runner for codex-senior.',
+      );
+    }
+    const eff = resolveRuntimeForPlatformInstance(config, {
+      runtime: resolveKanbanAgent('codex-senior').runtime,
+      runtimeProfileId: runner.id,
+    });
+    const pendingPermissions = new PendingPermissions();
+    const provider = await resolveProvider({
+      config,
+      pendingPermissions,
+      runtimeOverride: eff,
+      runner,
+      /** Never auto-approve tool runs in plan-only board chat */
+      autoApproveOverride: false,
+    });
+    const laneHints = preferredSkillsForProjectLane(project, 'codex-senior');
+    const systemPrompt = [
+      BOARD_BRAINSTORM_SYSTEM,
+      '',
+      'Lane skill hints (optional):',
+      ...laneHints.map((h) => `- ${h}`),
+    ].join('\n');
+
+    return provider.streamChat({
+      prompt: input.message,
+      sessionId: input.sessionId,
+      sdkSessionId: input.sdkSessionId,
+      systemPrompt,
+      workingDirectory: project.repository.localPath,
+      conversationHistory: input.conversationHistory,
+      disableLlmStreaming: false,
+      /** Brainstorm chat: plan only — Codex OS sandbox blocks workspace writes */
+      permissionMode: 'plan',
+      sandboxMode: 'read-only',
+      networkAccessEnabled: false,
+      webSearchMode: 'disabled',
+    });
   }
 
   private async appendWorkflowComment(taskSessionId: string, content: string): Promise<void> {

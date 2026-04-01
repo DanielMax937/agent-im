@@ -32,4 +32,18 @@ describe('consumeAgentStream', () => {
     assert.equal(r.responseText, 'ok');
     assert.equal(r.hasError, false);
   });
+
+  it('appends raw stream chunks when rawStreamChunks is provided', async () => {
+    const stream = new ReadableStream<string>({
+      start(controller) {
+        controller.enqueue(sseEvent('text', 'ok'));
+        controller.close();
+      },
+    });
+    const raw: string[] = [];
+    const r = await consumeAgentStream(stream, { rawStreamChunks: raw });
+    assert.equal(r.responseText, 'ok');
+    assert.equal(raw.length, 1);
+    assert.ok(raw[0]!.includes('data:'));
+  });
 });

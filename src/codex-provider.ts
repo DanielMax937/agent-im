@@ -197,6 +197,11 @@ export class CodexProvider implements LLMProvider {
               ...(params.workingDirectory ? { workingDirectory: params.workingDirectory } : {}),
               skipGitRepoCheck: true,
               approvalPolicy,
+              ...(params.sandboxMode ? { sandboxMode: params.sandboxMode } : {}),
+              ...(params.networkAccessEnabled !== undefined
+                ? { networkAccessEnabled: params.networkAccessEnabled }
+                : {}),
+              ...(params.webSearchMode ? { webSearchMode: params.webSearchMode } : {}),
             };
 
             // Build input: Codex SDK UserInput supports { type: "text" } and

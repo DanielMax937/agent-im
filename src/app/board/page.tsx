@@ -71,6 +71,37 @@ function sortConversationEntries(entries: TaskConversationEntry[]): TaskConversa
   return [...entries].sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime());
 }
 
+/** 将需求讨论对话整理为「批量创建」batch-spec API 的输入文本 */
+function formatBrainstormTranscriptForBatch(
+  messages: { role: 'user' | 'assistant'; content: string }[],
+): string {
+  const parts = messages
+    .map((m) => {
+      const t = m.content.trim();
+      if (!t) return null;
+      const label = m.role === 'user' ? '【用户】' : '【高级开发】';
+      return `${label}\n${t}`;
+    })
+    .filter((x): x is string => x !== null);
+  if (parts.length === 0) return '';
+  const header =
+    '以下为需求讨论记录。请据此拆分为可执行的 Kanban 任务并标注依赖关系（后序任务依赖先序任务）。\n\n';
+  return header + parts.join('\n\n---\n\n');
+}
+
+/** Parse `{ error?: string }` from a failed fetch without consuming the body twice. */
+async function errorMessageFromApiResponse(res: Response): Promise<string> {
+  const text = await res.text();
+  try {
+    const j = JSON.parse(text) as { error?: unknown };
+    if (typeof j.error === 'string' && j.error.trim()) return j.error.trim();
+  } catch {
+    /* not JSON */
+  }
+  if (text.trim()) return text.trim();
+  return `HTTP ${res.status}`;
+}
+
 function formatAssigneeCell(
   kind: KanbanAgentKind,
   memberId: string | undefined,
@@ -137,6 +168,22 @@ export default function BoardPage() {
   /** 合并主干列：批量标记完成 */
   const [bulkCloseOpen, setBulkCloseOpen] = useState(false);
   const [bulkCloseSelectedTaskIds, setBulkCloseSelectedTaskIds] = useState<string[]>([]);
+  /** 批量创建：粘贴 → 高级开发（codex-senior）生成任务列表 → 写入待办 */
+  const [batchCreateOpen, setBatchCreateOpen] = useState(false);
+  const [batchCreateText, setBatchCreateText] = useState('');
+  const [batchPreviewTasks, setBatchPreviewTasks] = useState<
+    { title: string; dependsOnIndices: number[] }[] | null
+  >(null);
+  const [batchPreviewLoading, setBatchPreviewLoading] = useState(false);
+  /** 高级开发：需求讨论（brainstorming + Codex 流式） */
+  const [brainstormOpen, setBrainstormOpen] = useState(false);
+  const [brainstormSessionId, setBrainstormSessionId] = useState('');
+  const [brainstormSdkSessionId, setBrainstormSdkSessionId] = useState<string | null>(null);
+  const [brainstormMessages, setBrainstormMessages] = useState<
+    { role: 'user' | 'assistant'; content: string }[]
+  >([]);
+  const [brainstormInput, setBrainstormInput] = useState('');
+  const [brainstormStreaming, setBrainstormStreaming] = useState(false);
   /** 待办领取弹窗：当前选中的任务；null 表示关闭 */
   const [assignModalTask, setAssignModalTask] = useState<TaskSession | null>(null);
   const [modalHandoff, setModalHandoff] = useState('');
@@ -164,6 +211,12 @@ export default function BoardPage() {
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  /** 表单未选项目时退回列表第一项；需求讨论等不必先在表单里点选项目 */
+  const effectiveProjectId = useMemo(
+    () => (createProjectId.trim() ? createProjectId : projects[0]?.id ?? ''),
+    [createProjectId, projects],
+  );
 
   const modalTodoAssignOptions = useMemo(() => {
     if (!laneMembersByKind) return [];
@@ -239,8 +292,8 @@ export default function BoardPage() {
   }, [silentRefreshTasks]);
 
   useEffect(() => {
-    if (createProjectId) void loadSprints(createProjectId);
-  }, [createProjectId, loadSprints]);
+    if (effectiveProjectId) void loadSprints(effectiveProjectId);
+  }, [effectiveProjectId, loadSprints]);
 
   const loadDependencyPickerTasks = useCallback(async (projectId: string) => {
     if (!projectId) {
@@ -258,8 +311,8 @@ export default function BoardPage() {
   }, []);
 
   useEffect(() => {
-    void loadDependencyPickerTasks(createProjectId);
-  }, [createProjectId, loadDependencyPickerTasks]);
+    void loadDependencyPickerTasks(effectiveProjectId);
+  }, [effectiveProjectId, loadDependencyPickerTasks]);
 
   useEffect(() => {
     if (!createDepsDropdownOpen) return;
@@ -493,6 +546,194 @@ export default function BoardPage() {
   function toggleBulkCloseSelectAll() {
     const allIds = pendingReleaseColumnTasks.map((t) => t.id);
     setBulkCloseSelectedTaskIds((prev) => (prev.length === allIds.length ? [] : allIds));
+  }
+
+  /** 与「批量创建」共用：调用 batch-spec preview API。成功返回 true。 */
+  async function runBatchSpecPreviewFromRaw(raw: string): Promise<boolean> {
+    if (!effectiveProjectId || !sprintId) {
+      setError('请先选择项目与迭代');
+      return false;
+    }
+    const trimmed = raw.trim();
+    if (!trimmed) {
+      setError('请粘贴需求或任务说明');
+      return false;
+    }
+    setBatchPreviewLoading(true);
+    setError(null);
+    setBatchPreviewTasks(null);
+    try {
+      const res = await fetch('/api/workflows/tasks/batch-spec/preview', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          projectId: effectiveProjectId,
+          sprintId,
+          rawText: trimmed,
+        }),
+      });
+      if (!res.ok) {
+        throw new Error(await errorMessageFromApiResponse(res));
+      }
+      const data = (await res.json()) as { tasks?: { title: string; dependsOnIndices?: number[] }[] };
+      if (!data.tasks?.length) {
+        throw new Error('未生成任何任务');
+      }
+      setBatchPreviewTasks(
+        data.tasks.map((t) => ({
+          title: t.title,
+          dependsOnIndices: Array.isArray(t.dependsOnIndices) ? t.dependsOnIndices : [],
+        })),
+      );
+      return true;
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+      return false;
+    } finally {
+      setBatchPreviewLoading(false);
+    }
+  }
+
+  async function runBatchCreatePreview() {
+    await runBatchSpecPreviewFromRaw(batchCreateText);
+  }
+
+  /** 需求讨论里确认方案后：用同一条 batch-spec 流程生成任务预览，并打开「批量创建」弹窗以便「创建到待办」 */
+  async function confirmBrainstormPlanAndOpenBatch() {
+    if (brainstormStreaming || busy || batchPreviewLoading) return;
+    if (!effectiveProjectId || !sprintId) {
+      setError('请先选择项目与迭代');
+      return;
+    }
+    const rawText = formatBrainstormTranscriptForBatch(brainstormMessages);
+    if (!rawText.trim()) {
+      setError('请先与助手讨论并确认方案（对话内容不能为空）');
+      return;
+    }
+    setBatchCreateText(rawText);
+    const ok = await runBatchSpecPreviewFromRaw(rawText);
+    if (ok) {
+      setBrainstormOpen(false);
+      setBatchCreateOpen(true);
+    }
+  }
+
+  async function sendBrainstormMessage() {
+    const text = brainstormInput.trim();
+    if (!text || !effectiveProjectId || brainstormStreaming) return;
+    const priorHistory = brainstormMessages;
+    setBrainstormInput('');
+    setBrainstormStreaming(true);
+    setError(null);
+    setBrainstormMessages((m) => [...m, { role: 'user', content: text }, { role: 'assistant', content: '' }]);
+    let assistantAcc = '';
+    try {
+      const res = await fetch('/api/workflows/board-brainstorm/chat', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          projectId: effectiveProjectId,
+          sessionId: brainstormSessionId,
+          sdkSessionId: brainstormSdkSessionId ?? undefined,
+          message: text,
+          conversationHistory: priorHistory,
+        }),
+      });
+      if (!res.ok) {
+        setBrainstormMessages((m) => m.slice(0, -2));
+        throw new Error(await errorMessageFromApiResponse(res));
+      }
+      const reader = res.body?.getReader();
+      if (!reader) {
+        setBrainstormMessages((m) => m.slice(0, -2));
+        throw new Error('No response body');
+      }
+      const dec = new TextDecoder();
+      let buffer = '';
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += dec.decode(value, { stream: true });
+        const lines = buffer.split('\n');
+        buffer = lines.pop() ?? '';
+        for (const line of lines) {
+          if (!line.startsWith('data: ')) continue;
+          let event: { type: string; data: string };
+          try {
+            event = JSON.parse(line.slice(6)) as { type: string; data: string };
+          } catch {
+            continue;
+          }
+          if (event.type === 'text') {
+            assistantAcc += event.data;
+            setBrainstormMessages((prev) => {
+              const next = [...prev];
+              const last = next[next.length - 1];
+              if (last?.role === 'assistant') {
+                next[next.length - 1] = { role: 'assistant', content: assistantAcc };
+              }
+              return next;
+            });
+          }
+          if (event.type === 'error') {
+            throw new Error(event.data || 'Stream error');
+          }
+          if (event.type === 'status' || event.type === 'result') {
+            try {
+              const payload = JSON.parse(event.data) as { session_id?: string };
+              if (payload.session_id) {
+                setBrainstormSdkSessionId(payload.session_id);
+              }
+            } catch {
+              /* ignore */
+            }
+          }
+        }
+      }
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      setError(msg);
+      setBrainstormMessages((m) => {
+        if (m.length >= 2 && m[m.length - 1]?.role === 'assistant' && m[m.length - 2]?.role === 'user') {
+          return m.slice(0, -2);
+        }
+        return m;
+      });
+    } finally {
+      setBrainstormStreaming(false);
+    }
+  }
+
+  async function commitBatchCreateTasks() {
+    if (!effectiveProjectId || !sprintId || !batchPreviewTasks?.length) {
+      setError('请先生成任务列表');
+      return;
+    }
+    setBusy(true);
+    setError(null);
+    try {
+      const res = await fetch('/api/workflows/tasks/batch-spec/create', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          projectId: effectiveProjectId,
+          sprintId,
+          tasks: batchPreviewTasks,
+        }),
+      });
+      if (!res.ok) {
+        throw new Error(await errorMessageFromApiResponse(res));
+      }
+      setBatchCreateOpen(false);
+      setBatchCreateText('');
+      setBatchPreviewTasks(null);
+      await load();
+      await loadDependencyPickerTasks(effectiveProjectId);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
   }
 
   async function confirmBulkCloseFromPendingRelease() {
@@ -801,8 +1042,7 @@ export default function BoardPage() {
         },
       );
       if (!res.ok) {
-        const errBody = (await res.json().catch(() => null)) as { error?: string } | null;
-        throw new Error(errBody?.error ?? (await res.text()));
+        throw new Error(await errorMessageFromApiResponse(res));
       }
       setManualModalTask(null);
       setManualQueueText('');
@@ -1026,7 +1266,56 @@ export default function BoardPage() {
       </section>
 
       <section className="ui-panel" style={{ marginBottom: '1.5rem' }}>
-        <h2 className="ui-h2">新建任务（进入待办）</h2>
+        <div
+          style={{
+            display: 'flex',
+            justifyContent: 'space-between',
+            alignItems: 'center',
+            flexWrap: 'wrap',
+            gap: '0.75rem',
+            marginBottom: '0.5rem',
+          }}
+        >
+          <h2 className="ui-h2" style={{ margin: 0 }}>
+            新建任务（进入待办）
+          </h2>
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.5rem', alignItems: 'center' }}>
+            <button
+              type="button"
+              className="ui-btn secondary"
+              disabled={busy || !effectiveProjectId}
+              title={!effectiveProjectId ? '请先添加至少一个项目' : undefined}
+              onClick={() => {
+                setBrainstormOpen(true);
+                setBrainstormSessionId(
+                  typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
+                    ? crypto.randomUUID()
+                    : `board-${Date.now()}`,
+                );
+                setBrainstormSdkSessionId(null);
+                setBrainstormMessages([]);
+                setBrainstormInput('');
+                setError(null);
+              }}
+            >
+              需求讨论
+            </button>
+            <button
+              type="button"
+              className="ui-btn secondary"
+              disabled={busy || !effectiveProjectId || !sprintId}
+              title={!effectiveProjectId ? '请先添加至少一个项目' : !sprintId ? '请先选择迭代' : undefined}
+              onClick={() => {
+                setBatchCreateOpen(true);
+                setBatchCreateText('');
+                setBatchPreviewTasks(null);
+                setError(null);
+              }}
+            >
+              批量创建
+            </button>
+          </div>
+        </div>
         <p className="ui-muted ui-small" style={{ marginBottom: '0.75rem' }}>
           Issue ID 由服务端按项目自动生成（格式 <code>前缀-序号</code>）。前缀默认取项目 ID 的第一段（如 <code>demo-app</code> →{' '}
           <code>DEMO</code>），可在 <a href="/projects">项目管理</a> 中设置「Issue 前缀」覆盖。
@@ -1629,6 +1918,296 @@ export default function BoardPage() {
                 标记为完成
               </button>
             </div>
+          </div>
+        </div>
+      ) : null}
+
+      {batchCreateOpen ? (
+        <div
+          role="presentation"
+          style={{
+            position: 'fixed',
+            inset: 0,
+            zIndex: 202,
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            padding: '16px',
+            background: 'rgba(2, 6, 23, 0.72)',
+          }}
+          onClick={() => setBatchCreateOpen(false)}
+        >
+          <div
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="batch-create-modal-title"
+            className="ui-panel"
+            style={{ maxWidth: 640, width: '100%', maxHeight: '92vh', display: 'flex', flexDirection: 'column' }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <h2 id="batch-create-modal-title" className="ui-h2" style={{ marginTop: 0, flexShrink: 0 }}>
+              批量创建任务
+            </h2>
+            <p className="ui-muted ui-small" style={{ marginBottom: '0.75rem' }}>
+              使用当前选择的<strong>项目</strong>与<strong>迭代</strong>（与下方「新建任务」表单一致）。粘贴需求、设计或清单后，由{' '}
+              <strong>高级开发（codex-senior）</strong> 对应的 Codex runner 生成带依赖关系的任务列表；预览无误后再写入待办。
+            </p>
+            <p className="ui-muted ui-small" style={{ marginBottom: '0.5rem' }}>
+              项目：<strong>{effectiveProjectId ? projectLabel(effectiveProjectId) : '—'}</strong> · 迭代：
+              <strong>
+                {sprintId ? (sprints.find((s) => s.id === sprintId)?.name ?? sprintId) : '—'}
+              </strong>
+            </p>
+            <label style={{ display: 'block', flexShrink: 0 }}>
+              粘贴内容
+              <textarea
+                className="ui-input"
+                style={{ width: '100%', minHeight: 160, marginTop: 6 }}
+                value={batchCreateText}
+                onChange={(e) => setBatchCreateText(e.target.value)}
+                placeholder="粘贴 PRD、技术方案、bullet list 等…"
+                disabled={batchPreviewLoading || busy}
+              />
+            </label>
+            <div style={{ marginTop: '0.75rem', display: 'flex', gap: '0.5rem', flexWrap: 'wrap', flexShrink: 0 }}>
+              <button
+                type="button"
+                className="ui-btn"
+                disabled={busy || batchPreviewLoading || !effectiveProjectId || !sprintId}
+                onClick={() => void runBatchCreatePreview()}
+              >
+                {batchPreviewLoading ? '生成中…' : '生成任务列表'}
+              </button>
+            </div>
+            {batchPreviewTasks ? (
+              <div style={{ marginTop: '1rem', flex: 1, minHeight: 0, overflow: 'auto' }}>
+                <p className="ui-muted ui-small" style={{ marginBottom: '0.5rem' }}>
+                  预览（可再次点击「生成任务列表」覆盖）
+                </p>
+                <ol style={{ margin: 0, paddingLeft: '1.25rem' }}>
+                  {batchPreviewTasks.map((t, i) => (
+                    <li key={i} style={{ marginBottom: '0.5rem' }}>
+                      <span>{t.title}</span>
+                      {t.dependsOnIndices?.length ? (
+                        <span className="ui-muted ui-small" style={{ display: 'block', marginTop: 2 }}>
+                          依赖（本批序号）：{' '}
+                          {t.dependsOnIndices
+                            .map((j) => {
+                              const dep = batchPreviewTasks[j];
+                              return dep ? `${j + 1}. ${dep.title}` : String(j + 1);
+                            })
+                            .join('；')}
+                        </span>
+                      ) : null}
+                    </li>
+                  ))}
+                </ol>
+              </div>
+            ) : null}
+            <div className="ui-actions-bar" style={{ marginTop: '1rem', display: 'flex', gap: '0.5rem', flexWrap: 'wrap' }}>
+              <button type="button" className="ui-btn ghost" disabled={busy} onClick={() => setBatchCreateOpen(false)}>
+                取消
+              </button>
+              <button
+                type="button"
+                className="ui-btn primary"
+                disabled={busy || !batchPreviewTasks?.length}
+                onClick={() => void commitBatchCreateTasks()}
+              >
+                创建到待办
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
+
+      {brainstormOpen ? (
+        <div
+          role="presentation"
+          style={{
+            position: 'fixed',
+            inset: 0,
+            zIndex: 203,
+            display: 'flex',
+            alignItems: 'stretch',
+            justifyContent: 'stretch',
+            padding: 0,
+            background: 'rgba(2, 6, 23, 0.72)',
+          }}
+          onClick={() => setBrainstormOpen(false)}
+        >
+          <div
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="brainstorm-modal-title"
+            className="ui-panel"
+            style={{
+              width: '100%',
+              height: '100%',
+              maxWidth: 'none',
+              maxHeight: 'none',
+              minHeight: '100%',
+              boxSizing: 'border-box',
+              borderRadius: 0,
+              display: 'flex',
+              flexDirection: 'column',
+              padding: '1rem 1.25rem',
+            }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <h2 id="brainstorm-modal-title" className="ui-h2" style={{ marginTop: 0, flexShrink: 0 }}>
+              需求讨论
+            </h2>
+            <p className="ui-muted ui-small" style={{ marginBottom: '0.5rem' }}>
+              使用当前<strong>项目</strong>仓库与<strong>高级开发（codex-senior）</strong> Codex runner 流式回复；底层为<strong>只读沙箱</strong>，无法写入仓库或执行改码命令。对话按 brainstorming：澄清 → 方案对比 → 分块设计 → 引导将结论整理为{' '}
+              <code className="ui-mono" style={{ fontSize: 12 }}>
+                docs/plans/
+              </code>
+              下的 Markdown 计划（仅产出讨论与计划文案，不实施代码）。
+            </p>
+            <p className="ui-muted ui-small" style={{ marginBottom: '0.75rem' }}>
+              项目：<strong>{effectiveProjectId ? projectLabel(effectiveProjectId) : '—'}</strong>
+              {' · '}
+              迭代：
+              <strong>{sprintId ? (sprints.find((s) => s.id === sprintId)?.name ?? sprintId) : '—'}</strong>
+              （未在表单选项目时使用列表中的第一个项目；批量拆任务需已选迭代）
+            </p>
+            <div
+              className="ui-task-detail-scroll"
+              style={{
+                flex: 1,
+                minHeight: 0,
+                overflow: 'auto',
+                border: '1px solid rgba(148, 163, 184, 0.2)',
+                borderRadius: 8,
+                padding: '12px',
+                marginBottom: '0.75rem',
+                background: 'rgba(15, 23, 42, 0.35)',
+              }}
+            >
+              {brainstormMessages.length === 0 ? (
+                <p className="ui-muted ui-small" style={{ margin: 0 }}>
+                  先用一句话说明你的目标；助手会复述理解并<strong>一次只问一个</strong>澄清问题，随后再带你收敛方案并整理成可保存的 plan 文档路径建议。
+                </p>
+              ) : (
+                brainstormMessages.map((msg, i) => (
+                  <div
+                    key={i}
+                    style={{
+                      marginBottom: '0.75rem',
+                      textAlign: msg.role === 'user' ? 'right' : 'left',
+                    }}
+                  >
+                    <span
+                      className="ui-muted ui-small"
+                      style={{ display: 'block', marginBottom: 4 }}
+                    >
+                      {msg.role === 'user' ? '你' : '高级开发'}
+                    </span>
+                    <div
+                      style={{
+                        display: 'inline-block',
+                        maxWidth: '100%',
+                        textAlign: 'left',
+                        padding: '8px 12px',
+                        borderRadius: 8,
+                        background:
+                          msg.role === 'user'
+                            ? 'rgba(59, 130, 246, 0.22)'
+                            : 'rgba(148, 163, 184, 0.12)',
+                        whiteSpace: 'pre-wrap',
+                        wordBreak: 'break-word',
+                      }}
+                    >
+                      {msg.content || (msg.role === 'assistant' && brainstormStreaming ? '…' : '')}
+                    </div>
+                  </div>
+                ))
+              )}
+            </div>
+            <label style={{ display: 'block', flexShrink: 0 }}>
+              消息
+              <textarea
+                className="ui-input"
+                style={{ width: '100%', minHeight: 88, marginTop: 6 }}
+                value={brainstormInput}
+                onChange={(e) => setBrainstormInput(e.target.value)}
+                placeholder={
+                  brainstormMessages.length === 0
+                    ? '例如：希望为看板增加深色模式、或优化某条工作流…'
+                    : '回复上一问，或补充约束与验收标准…'
+                }
+                disabled={brainstormStreaming || busy}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
+                    e.preventDefault();
+                    void sendBrainstormMessage();
+                  }
+                }}
+              />
+            </label>
+            <div className="ui-actions-bar" style={{ marginTop: '0.75rem', display: 'flex', gap: '0.5rem', flexWrap: 'wrap' }}>
+              <button type="button" className="ui-btn ghost" disabled={brainstormStreaming} onClick={() => setBrainstormOpen(false)}>
+                关闭
+              </button>
+              <button
+                type="button"
+                className="ui-btn secondary"
+                disabled={brainstormStreaming || batchPreviewLoading}
+                onClick={() => {
+                  setBrainstormSessionId(
+                    typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
+                      ? crypto.randomUUID()
+                      : `board-${Date.now()}`,
+                  );
+                  setBrainstormSdkSessionId(null);
+                  setBrainstormMessages([]);
+                  setBrainstormInput('');
+                  setError(null);
+                }}
+              >
+                新对话
+              </button>
+              <button
+                type="button"
+                className="ui-btn secondary"
+                disabled={
+                  brainstormStreaming ||
+                  busy ||
+                  batchPreviewLoading ||
+                  !effectiveProjectId ||
+                  !sprintId ||
+                  brainstormMessages.length === 0
+                }
+                title={
+                  !effectiveProjectId
+                    ? '请先添加至少一个项目'
+                    : !sprintId
+                      ? '请先在下方「迭代」中选择当前迭代'
+                      : brainstormMessages.length === 0
+                        ? '先发送至少一条消息'
+                        : undefined
+                }
+                onClick={() => void confirmBrainstormPlanAndOpenBatch()}
+              >
+                {batchPreviewLoading ? '生成任务预览中…' : '确认方案并生成待办任务'}
+              </button>
+              <button
+                type="button"
+                className="ui-btn primary"
+                disabled={brainstormStreaming || busy || !effectiveProjectId || !brainstormInput.trim()}
+                onClick={() => void sendBrainstormMessage()}
+              >
+                {brainstormStreaming ? '流式生成中…' : '发送'}
+              </button>
+            </div>
+            <p className="ui-muted ui-small" style={{ marginTop: '0.5rem', marginBottom: 0 }}>
+              快捷键：⌘/Ctrl + Enter 发送。方案成熟后可点「确认方案并生成待办任务」打开批量创建；平时以助手引导的{' '}
+              <code className="ui-mono" style={{ fontSize: 12 }}>
+                docs/plans/
+              </code>
+              文档为主。
+            </p>
           </div>
         </div>
       ) : null}

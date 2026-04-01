@@ -37,6 +37,7 @@ import type {
 } from './types';
 import { defaultSkillLinesForLane } from './kanban-agents';
 import { listSkillCatalogEntries } from './skill-catalog';
+import { parseBoardBrainstormChatInput } from './board-brainstorm';
 import { roleForActiveWorkflowState } from './workflow-service';
 
 const KANBAN_ROLE_KINDS: KanbanAgentKind[] = [
@@ -149,6 +150,9 @@ export interface WorkflowServiceApi {
     taskSessionId: string,
     input: { content: string; role?: AgentRole | null },
   ): Promise<TaskSession>;
+  previewBatchTasksFromSpec(input: unknown): Promise<unknown>;
+  createTasksFromBatchPlan(input: unknown): Promise<unknown>;
+  streamBoardBrainstormChat(input: unknown): Promise<ReadableStream<string>>;
 }
 
 export interface InstanceManagerApi {
@@ -264,8 +268,22 @@ async function writeNodeResponse(response: ServerResponse, result: Response): Pr
   result.headers.forEach((value, key) => {
     response.setHeader(key, value);
   });
-  const body = Buffer.from(await result.arrayBuffer());
-  response.end(body);
+  if (!result.body) {
+    response.end();
+    return;
+  }
+  const reader = result.body.getReader();
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (value && value.byteLength > 0) {
+        response.write(Buffer.from(value));
+      }
+    }
+  } finally {
+    response.end();
+  }
 }
 
 export function createPlatformApp(options: CreatePlatformAppOptions): PlatformApp {
@@ -575,6 +593,71 @@ export function createPlatformApp(options: CreatePlatformAppOptions): PlatformAp
           await options.workflowService.createTask(await readRequestBody<unknown>(request)),
           201,
         );
+      }
+
+      if (request.method === 'POST' && pathname === '/api/workflows/tasks/batch-spec/preview') {
+        try {
+          return jsonResponse(
+            await options.workflowService.previewBatchTasksFromSpec(await readRequestBody<unknown>(request)),
+            200,
+          );
+        } catch (e) {
+          const msg = e instanceof Error ? e.message : String(e);
+          requestLogger.warn(
+            { err: e, stack: e instanceof Error ? e.stack : undefined },
+            `batch-spec/preview failed: ${msg}`,
+          );
+          return jsonResponse({ error: msg }, 400);
+        }
+      }
+
+      if (request.method === 'POST' && pathname === '/api/workflows/tasks/batch-spec/create') {
+        try {
+          return jsonResponse(
+            await options.workflowService.createTasksFromBatchPlan(await readRequestBody<unknown>(request)),
+            201,
+          );
+        } catch (e) {
+          const msg = e instanceof Error ? e.message : String(e);
+          requestLogger.warn(
+            { err: e, stack: e instanceof Error ? e.stack : undefined },
+            `batch-spec/create failed: ${msg}`,
+          );
+          return jsonResponse({ error: msg }, 400);
+        }
+      }
+
+      if (request.method === 'POST' && pathname === '/api/workflows/board-brainstorm/chat') {
+        try {
+          const body = await readRequestBody<unknown>(request);
+          const parsed = parseBoardBrainstormChatInput(body);
+          const stream = await options.workflowService.streamBoardBrainstormChat(parsed);
+          const encoder = new TextEncoder();
+          const byteStream = new ReadableStream<Uint8Array>({
+            async start(controller) {
+              const reader = stream.getReader();
+              try {
+                while (true) {
+                  const { done, value } = await reader.read();
+                  if (done) break;
+                  controller.enqueue(encoder.encode(value));
+                }
+              } finally {
+                controller.close();
+              }
+            },
+          });
+          return new Response(byteStream, {
+            status: 200,
+            headers: {
+              'content-type': 'text/event-stream; charset=utf-8',
+              'cache-control': 'no-cache',
+              connection: 'keep-alive',
+            },
+          });
+        } catch (e) {
+          return jsonResponse({ error: e instanceof Error ? e.message : String(e) }, 400);
+        }
       }
 
       if (request.method === 'GET' && pathname === '/api/kanban/monitor') {

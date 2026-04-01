@@ -20,6 +20,8 @@ export interface ConsumeAgentStreamOptions {
   onPermissionRequest?: (permission: PermissionRequestInfo) => Promise<void>;
   /** If set, cancel the stream reader after this many ms (Kanban agent / system_check turns). */
   timeoutMs?: number;
+  /** If set, each raw chunk from the readable stream is appended (for debugging batch-spec / runner SSE). */
+  rawStreamChunks?: string[];
 }
 
 async function runConsume(
@@ -34,6 +36,10 @@ async function runConsume(
   while (true) {
     const { done, value } = await reader.read();
     if (done) break;
+
+    if (options.rawStreamChunks && value !== undefined) {
+      options.rawStreamChunks.push(value);
+    }
 
     for (const line of value.split('\n')) {
       if (!line.startsWith('data: ')) continue;

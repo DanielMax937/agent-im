@@ -223,6 +223,15 @@ export interface StreamChatParams {
   disableLlmStreaming?: boolean;
   /** Restrict available tools (empty array = no tools). */
   allowedTools?: string[];
+  /**
+   * Codex thread only: OS sandbox for the agent. Use `read-only` for plan-only chats
+   * (no workspace writes). See @openai/codex-sdk ThreadOptions.
+   */
+  sandboxMode?: 'read-only' | 'workspace-write' | 'danger-full-access';
+  /** Codex thread: disable outbound network when false. */
+  networkAccessEnabled?: boolean;
+  /** Codex thread: web search behavior. */
+  webSearchMode?: 'disabled' | 'cached' | 'live';
 }
 
 export interface LLMProvider {
