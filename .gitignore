@@ -7,5 +7,8 @@ dist/
 config.env
 .next/
 
+# Local launchd / PM2 logs (never commit)
+logs/
+
 # Kanban platform SQLite + migrated JSON (default: ./data/platform/)
 data/platform/
