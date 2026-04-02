@@ -41,7 +41,19 @@ $SkillDir   = Split-Path -Parent (Split-Path -Parent $PSCommandPath)
 $RuntimeDir = Join-Path $CtiHome 'runtime'
 $PidFile    = Join-Path $RuntimeDir 'bridge.pid'
 $StatusFile = Join-Path $RuntimeDir 'status.json'
-$LogFile    = Join-Path $CtiHome 'logs' 'bridge-daemon.log'
+function Resolve-DaemonLogFile {
+    $logDir = Join-Path $CtiHome 'logs'
+    if (Test-Path $logDir) {
+        $latest = Get-ChildItem -Path $logDir -Filter 'bridge-daemon-*.log' -File -ErrorAction SilentlyContinue |
+            Sort-Object LastWriteTime -Descending |
+            Select-Object -First 1
+        if ($latest) { return $latest.FullName }
+    }
+    $legacy = Join-Path $logDir 'bridge-daemon.log'
+    if (Test-Path $legacy) { return $legacy }
+    return Join-Path $logDir ("bridge-daemon-{0:yyyy-MM-dd}.log" -f (Get-Date))
+}
+$LogFile = Resolve-DaemonLogFile
 $DaemonMjs  = Join-Path $SkillDir 'dist' 'daemon.mjs'
 
 $ServiceName = 'ClaudeToIMBridge'

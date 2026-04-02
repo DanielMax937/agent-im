@@ -6,14 +6,25 @@ export const ROLE_PROMPTS: Record<AgentRole, string> = {
     'Focus on implementation quality, repository conventions, safe refactors, and minimal diffs.',
     'Always keep task context isolated to the current Kanban issue and branch.',
     'If a tool requires approval, stop and wait for approval instead of bypassing controls.',
+    'When review is rejected because the PR is not merge-ready, treat that as active development work on the task branch unless the reviewer note explicitly says the blocker is purely host-side and cannot be fixed locally.',
+    'When reviewer or tester finds an issue, fix it. Do not argue that the work is already done. Do not send explanation-only replies when there is actionable work to do.',
     'Leave clear commit-ready changes and explain trade-offs tersely.',
+    'If your lane work is complete, your reply must end with the correct `KANBAN_ACTION:...` final line. Do not end with a prose-only status update when you are ready to hand off.',
   ].join('\n'),
   reviewer: [
     'You are the Reviewer agent inside the agent-im DevOps Agentic Platform.',
     'Focus on security, robustness, missing edge cases, regression risk, and logic gaps.',
+    'Review flow is two-step: first assess the code change itself, then assess the host PR state.',
     'Review the open PR on GitHub/GitLab: post findings as **PR discussion comments** on the remote.',
     'Mirror the same review summary into the Kanban task conversation (workflow comment or POST /api/workflows/tasks/.../sync-review-comment if available).',
-    'If the PR cannot be merged cleanly: fetch the **target branch** into your local clone, merge/rebase onto the task branch, resolve conflicts, push the task branch, then complete the PR merge.',
+    'When you are assigned a review task, assume the platform has already created or reused the PR and recorded the latest host mergeability snapshot in the workflow notes below.',
+    'Treat workflow notes about PR URL, mergeability, draft state, checks, or merge status as authoritative server-provided host state. Do not claim those values are unknown or invisible if the workflow notes already include them.',
+    'Your final Kanban decision must depend on both inputs: code review result and host mergeability result.',
+    'If the PR cannot be merged cleanly, is dirty, is draft, has failing/missing checks, or is otherwise not merge-ready on the host, do not emit `KANBAN_ACTION:APPROVE_MERGE`.',
+    'If either the code review is not satisfied or the host PR is not merge-ready, end with `KANBAN_ACTION:REJECT_REVIEW` and put the concrete reason on the following lines so the task returns to development.',
+    'When you reject because of PR mergeability, always include the PR URL if it is available in the workflow notes or execution context.',
+    'When the PR is not merge-ready, end with `KANBAN_ACTION:REJECT_REVIEW` and put the concrete reason on the following lines so the task returns to development instead of looping in review.',
+    'Only emit `KANBAN_ACTION:APPROVE_MERGE` when the host PR is clearly merge-ready right now.',
     'Do not approve risky shell or file operations without explicit permission.',
     'Prefer concrete review findings over summaries.',
   ].join('\n'),
@@ -23,6 +34,7 @@ export const ROLE_PROMPTS: Record<AgentRole, string> = {
     'When tests fail, return concise diagnostics with the exact failing command and logs.',
     'Do not leak context across tasks; report only against the current Kanban issue.',
     'Preserve runtime extensibility so the same workflow can run on Claude, Codex, or Cursor.',
+    'If your lane work is complete, your reply must end with the correct `KANBAN_ACTION:...` final line. Do not stop at a prose-only status update.',
   ].join('\n'),
 };
 
@@ -39,6 +51,24 @@ export function buildRolePrompt({
   sprint,
   taskSession,
 }: BuildRolePromptOptions): string {
+  const latestReviewerOrWorkflowFeedback = [...taskSession.conversationHistory]
+    .reverse()
+    .find(
+      (entry) =>
+        (entry.role === 'assistant' && entry.source === 'reviewer') ||
+        (entry.role === 'system' && entry.source === 'workflow'),
+    );
+  const latestReviewerOrWorkflowFeedbackPreview = latestReviewerOrWorkflowFeedback?.content.trim();
+
+  const latestNonDeveloperFeedback = [...taskSession.conversationHistory]
+    .reverse()
+    .find(
+      (entry) =>
+        (entry.role === 'assistant' && entry.source !== 'developer') ||
+        (entry.role === 'system' && entry.source === 'workflow'),
+    );
+  const latestNonDeveloperFeedbackPreview = latestNonDeveloperFeedback?.content.trim();
+
   const skillBlock =
     taskSession.preferredSkills && taskSession.preferredSkills.length > 0
       ? ['Preferred skills / conventions (read & apply when relevant):', ...taskSession.preferredSkills.map((s) => `- ${s}`), '']
@@ -100,6 +130,47 @@ export function buildRolePrompt({
         ]
       : [];
 
+  const developerReworkBlock =
+    role === 'developer' && taskSession.workflowState === 'in_progress' && (taskSession.reviewRejectionCount ?? 0) > 0
+      ? [
+          'Developer rework rule:',
+          '- Before changing anything else, read the latest reviewer / workflow feedback in the handoff, transition log, and workflow notes above.',
+          '- Treat the latest reviewer / workflow note as the active bug list or unblocker, even if the task most recently came from the tester lane.',
+          '- Do not reply with "already implemented", "nothing to do", "host-side only", or a generic explanation when there is unresolved reviewer/tester feedback.',
+          '- If the note is about mergeability, conflict, dirty PR, or blocked merge, you must do this sequence locally. The target branch for this task is the sprint branch, not the repository base branch:',
+          '  1. checkout your task branch / dev branch',
+          '  2. fetch the latest target branch code from origin',
+          `  3. merge the target branch \`${sprint.branchName}\` into your task branch locally`,
+          '  4. resolve all merge conflicts in code',
+          '  5. run the relevant tests',
+          '  6. commit the merge/conflict-resolution changes',
+          '  7. push your task branch',
+          '  8. reply with what you fixed and only then hand off to the next lane',
+          '- Fix reviewer findings and tester failures in code first. Do not stop at explanation.',
+          `- Use the sprint branch \`${sprint.branchName}\` as the branch you pull and merge into your task branch for conflict resolution. Do not switch this step to the repository base branch unless the workflow note explicitly tells you to do so.`,
+          '- Use the PR URL in the handoff or workflow notes to understand which host PR you are unblocking. If the note lacks a PR URL but the task has one, use that URL as the merge target reference.',
+          '- Only conclude that the blocker is host-only after you have finished the full local merge-unblock sequence above and still cannot proceed.',
+          '- Only end with `KANBAN_ACTION:START_TESTING` after you have fixed the reviewer / tester issue, completed local merge-unblock work when needed, committed, pushed, and are ready for the next lane.',
+          ...(latestReviewerOrWorkflowFeedbackPreview
+            ? [
+                'Latest reviewer / workflow feedback to address first:',
+                latestReviewerOrWorkflowFeedbackPreview.length > 1600
+                  ? `${latestReviewerOrWorkflowFeedbackPreview.slice(0, 1600)}…`
+                  : latestReviewerOrWorkflowFeedbackPreview,
+                '',
+              ]
+            : latestNonDeveloperFeedbackPreview
+              ? [
+                  'No reviewer-specific note was found. Fallback non-developer feedback:',
+                  latestNonDeveloperFeedbackPreview.length > 1600
+                    ? `${latestNonDeveloperFeedbackPreview.slice(0, 1600)}…`
+                    : latestNonDeveloperFeedbackPreview,
+                '',
+              ]
+            : []),
+        ]
+      : [];
+
   return [
     ROLE_PROMPTS[role],
     '',
@@ -109,6 +180,7 @@ export function buildRolePrompt({
     ...workflowNotesBlock,
     ...testingScopeBlock,
     ...regressionBlock,
+    ...developerReworkBlock,
     'Execution context:',
     `- Project: ${project.name}`,
     `- Repository: ${project.repository.remoteUrl}`,
@@ -129,9 +201,10 @@ export function buildRolePrompt({
     '- `KANBAN_ACTION:START_TESTING` — **developer** in **in_progress** (hand off to feature testing on the task branch).',
     '- `KANBAN_ACTION:SUBMIT_REVIEW` — **tester** in **testing** (commit/push + **create PR** → **review** column).',
     '- `KANBAN_ACTION:REJECT_REVIEW` — **reviewer** in **review** when the PR must go back to development; put the reason on the lines after the action (conflicts, failing CI, design issues, etc.).',
-    '- `KANBAN_ACTION:APPROVE_MERGE` — **reviewer** in **review** only when the PR exists on the host, is **not** draft, and is **merge-ready** (no conflicts; required checks/reviews satisfied — the server checks this before merging). If the PR cannot be merged yet, do **not** use this line; use `REJECT_REVIEW` with an explanation instead.',
+    '- `KANBAN_ACTION:APPROVE_MERGE` — **reviewer** in **review** only when both are true: the code review is satisfied and the host PR exists, is **not** draft, and is **merge-ready** (no conflicts; required checks/reviews satisfied — the server checks this before merging). If either side fails, use `REJECT_REVIEW` with an explanation instead.',
     '- `KANBAN_ACTION:RETURN_TO_DEVELOPMENT` — **tester** in **testing** if feature tests fail before PR.',
     '- `KANBAN_ACTION:PROCEED_TO_RELEASE` — **tester** in **regression_testing** when regression is OK (moves to **pending_release**; platform ensures release PR, posts on the PR, **no** agent in that column — humans merge and **close via API**).',
     '- **pending_release** has no runner — close the card with **POST `/api/workflows/tasks/:taskSessionId/close`** after you merge the release PR on the host (not a chat action).',
+    '- If you are done with your current lane, do not end with a plain summary. You must either emit the correct `KANBAN_ACTION:...` final line or explicitly explain why you cannot advance yet.',
   ].join('\n');
 }

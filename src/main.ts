@@ -24,7 +24,7 @@ import {
   defaultRunnerIdForChannelType,
 } from './config';
 import { buildImBridgeLlmStack } from './lib/bridge/llm-registry';
-import { BRIDGE_LOG_DAEMON_BASENAME } from './lib/bridge/bridge-log-file';
+import { bridgeDaemonLogBasenameForDate } from './lib/bridge/bridge-log-file';
 import { notifyBridgeClosing, notifyBridgeStarted } from './lib/bridge/shutdown-notify';
 import { JsonFileStore } from './store';
 import { PendingPermissions } from './permission-gateway';
@@ -79,7 +79,7 @@ function writeStatus(info: StatusInfo): void {
 async function main(): Promise<void> {
   const config = loadConfig();
   syncConfigFileToProcessEnv();
-  setupLogger({ logFileName: BRIDGE_LOG_DAEMON_BASENAME });
+  setupLogger({ logFileName: bridgeDaemonLogBasenameForDate() });
 
   const runId = crypto.randomUUID();
   console.log(`[claude-to-im] Starting bridge (run_id: ${runId})`);

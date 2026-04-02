@@ -3,8 +3,7 @@ import fs from 'node:fs';
 
 import * as bridgeManager from '../lib/bridge/bridge-manager';
 import {
-  BRIDGE_LOG_APP_BASENAME,
-  BRIDGE_LOG_DAEMON_BASENAME,
+  resolveLatestBridgeLogBasename,
   BRIDGE_LOG_LINES_DEFAULT,
   BRIDGE_LOG_LINES_MAX,
   readBridgeLogTail,
@@ -317,8 +316,9 @@ export function createPlatformApp(options: CreatePlatformAppOptions): PlatformAp
             ? Math.min(raw, BRIDGE_LOG_LINES_MAX)
             : BRIDGE_LOG_LINES_DEFAULT;
         const source = searchParams.get('source')?.trim() ?? 'daemon';
-        const fileBasename =
-          source === 'app' ? BRIDGE_LOG_APP_BASENAME : BRIDGE_LOG_DAEMON_BASENAME;
+        const fileBasename = await resolveLatestBridgeLogBasename(
+          source === 'app' ? 'app' : 'daemon',
+        );
         const { text, logPath, missing } = await readBridgeLogTail(lines, fileBasename);
         return jsonResponse({
           ok: true,

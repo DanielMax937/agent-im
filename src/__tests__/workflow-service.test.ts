@@ -40,6 +40,25 @@ describe('WorkflowService', () => {
     return { store, project, gitService, scmClient, instanceManager, workflowService };
   }
 
+  class InspectingInstanceManager extends FakeInstanceManager {
+    public reviewTaskSnapshots: Array<{ taskSessionId: string; conversationHistoryContents: string[] }> = [];
+
+    constructor(private readonly inspectStore: ReturnType<typeof createTestJsonPlatformStore>) {
+      super(inspectStore);
+    }
+
+    override async upsertAndStart(instance: Parameters<FakeInstanceManager['upsertAndStart']>[0]) {
+      const task = this.inspectStore.getTaskSession(instance.taskSessionId);
+      if (instance.role === 'reviewer' && task) {
+        this.reviewTaskSnapshots.push({
+          taskSessionId: task.id,
+          conversationHistoryContents: task.conversationHistory.map((entry) => entry.content),
+        });
+      }
+      return super.upsertAndStart(instance);
+    }
+  }
+
   it('starts a sprint branch from the project base branch', async () => {
     const { workflowService, project, gitService } = createHarness();
     const sprint = await workflowService.startSprint({
@@ -86,8 +105,82 @@ describe('WorkflowService', () => {
     assert.equal(reviewResult.taskSession.workflowState, 'review');
     assert.equal(reviewResult.pullRequest.url, 'https://example.test/pr/42');
     assert.deepEqual(gitService.calls, ['commitAll', 'pushBranch']);
-    assert.deepEqual(scmClient.calls, ['createPullRequest']);
+    assert.deepEqual(scmClient.calls, [
+      'findOpenPullRequest:dev/issue-101->feature/sprint-alpha',
+      'createPullRequest',
+      'getPullRequestMergeStatus',
+    ]);
     assert.deepEqual(instanceManager.started, [`reviewer:${taskSession.id}`]);
+    assert.ok(
+      reviewResult.taskSession.conversationHistory.some(
+        (e) => e.source === 'workflow' && e.content.includes('Host PR status:'),
+      ),
+    );
+  });
+
+  it('persists PR workflow notes before reviewer startup', async () => {
+    const store = createTestJsonPlatformStore();
+    const gitService = new FakeGitService();
+    const scmClient = new FakeScmClient();
+    scmClient.mergeStatusResult = { canMerge: false, reason: 'mergeable_state=dirty' };
+    const instanceManager = new InspectingInstanceManager(store);
+    const project = createProject(store);
+    const sprint = createSprint(store, project.id);
+    const workflowService = new WorkflowService({
+      store,
+      gitService: asGitService(gitService),
+      scmClient: asScmClient(scmClient),
+      instanceManager: asInstanceManager(instanceManager),
+      compensationService: new CompensationService(store, asInstanceManager(instanceManager)),
+    });
+    const taskSession = createTaskSession(store, project.id, sprint.id, {
+      workflowState: 'testing',
+    });
+
+    await workflowService.submitTaskForReview({
+      taskSessionId: taskSession.id,
+      commitMessage: 'feat(issue-101): implement workflow',
+      prTitle: '[ISSUE-101] Implement workflow',
+      prBody: 'Automated PR body',
+    });
+
+    assert.equal(instanceManager.reviewTaskSnapshots.length, 1);
+    const snapshot = instanceManager.reviewTaskSnapshots[0]!;
+    assert.ok(snapshot.conversationHistoryContents.some((line) => line.includes('Created/reused PR https://example.test/pr/42')));
+    assert.ok(snapshot.conversationHistoryContents.some((line) => line.includes('Host PR status: not merge-ready yet (PR #42)')));
+  });
+
+  it('submitTaskForReview treats create PR error as success when an open PR is found on retry', async () => {
+    const { workflowService, project, store, scmClient } = createHarness();
+    scmClient.createPullRequestError = new Error('pull request already exists');
+    scmClient.findOpenPullRequestResults = [
+      null,
+      { url: 'https://example.test/pr/existing', number: 99 },
+    ];
+    const sprint = createSprint(store, project.id);
+    const taskSession = createTaskSession(store, project.id, sprint.id, {
+      workflowState: 'testing',
+    });
+
+    const reviewResult = await workflowService.submitTaskForReview({
+      taskSessionId: taskSession.id,
+      commitMessage: 'feat(issue-101): implement workflow',
+      prTitle: '[ISSUE-101] Implement workflow',
+      prBody: 'Automated PR body',
+    });
+
+    assert.equal(reviewResult.taskSession.workflowState, 'review');
+    assert.equal(reviewResult.pullRequest.url, 'https://example.test/pr/existing');
+    assert.equal(reviewResult.pullRequest.number, 99);
+    assert.deepEqual(scmClient.calls, [
+      'findOpenPullRequest:dev/issue-101->feature/sprint-alpha',
+      'createPullRequest',
+      'findOpenPullRequest:dev/issue-101->feature/sprint-alpha',
+      'getPullRequestMergeStatus',
+    ]);
+    const updated = store.getTaskSession(taskSession.id)!;
+    assert.equal(updated.pullRequestUrl, 'https://example.test/pr/existing');
+    assert.equal(updated.pullRequestNumber, 99);
   });
 
   it('maybeAutoAdvanceAfterAgentTurn opens PR when tester ends with KANBAN_ACTION:SUBMIT_REVIEW', async () => {
@@ -138,6 +231,45 @@ describe('WorkflowService', () => {
         process.env.CTI_KANBAN_WORKFLOW_AUTO = prev;
       }
     }
+  });
+
+  it('afterSuccessfulAssistantTurn requeues system_check for the role that owns the current state', async () => {
+    const { workflowService, project, store, instanceManager } = createHarness();
+    const sprint = createSprint(store, project.id);
+    const taskSession = createTaskSession(store, project.id, sprint.id, {
+      workflowState: 'testing',
+      conversationHistory: [],
+      confirmationLoopCount: 0,
+    });
+    store.upsertAgentInstance({
+      id: 'tester-instance-1',
+      projectId: project.id,
+      sprintId: sprint.id,
+      taskId: taskSession.taskId,
+      taskSessionId: taskSession.id,
+      runtime: 'copilot',
+      role: 'tester',
+      status: 'running',
+      branchName: taskSession.branchName,
+      workingDirectory: '/tmp/agent-im',
+      approvalsRequired: true,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    });
+    store.appendConversationEntry(taskSession.id, {
+      role: 'assistant',
+      source: 'developer',
+      content: 'Work is done, but no valid action was emitted.',
+    });
+
+    await workflowService.afterSuccessfulAssistantTurn(taskSession.id, 'developer', 'developer-instance');
+
+    const queued = store.peekTaskQueue(taskSession.messageQueueKey);
+    assert.equal(queued.length, 1);
+    assert.equal(queued[0]!.type, 'system_check');
+    assert.match(queued[0]!.content, /Your role for this lane: tester\./);
+    assert.match(queued[0]!.content, /`KANBAN_ACTION:SUBMIT_REVIEW`/);
+    assert.ok(instanceManager.restarted.includes('tester-instance-1'));
   });
 
   it('addTaskHistoryComment appends manual history entry', async () => {
@@ -739,11 +871,14 @@ describe('WorkflowService', () => {
     const taskSession = createTaskSession(store, project.id, sprint.id, {
       workflowState: 'review',
       kanbanAgent: 'claude-review',
+      pullRequestUrl: 'https://example.test/pr/42',
     });
     const updated = await workflowService.rejectReview(taskSession.id, 'needs types');
     assert.equal(updated.workflowState, 'in_progress');
     assert.equal(updated.reviewRejectionCount, 1);
     assert.ok(instanceManager.started.some((s) => s.startsWith('developer:')));
+    assert.match(updated.handoffComment ?? '', /needs types/);
+    assert.match(updated.handoffComment ?? '', /PR URL: https:\/\/example\.test\/pr\/42/);
   });
 
   it('merges open PR from review and moves to regression_testing', async () => {
@@ -780,7 +915,42 @@ describe('WorkflowService', () => {
     assert.ok(idxRemove < idxFetch);
   });
 
-  it('merge API 405 not mergeable leaves task in review; reviewer uses REJECT_REVIEW to send back', async () => {
+  it('resets the workflow-owned sprint checkout before regression when local changes are present', async () => {
+    const { workflowService, project, store, gitService } = createHarness();
+    gitService.workingTreeStatusResult = [
+      {
+        path: 'src/app/globals.css',
+        indexStatus: ' ',
+        worktreeStatus: 'M',
+        raw: ' M src/app/globals.css',
+      },
+    ];
+    const sprint = createSprint(store, project.id, {
+      branchName: 'feature/demo',
+    });
+    const taskSession = createTaskSession(store, project.id, sprint.id, {
+      workflowState: 'review',
+      pullRequestNumber: 42,
+      pullRequestUrl: 'https://example.test/pr/42',
+    });
+
+    const updated = await workflowService.startRegressionTesting(taskSession.id);
+    assert.equal(updated.workflowState, 'regression_testing');
+    assert.ok(gitService.calls.includes('resetHardOrigin:feature/demo'));
+    assert.ok(gitService.calls.includes('cleanFd'));
+
+    const stored = store.getTaskSession(taskSession.id)!;
+    assert.ok(
+      stored.conversationHistory.some(
+        (e) =>
+          e.source === 'workflow' &&
+          e.content.includes('Regression startup reset sprint branch "feature/demo"') &&
+          e.content.includes('src/app/globals.css'),
+      ),
+    );
+  });
+
+  it('merge API 405 not mergeable returns task to development with synced review comment', async () => {
     const { workflowService, project, store, instanceManager, gitService, scmClient } = createHarness();
     scmClient.mergePullRequestError = new Error(
       'GitHub merge PR failed: 405 {"message":"Pull Request is not mergeable","documentation_url":"https://docs.github.com/rest/pulls/pulls#merge-a-pull-request","status":"405"}',
@@ -792,31 +962,66 @@ describe('WorkflowService', () => {
       pullRequestUrl: 'https://example.test/pr/42',
       kanbanAgent: 'claude-review',
     });
-    await assert.rejects(() => workflowService.startRegressionTesting(taskSession.id), /Merge failed \(PR not mergeable\)/);
-    assert.equal(store.getTaskSession(taskSession.id)!.workflowState, 'review');
-    assert.deepEqual(scmClient.calls, ['getPullRequestMergeStatus', 'mergePullRequest']);
-    assert.ok(!instanceManager.started.some((s) => s.startsWith('developer:')));
+    const updated = await workflowService.startRegressionTesting(taskSession.id);
+    assert.equal(updated.workflowState, 'in_progress');
+    assert.deepEqual(scmClient.calls, ['getPullRequestMergeStatus', 'mergePullRequest', 'postPullRequestDiscussionComment']);
+    assert.ok(instanceManager.started.some((s) => s.startsWith('developer:')));
     assert.ok(!gitService.calls.includes('fetchOrigin'));
     const t = store.getTaskSession(taskSession.id)!;
     assert.ok(
       t.conversationHistory.some(
-        (e) => e.source === 'workflow' && e.content.includes('Merge API failed') && e.content.includes('REJECT_REVIEW'),
+        (e) => e.source === 'workflow' && e.content.includes('Host PR check failed after review approval attempt.'),
+      ),
+    );
+    assert.ok(
+      t.conversationHistory.some(
+        (e) => e.source === 'workflow' && e.content.includes('Merge blocked (not mergeable).'),
       ),
     );
   });
 
-  it('does not call merge when host reports PR not merge-ready', async () => {
-    const { workflowService, project, store, scmClient } = createHarness();
+  it('does not call merge when host reports PR not merge-ready and returns task to development', async () => {
+    const { workflowService, project, store, scmClient, instanceManager } = createHarness();
     scmClient.mergeStatusResult = { canMerge: false, reason: 'mergeable_state=dirty (conflicts)' };
     const sprint = createSprint(store, project.id);
     const taskSession = createTaskSession(store, project.id, sprint.id, {
       workflowState: 'review',
       pullRequestNumber: 42,
     });
-    await assert.rejects(() => workflowService.startRegressionTesting(taskSession.id), /not ready to merge/);
-    assert.deepEqual(scmClient.calls, ['getPullRequestMergeStatus']);
+    const updated = await workflowService.startRegressionTesting(taskSession.id);
+    assert.equal(updated.workflowState, 'in_progress');
+    assert.deepEqual(scmClient.calls, [
+      'findOpenPullRequest:dev/issue-101->feature/sprint-alpha',
+      'createPullRequest',
+      'getPullRequestMergeStatus',
+      'postPullRequestDiscussionComment',
+    ]);
+    assert.ok(instanceManager.started.some((s) => s.startsWith('developer:')));
     const t = store.getTaskSession(taskSession.id)!;
-    assert.ok(t.conversationHistory.some((e) => e.source === 'workflow' && e.content.includes('Merge was not run')));
+    assert.ok(
+      t.conversationHistory.some(
+        (e) => e.source === 'workflow' && e.content.includes('Host PR check failed after review approval attempt.'),
+      ),
+    );
+  });
+
+  it('finds or creates review PR before mergeability check when review task is missing PR fields', async () => {
+    const { workflowService, project, store, scmClient } = createHarness();
+    scmClient.findOpenPullRequestResult = { url: 'https://example.test/pr/42', number: 42 };
+    const sprint = createSprint(store, project.id);
+    const taskSession = createTaskSession(store, project.id, sprint.id, {
+      workflowState: 'review',
+      pullRequestNumber: undefined,
+      pullRequestUrl: undefined,
+      branchName: 'dev/todolist-8',
+    });
+
+    await workflowService.startRegressionTesting(taskSession.id);
+
+    assert.deepEqual(scmClient.calls, ['findOpenPullRequest:dev/todolist-8->feature/sprint-alpha', 'getPullRequestMergeStatus', 'mergePullRequest']);
+    const updated = store.getTaskSession(taskSession.id)!;
+    assert.equal(updated.pullRequestNumber, 42);
+    assert.equal(updated.pullRequestUrl, 'https://example.test/pr/42');
   });
 
   it('rethrows merge failure when not a not-mergeable error', async () => {
@@ -829,7 +1034,12 @@ describe('WorkflowService', () => {
     });
     await assert.rejects(() => workflowService.startRegressionTesting(taskSession.id), /403/);
     assert.equal(store.getTaskSession(taskSession.id)!.workflowState, 'review');
-    assert.deepEqual(scmClient.calls, ['getPullRequestMergeStatus', 'mergePullRequest']);
+    assert.deepEqual(scmClient.calls, [
+      'findOpenPullRequest:dev/issue-101->feature/sprint-alpha',
+      'createPullRequest',
+      'getPullRequestMergeStatus',
+      'mergePullRequest',
+    ]);
   });
 
   it('detects merge-target advance during regression and refreshes tester', async () => {

@@ -96,6 +96,13 @@ function lastAssistantContentForRole(task: TaskSession, role: AgentRole): string
   return entries[entries.length - 1]!.content;
 }
 
+function previewForLog(text: string | undefined, max = 240): string | undefined {
+  if (!text) return undefined;
+  const normalized = text.replace(/\s+/g, ' ').trim();
+  if (!normalized) return undefined;
+  return normalized.length > max ? `${normalized.slice(0, max)}...` : normalized;
+}
+
 function slugify(value: string): string {
   return value
     .toLowerCase()
@@ -345,23 +352,94 @@ export class WorkflowService {
   ): Promise<boolean> {
     if (process.env.CTI_KANBAN_WORKFLOW_AUTO === '0') return false;
     const taskSession = this.deps.store.getTaskSession(taskSessionId);
-    if (!taskSession || taskSession.workflowState === 'closed') return false;
+    if (!taskSession) {
+      getKanbanLogger().debug(
+        { taskSessionId, completedRole, instanceId },
+        'auto-advance skipped: task session missing',
+      );
+      return false;
+    }
+    if (taskSession.workflowState === 'closed') {
+      getKanbanLogger().debug(
+        { taskSessionId, taskId: taskSession.taskId, issueId: taskSession.issueId, completedRole, instanceId },
+        'auto-advance skipped: task already closed',
+      );
+      return false;
+    }
     const workflowStateBefore = taskSession.workflowState;
     const last = [...taskSession.conversationHistory].reverse().find(
       (e) => e.role === 'assistant' && e.source === completedRole,
     );
-    if (!last) return false;
+    if (!last) {
+      getKanbanLogger().info(
+        {
+          taskSessionId,
+          taskId: taskSession.taskId,
+          issueId: taskSession.issueId,
+          completedRole,
+          workflowState: taskSession.workflowState,
+          instanceId,
+        },
+        'auto-advance skipped: no assistant reply found for completed role',
+      );
+      return false;
+    }
     const parsed = parseKanbanAction(last.content);
+    getKanbanLogger().info(
+      {
+        taskSessionId,
+        taskId: taskSession.taskId,
+        issueId: taskSession.issueId,
+        completedRole,
+        workflowState: taskSession.workflowState,
+        instanceId,
+        assistantReplyPreview: previewForLog(last.content),
+        parsedAction: parsed?.action ?? null,
+        parsedPayloadPreview: previewForLog(parsed?.payload),
+      },
+      parsed
+        ? 'auto-advance parsed assistant workflow action'
+        : 'auto-advance skipped: no parseable KANBAN_ACTION found in latest assistant reply',
+    );
     if (!parsed) return false;
     try {
       await this.applyKanbanWorkflowAction(taskSession, completedRole, instanceId, parsed);
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
+      getKanbanLogger().warn(
+        {
+          err: e,
+          taskSessionId,
+          taskId: taskSession.taskId,
+          issueId: taskSession.issueId,
+          completedRole,
+          workflowState: taskSession.workflowState,
+          instanceId,
+          parsedAction: parsed.action,
+          parsedPayloadPreview: previewForLog(parsed.payload),
+        },
+        'auto-advance failed while applying parsed workflow action',
+      );
       void notifyKanbanTelegram(`[Kanban][${taskSession.issueId}] Workflow auto-advance failed: ${msg}`);
       return false;
     }
 
     const after = this.deps.store.getTaskSession(taskSessionId);
+    getKanbanLogger().info(
+      {
+        taskSessionId,
+        taskId: taskSession.taskId,
+        issueId: taskSession.issueId,
+        completedRole,
+        instanceId,
+        workflowStateBefore,
+        workflowStateAfter: after?.workflowState ?? null,
+        parsedAction: parsed.action,
+      },
+      after !== null && after.workflowState !== workflowStateBefore
+        ? 'auto-advance applied workflow action and changed lane'
+        : 'auto-advance applied workflow action but lane did not change',
+    );
     return after !== null && after.workflowState !== workflowStateBefore;
   }
 
@@ -386,7 +464,7 @@ export class WorkflowService {
       return;
     }
 
-    await this.maybeEnqueueSystemCheck(mid, completedRole);
+    await this.maybeEnqueueSystemCheck(mid);
   }
 
   /** Queue a human-authored user message and reset confirmation loop count. */
@@ -420,11 +498,11 @@ export class WorkflowService {
     if (inst) await this.deps.instanceManager.startInstance(inst.id);
   }
 
-  private async maybeEnqueueSystemCheck(task: TaskSession, completedRole: AgentRole): Promise<void> {
+  private async maybeEnqueueSystemCheck(task: TaskSession): Promise<void> {
     if (task.workflowState === 'todo' || task.workflowState === 'pending_start' || task.workflowState === 'closed')
       return;
     const expected = roleForActiveWorkflowState(task.workflowState);
-    if (!expected || expected !== completedRole) return;
+    if (!expected) return;
 
     const max = kanbanConfirmationMaxLoops();
     const n = task.confirmationLoopCount ?? 0;
@@ -435,7 +513,7 @@ export class WorkflowService {
       return;
     }
 
-    const content = buildSystemCheckPrompt(task, completedRole);
+    const content = buildSystemCheckPrompt(task, expected);
     this.deps.store.enqueueTaskMessage({
       queueKey: task.messageQueueKey,
       taskSessionId: task.id,
@@ -448,7 +526,7 @@ export class WorkflowService {
       confirmationLoopCount: n + 1,
     });
 
-    const inst = this.deps.store.findAgentInstance(task.id, completedRole);
+    const inst = this.deps.store.findAgentInstance(task.id, expected);
     if (inst) await this.deps.instanceManager.startInstance(inst.id);
   }
 
@@ -460,14 +538,36 @@ export class WorkflowService {
   ): Promise<void> {
     const defer = instanceId;
     const { workflowState } = taskSession;
+    const logSkip = (reason: string) => {
+      getKanbanLogger().info(
+        {
+          taskSessionId: taskSession.id,
+          taskId: taskSession.taskId,
+          issueId: taskSession.issueId,
+          completedRole,
+          workflowState,
+          instanceId,
+          parsedAction: parsed.action,
+          parsedPayloadPreview: previewForLog(parsed.payload),
+          reason,
+        },
+        'auto-advance ignored parsed workflow action',
+      );
+    };
     if (parsed.action === 'START_TESTING') {
-      if (workflowState !== 'in_progress' || completedRole !== 'developer') return;
+      if (workflowState !== 'in_progress' || completedRole !== 'developer') {
+        logSkip('START_TESTING requires developer in in_progress');
+        return;
+      }
       await this.startTesting(taskSession.id, defer);
       return;
     }
 
     if (parsed.action === 'SUBMIT_REVIEW') {
-      if (workflowState !== 'testing' || completedRole !== 'tester') return;
+      if (workflowState !== 'testing' || completedRole !== 'tester') {
+        logSkip('SUBMIT_REVIEW requires tester in testing');
+        return;
+      }
       await this.submitTaskForReview({
         ...defaultSubmitTaskForReviewInput(taskSession),
         deferStopInstanceId: defer,
@@ -476,19 +576,28 @@ export class WorkflowService {
     }
 
     if (parsed.action === 'REJECT_REVIEW') {
-      if (workflowState !== 'review' || completedRole !== 'reviewer') return;
+      if (workflowState !== 'review' || completedRole !== 'reviewer') {
+        logSkip('REJECT_REVIEW requires reviewer in review');
+        return;
+      }
       await this.rejectReview(taskSession.id, parsed.payload?.trim() || 'Rejected by reviewer.', defer);
       return;
     }
 
     if (parsed.action === 'APPROVE_MERGE') {
-      if (workflowState !== 'review' || completedRole !== 'reviewer') return;
+      if (workflowState !== 'review' || completedRole !== 'reviewer') {
+        logSkip('APPROVE_MERGE requires reviewer in review');
+        return;
+      }
       await this.mergeApprovedPullRequestAndStartRegression(taskSession.id, defer);
       return;
     }
 
     if (parsed.action === 'RETURN_TO_DEVELOPMENT') {
-      if (workflowState !== 'testing' || completedRole !== 'tester') return;
+      if (workflowState !== 'testing' || completedRole !== 'tester') {
+        logSkip('RETURN_TO_DEVELOPMENT requires tester in testing');
+        return;
+      }
       await this.returnFromFeatureTestingToDevelopment(
         taskSession.id,
         parsed.payload?.trim() || 'Feature tests failed; returning to development.',
@@ -498,17 +607,28 @@ export class WorkflowService {
     }
 
     if (parsed.action === 'PROCEED_TO_RELEASE') {
-      if (workflowState !== 'regression_testing' || completedRole !== 'tester') return;
+      if (workflowState !== 'regression_testing' || completedRole !== 'tester') {
+        logSkip('PROCEED_TO_RELEASE requires tester in regression_testing');
+        return;
+      }
       await this.proceedToPendingRelease(taskSession.id, defer);
       return;
     }
 
     if (parsed.action === 'CLOSE') {
-      if (completedRole !== 'tester') return;
-      if (workflowState !== 'pending_release') return;
+      if (completedRole !== 'tester') {
+        logSkip('CLOSE requires tester role');
+        return;
+      }
+      if (workflowState !== 'pending_release') {
+        logSkip('CLOSE requires pending_release state');
+        return;
+      }
       await this.closeTask(taskSession.id, defer);
       return;
     }
+
+    logSkip('unknown KANBAN_ACTION');
   }
 
   /**
@@ -892,6 +1012,9 @@ export class WorkflowService {
       taskSession.runtimeProfileId,
     );
     const assignPatch = mergeKanbanAssignee(taskSession, laneKind, member?.id);
+    const commentWithPrContext = taskSession.pullRequestUrl?.trim()
+      ? `${comment}\nPR URL: ${taskSession.pullRequestUrl.trim()}`
+      : comment;
 
     await notifyWorkflowStateTransition({
       task: taskSession,
@@ -908,7 +1031,7 @@ export class WorkflowService {
       runtime: resolved.runtime,
       kanbanAgent: resolved.kanbanAgent,
       preferredSkills: preferredSkillsForProjectLane(project, 'agent-dev', nextCount),
-      handoffComment: comment,
+      handoffComment: commentWithPrContext,
       runtimeProfileId: resolvedProfile,
       ...assignPatch,
       updatedAt: now(),
@@ -929,8 +1052,8 @@ export class WorkflowService {
 
     const logLine =
       reason === 'merge_conflict'
-        ? `Merge blocked (not mergeable). Round ${nextCount}. Assigned developer to resolve conflicts on the task branch, push, then re-run feature test → submit for review. Escalation runtime: ${resolved.runtime}. Detail: ${comment}`
-        : `Review rejected (round ${nextCount}). Escalation runtime: ${resolved.runtime}. Comment: ${comment}`;
+        ? `Merge blocked (not mergeable). Round ${nextCount}. Assigned developer to resolve conflicts on the task branch, push, then re-run feature test → submit for review. Escalation runtime: ${resolved.runtime}. Detail: ${commentWithPrContext}`
+        : `Review rejected (round ${nextCount}). Escalation runtime: ${resolved.runtime}. Comment: ${commentWithPrContext}`;
     await this.appendWorkflowComment(updated.id, logLine);
     return updated;
   }
@@ -954,27 +1077,35 @@ export class WorkflowService {
     // `committed` was true, a no-op commit attempt could skip push and cause API 404 / missing head.
     await this.deps.gitService.pushBranch(repoPath, taskSession.branchName!);
 
-    const pullRequest = await this.deps.scmClient.createPullRequest({
-      project,
-      title: input.prTitle,
-      body: input.prBody,
-      sourceBranch: taskSession.branchName!,
-      targetBranch: sprint.branchName,
-    });
+    const ensured = await this.ensureOpenReviewPullRequest(taskSession, input.prTitle, input.prBody);
+    const pullRequest = ensured.pullRequest;
+    const reviewTaskSession = ensured.taskSession;
+    let reviewMergeabilityNote = 'Host PR mergeability unavailable.';
+    if (pullRequest.number != null) {
+      try {
+        const mergeStatus = await this.deps.scmClient.getPullRequestMergeStatus(project, pullRequest.number);
+        reviewMergeabilityNote = mergeStatus.canMerge
+          ? `Host PR status: merge-ready (PR #${pullRequest.number}).`
+          : `Host PR status: not merge-ready yet (PR #${pullRequest.number}) — ${mergeStatus.reason ?? 'host reported blocked merge state'}.`;
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        reviewMergeabilityNote = `Host PR status unavailable for PR #${pullRequest.number}: ${msg.slice(0, 300)}`;
+      }
+    }
 
     const allTasks = this.projectTasks(project.id);
-    const { member, runtimeProfileIdHint } = resolveKanbanAssignment(project, 'claude-review', taskSession, allTasks, {});
+    const { member, runtimeProfileIdHint } = resolveKanbanAssignment(project, 'claude-review', reviewTaskSession, allTasks, {});
     const reviewerProfile = pickRuntimeProfile(
       project,
       'claude-review',
       undefined,
       runtimeProfileIdHint,
-      taskSession.runtimeProfileId,
+      reviewTaskSession.runtimeProfileId,
     );
-    const assignPatch = mergeKanbanAssignee(taskSession, 'claude-review', member?.id);
+    const assignPatch = mergeKanbanAssignee(reviewTaskSession, 'claude-review', member?.id);
 
     await notifyWorkflowStateTransition({
-      task: taskSession,
+      task: reviewTaskSession,
       from: 'testing',
       to: 'review',
       outgoingRole: 'tester',
@@ -982,7 +1113,7 @@ export class WorkflowService {
     });
 
     const updatedTaskSession = this.deps.store.upsertTaskSession({
-      ...taskSession,
+      ...reviewTaskSession,
       workflowState: 'review',
       pullRequestUrl: pullRequest.url,
       pullRequestNumber: pullRequest.number,
@@ -991,19 +1122,115 @@ export class WorkflowService {
       runtimeProfileId: reviewerProfile,
       ...assignPatch,
       historyComments: [
-        ...(taskSession.historyComments ?? []),
-        buildTransitionHistoryComment(taskSession, 'testing', 'review', 'tester', '提交评审（创建 PR）'),
+        ...(reviewTaskSession.historyComments ?? []),
+        buildTransitionHistoryComment(reviewTaskSession, 'testing', 'review', 'tester', '提交评审（创建 PR）'),
       ],
     });
 
+    await this.appendWorkflowComment(updatedTaskSession.id, `Created/reused PR ${pullRequest.url} and started reviewer.`);
+    await this.appendWorkflowComment(updatedTaskSession.id, reviewMergeabilityNote);
+
     await this.deps.instanceManager.upsertAndStart(
-      this.buildAgentInstance(updatedTaskSession, 'reviewer'),
+      this.buildAgentInstance(this.requireTaskSession(updatedTaskSession.id), 'reviewer'),
     );
     this.enqueueKickoffPrompt(this.requireTaskSession(updatedTaskSession.id));
 
-    await this.appendWorkflowComment(updatedTaskSession.id, `Created PR ${pullRequest.url} and started reviewer.`);
+    return { taskSession: this.requireTaskSession(updatedTaskSession.id), pullRequest };
+  }
 
-    return { taskSession: updatedTaskSession, pullRequest };
+  private async ensureOpenReviewPullRequest(taskSession: TaskSession, title?: string, body?: string): Promise<{
+    taskSession: TaskSession;
+    pullRequest: PullRequestRef;
+  }> {
+    if (taskSession.pullRequestNumber != null && taskSession.pullRequestUrl?.trim()) {
+      return {
+        taskSession,
+        pullRequest: {
+          url: taskSession.pullRequestUrl,
+          ...(taskSession.pullRequestNumber !== undefined ? { number: taskSession.pullRequestNumber } : {}),
+        },
+      };
+    }
+
+    const project = this.requireProject(taskSession.projectId);
+    const sprint = this.requireSprint(taskSession.sprintId);
+    const sourceBranch = taskSession.branchName;
+    if (!sourceBranch) {
+      throw new Error('branchName missing — cannot find or create review PR');
+    }
+
+    const existing = await this.deps.scmClient.findOpenPullRequest({
+      project,
+      sourceBranch,
+      targetBranch: sprint.branchName,
+    });
+    if (existing) {
+      await this.appendWorkflowComment(
+        taskSession.id,
+        `Review PR already exists (${existing.url}); reusing it for mergeability checks.`,
+      );
+      const updated = this.deps.store.upsertTaskSession({
+        ...taskSession,
+        pullRequestUrl: existing.url,
+        ...(existing.number !== undefined ? { pullRequestNumber: existing.number } : {}),
+      });
+      return { taskSession: updated, pullRequest: existing };
+    }
+    let pullRequest: PullRequestRef;
+    try {
+      pullRequest = await this.deps.scmClient.createPullRequest({
+        project,
+        title: title ?? `[${taskSession.issueId}] ${taskSession.title}`,
+        body:
+          body ??
+          [
+            `Kanban issue: **${taskSession.issueId}**`,
+            '',
+            taskSession.title,
+          ].join('\n'),
+        sourceBranch,
+        targetBranch: sprint.branchName,
+      });
+    } catch (e) {
+      const retryExisting = await this.deps.scmClient.findOpenPullRequest({
+        project,
+        sourceBranch,
+        targetBranch: sprint.branchName,
+      });
+      if (!retryExisting) throw e;
+      pullRequest = retryExisting;
+    }
+    await this.appendWorkflowComment(
+      taskSession.id,
+      `Review PR was missing; created/reused PR ${pullRequest.url} before mergeability check.`,
+    );
+    const updated = this.deps.store.upsertTaskSession({
+      ...taskSession,
+      pullRequestUrl: pullRequest.url,
+      ...(pullRequest.number !== undefined ? { pullRequestNumber: pullRequest.number } : {}),
+    });
+    return { taskSession: updated, pullRequest };
+  }
+
+  private async syncHostMergeBlockedComment(taskSession: TaskSession, detail: string): Promise<void> {
+    const text = [
+      'Host PR check failed after review approval attempt.',
+      `Reason: ${detail}`,
+      'Returned to development: update the task branch, resolve conflicts or host gating issues, push, then resubmit for review.',
+    ].join(' ');
+    if (taskSession.pullRequestNumber != null) {
+      try {
+        await this.syncReviewCommentToPrAndTask(taskSession.id, text);
+        return;
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        await this.appendWorkflowComment(
+          taskSession.id,
+          `Could not sync merge-blocked review comment to PR #${taskSession.pullRequestNumber}: ${msg.slice(0, 400)}`,
+        );
+      }
+    }
+    await this.appendWorkflowComment(taskSession.id, `Review (merge blocked): ${text}`);
   }
 
   async startTesting(taskSessionId: string, deferStopInstanceId?: string): Promise<TaskSession> {
@@ -1065,10 +1292,13 @@ export class WorkflowService {
     taskSessionId: string,
     deferStopInstanceId?: string,
   ): Promise<TaskSession> {
-    const taskSession = this.requireTaskSession(taskSessionId);
+    let taskSession = this.requireTaskSession(taskSessionId);
     this.assertTransition(taskSession.workflowState, 'regression_testing');
+
+    const ensured = await this.ensureOpenReviewPullRequest(taskSession);
+    taskSession = ensured.taskSession;
     if (taskSession.pullRequestNumber == null) {
-      throw new Error('Missing pullRequestNumber — create PR first (submit-review from testing).');
+      throw new Error('Missing pullRequestNumber — could not find or create review PR.');
     }
 
     const project = this.requireProject(taskSession.projectId);
@@ -1083,17 +1313,15 @@ export class WorkflowService {
     );
     if (!mergeStatus.canMerge) {
       const why = mergeStatus.reason ?? 'PR/MR is not mergeable';
-      await this.appendWorkflowComment(
-        taskSession.id,
-        [
-          `Merge was not run: ${why}.`,
-          'Only use `KANBAN_ACTION:APPROVE_MERGE` when the PR is open, not draft, and the host reports it merge-ready (no conflicts; required checks/reviews satisfied).',
-          'If the change must go back to development, end with `KANBAN_ACTION:REJECT_REVIEW` and put the reason on the following lines so the developer receives your comment.',
-        ].join(' '),
+      await this.syncHostMergeBlockedComment(
+        taskSession,
+        `PR #${taskSession.pullRequestNumber} is not ready to merge: ${why}`,
       );
-      throw new Error(
-        `PR #${taskSession.pullRequestNumber} is not ready to merge: ${why}. ` +
-          `Fix the PR on GitHub/GitLab, or use REJECT_REVIEW with an explanation for the developer.`,
+      return this.transitionReviewToDevelopment(
+        taskSession.id,
+        deferStopInstanceId,
+        'merge_conflict',
+        `PR #${taskSession.pullRequestNumber} is not ready to merge: ${why}`,
       );
     }
 
@@ -1102,24 +1330,22 @@ export class WorkflowService {
     } catch (e) {
       if (isScmMergeNotMergeableError(project, e)) {
         const detail = e instanceof Error ? e.message : String(e);
-        await this.appendWorkflowComment(
-          taskSession.id,
-          [
-            'Merge API failed: PR became not mergeable (race or host state).',
-            'Task stays in **review**. Use `KANBAN_ACTION:REJECT_REVIEW` with a short explanation for the developer, or resolve on the host and retry `KANBAN_ACTION:APPROVE_MERGE`.',
-            `SCM detail: ${detail.slice(0, 600)}`,
-          ].join(' '),
+        await this.syncHostMergeBlockedComment(
+          taskSession,
+          `Merge API failed because PR became not mergeable: ${detail.slice(0, 600)}`,
         );
         void notifyKanbanTelegram(
-          `[Kanban][${taskSession.issueId}] merge API failed (not mergeable); task remains in review — reviewer should REJECT_REVIEW or retry after fixing PR.`,
+          `[Kanban][${taskSession.issueId}] merge API failed (not mergeable); returning task to development for conflict or host-gate resolution.`,
         );
         getKanbanLogger().warn(
           { taskId: taskSession.id, issueId: taskSession.issueId, pullRequestNumber: taskSession.pullRequestNumber },
-          'merge: API reported not mergeable after pre-check; left task in review',
+          'merge: API reported not mergeable after pre-check; returning task to development',
         );
-        throw new Error(
-          `Merge failed (PR not mergeable): ${detail.slice(0, 400)}. ` +
-            `Use REJECT_REVIEW with explanation for the developer, or fix the PR and retry APPROVE_MERGE.`,
+        return this.transitionReviewToDevelopment(
+          taskSession.id,
+          deferStopInstanceId,
+          'merge_conflict',
+          `Merge failed (PR not mergeable): ${detail.slice(0, 400)}`,
         );
       }
       throw e;
@@ -1148,8 +1374,28 @@ export class WorkflowService {
       }
     }
 
-    await this.deps.gitService.fetchOrigin(repoPath);
-    await this.deps.gitService.checkoutOriginTrackingBranch(repoPath, mergeTarget);
+    try {
+      await this.deps.gitService.fetchOrigin(repoPath);
+      const checkoutResult = await this.deps.gitService.checkoutOriginTrackingBranch(repoPath, mergeTarget);
+      if (checkoutResult.discardedEntries.length > 0) {
+        const dirtyList = checkoutResult.discardedEntries.map((entry) => `- ${entry.raw}`).join('\n');
+        await this.appendWorkflowComment(
+          taskSession.id,
+          [
+            `Regression startup reset sprint branch "${mergeTarget}" in ${repoPath} to origin/${mergeTarget} and discarded local changes from the workflow-owned main clone.`,
+            'Discarded files:',
+            dirtyList,
+          ].join('\n'),
+        );
+      }
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      await this.appendWorkflowComment(
+        taskSession.id,
+        `Regression startup blocked: could not refresh sprint branch "${mergeTarget}" in ${repoPath}. ${msg.slice(0, 1200)}`,
+      );
+      throw e;
+    }
 
     const remoteRef = `origin/${mergeTarget}`;
     const baselineSha = await this.deps.gitService.resolveRefSha(repoPath, remoteRef);

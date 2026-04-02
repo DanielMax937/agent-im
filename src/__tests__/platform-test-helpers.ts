@@ -25,6 +25,12 @@ export class FakeGitService {
   public createSprintBranchResult = 'feature/sprint-alpha';
   public createTaskBranchResult = 'dev/issue-101';
   public commitResult = { committed: true };
+  public workingTreeStatusResult: Array<{
+    path: string;
+    indexStatus: string;
+    worktreeStatus: string;
+    raw: string;
+  }> = [];
 
   async createSprintBranch(): Promise<string> {
     this.calls.push('createSprintBranch');
@@ -56,6 +62,13 @@ export class FakeGitService {
     return sha;
   }
 
+  async getWorkingTreeStatus(): Promise<
+    Array<{ path: string; indexStatus: string; worktreeStatus: string; raw: string }>
+  > {
+    this.calls.push('getWorkingTreeStatus');
+    return this.workingTreeStatusResult;
+  }
+
   async commitAll(): Promise<{ committed: boolean }> {
     this.calls.push('commitAll');
     return this.commitResult;
@@ -65,8 +78,14 @@ export class FakeGitService {
     this.calls.push('pushBranch');
   }
 
-  async checkoutOriginTrackingBranch(repoPath: string, branch: string): Promise<void> {
+  async checkoutOriginTrackingBranch(repoPath: string, branch: string): Promise<{ discardedEntries: Array<{ path: string; indexStatus: string; worktreeStatus: string; raw: string }> }> {
+    const dirtyEntries = await this.getWorkingTreeStatus(repoPath);
     this.calls.push(`checkoutOriginTrackingBranch:${branch}`);
+    if (dirtyEntries.length > 0) {
+      this.calls.push(`resetHardOrigin:${branch}`);
+      this.calls.push('cleanFd');
+    }
+    return { discardedEntries: dirtyEntries };
   }
 
   async removeTaskWorktree(_repoPath: string, worktreePath: string): Promise<void> {
@@ -80,12 +99,14 @@ export class FakeScmClient implements ScmClient {
     url: 'https://example.test/pr/42',
     number: 42,
   };
+  public createPullRequestError: Error | null = null;
 
   /** When set, `mergePullRequest` throws (e.g. simulate GitHub 405 not mergeable). */
   public mergePullRequestError: Error | null = null;
 
   /** When null, `findOpenPullRequest` returns null (no existing release PR). */
   public findOpenPullRequestResult: PullRequestRef | null = null;
+  public findOpenPullRequestResults: Array<PullRequestRef | null> | null = null;
 
   public mergeStatusResult: PullRequestMergeStatus = { canMerge: true };
 
@@ -96,6 +117,7 @@ export class FakeScmClient implements ScmClient {
 
   async createPullRequest(): Promise<PullRequestRef> {
     this.calls.push('createPullRequest');
+    if (this.createPullRequestError) throw this.createPullRequestError;
     return this.pullRequest;
   }
 
@@ -110,6 +132,9 @@ export class FakeScmClient implements ScmClient {
 
   async findOpenPullRequest(input: FindOpenPullRequestInput): Promise<PullRequestRef | null> {
     this.calls.push(`findOpenPullRequest:${input.sourceBranch}->${input.targetBranch}`);
+    if (this.findOpenPullRequestResults && this.findOpenPullRequestResults.length > 0) {
+      return this.findOpenPullRequestResults.shift() ?? null;
+    }
     return this.findOpenPullRequestResult;
   }
 }

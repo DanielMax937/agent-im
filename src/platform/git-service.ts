@@ -47,6 +47,17 @@ export interface CommandResult {
   exitCode: number;
 }
 
+export interface WorkingTreeStatusEntry {
+  path: string;
+  indexStatus: string;
+  worktreeStatus: string;
+  raw: string;
+}
+
+export interface CheckoutOriginTrackingBranchResult {
+  discardedEntries: WorkingTreeStatusEntry[];
+}
+
 export interface CommandRunner {
   run(command: string, args: string[], cwd: string, allowedExitCodes?: number[]): Promise<CommandResult>;
 }
@@ -182,14 +193,41 @@ export class GitService {
     return result.stdout.trim();
   }
 
+  async getWorkingTreeStatus(repoPath: string): Promise<WorkingTreeStatusEntry[]> {
+    const result = await this.runGit(repoPath, ['status', '--short']);
+    return result.stdout
+      .split('\n')
+      .map((line) => line.trimEnd())
+      .filter(Boolean)
+      .map((line) => {
+        const normalized = line.startsWith('??') ? `?? ${line.slice(2).trimStart()}` : line;
+        const indexStatus = normalized.slice(0, 1);
+        const worktreeStatus = normalized.slice(1, 2);
+        const path = normalized.slice(3).trim();
+        return {
+          path,
+          indexStatus,
+          worktreeStatus,
+          raw: normalized,
+        };
+      });
+  }
+
   /**
    * Checkout local branch tracking `origin/<branch>` (e.g. main/master) after fetch.
    * Used for final regression testing on the integration branch in the main repo clone.
    */
-  async checkoutOriginTrackingBranch(repoPath: string, branch: string): Promise<void> {
+  async checkoutOriginTrackingBranch(repoPath: string, branch: string): Promise<CheckoutOriginTrackingBranchResult> {
+    const dirtyEntries = await this.getWorkingTreeStatus(repoPath);
     await this.runGit(repoPath, ['fetch', 'origin', branch]);
     await this.runGit(repoPath, ['checkout', branch]);
-    await this.runGit(repoPath, ['pull', '--ff-only', 'origin', branch]);
+    if (dirtyEntries.length > 0) {
+      await this.runGit(repoPath, ['reset', '--hard', `origin/${branch}`]);
+      await this.runGit(repoPath, ['clean', '-fd']);
+    } else {
+      await this.runGit(repoPath, ['pull', '--ff-only', 'origin', branch]);
+    }
+    return { discardedEntries: dirtyEntries };
   }
 
   private runGit(repoPath: string, args: string[], allowedExitCodes?: number[]): Promise<CommandResult> {

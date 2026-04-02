@@ -12,7 +12,23 @@ fi
 SKILL_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 PID_FILE="$CTI_HOME/runtime/bridge.pid"
 STATUS_FILE="$CTI_HOME/runtime/status.json"
-LOG_FILE="$CTI_HOME/logs/bridge-daemon.log"
+resolve_daemon_log_file() {
+  local dir="$CTI_HOME/logs"
+  local f=""
+  if [ -d "$dir" ]; then
+    f=$(ls -t "$dir"/bridge-daemon-*.log 2>/dev/null | head -1)
+    if [ -n "$f" ] && [ -f "$f" ]; then
+      echo "$f"
+      return
+    fi
+  fi
+  if [ -f "$dir/bridge-daemon.log" ]; then
+    echo "$dir/bridge-daemon.log"
+    return
+  fi
+  echo "$dir/bridge-daemon-$(date +%Y-%m-%d).log"
+}
+LOG_FILE="$(resolve_daemon_log_file)"
 
 # ── Common helpers ──
 

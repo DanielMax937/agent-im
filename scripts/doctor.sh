@@ -10,7 +10,23 @@ if [ -z "${CTI_HOME:-}" ]; then
 fi
 CONFIG_FILE="$CTI_HOME/config.env"
 PID_FILE="$CTI_HOME/runtime/bridge.pid"
-LOG_FILE="$CTI_HOME/logs/bridge-daemon.log"
+resolve_daemon_log_file() {
+  local dir="$CTI_HOME/logs"
+  local f=""
+  if [ -d "$dir" ]; then
+    f=$(ls -t "$dir"/bridge-daemon-*.log 2>/dev/null | head -1)
+    if [ -n "$f" ] && [ -f "$f" ]; then
+      echo "$f"
+      return
+    fi
+  fi
+  if [ -f "$dir/bridge-daemon.log" ]; then
+    echo "$dir/bridge-daemon.log"
+    return
+  fi
+  echo "$dir/bridge-daemon-$(date +%Y-%m-%d).log"
+}
+LOG_FILE="$(resolve_daemon_log_file)"
 
 PASS=0
 FAIL=0
