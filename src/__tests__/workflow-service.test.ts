@@ -470,6 +470,8 @@ describe('WorkflowService', () => {
     assert.ok(scmClient.calls.includes('createPullRequest'));
     assert.ok(scmClient.calls.includes('postPullRequestDiscussionComment'));
 
+    // Simulate human merging the release PR on the host.
+    scmClient.mergeStatusResult = { canMerge: false, terminalState: 'merged', reason: 'PR is already merged' };
     const closedTask = await workflowService.closeTask(taskSession.id);
     assert.equal(closedTask.workflowState, 'closed');
     assert.ok(instanceManager.stopped.includes('developer-instance'));
@@ -491,6 +493,8 @@ describe('WorkflowService', () => {
     assert.ok(scmClient.calls.includes('findOpenPullRequest:feature/sprint-alpha->master'));
     assert.ok(!scmClient.calls.includes('createPullRequest'));
     assert.ok(scmClient.calls.includes('postPullRequestDiscussionComment'));
+    // Simulate human merging the release PR on the host.
+    scmClient.mergeStatusResult = { canMerge: false, terminalState: 'merged', reason: 'PR is already merged' };
     await workflowService.closeTask(taskSession.id);
   });
 
@@ -1275,6 +1279,8 @@ describe('WorkflowService', () => {
     const pendingResult = await workflowService.proceedToPendingRelease(taskSession.id);
     assert.equal(pendingResult.workflowState, 'pending_release');
 
+    // Simulate human merging the release PR on the host.
+    scmClient.mergeStatusResult = { canMerge: false, terminalState: 'merged', reason: 'PR is already merged' };
     const closeResult = await workflowService.closeTask(taskSession.id);
     assert.equal(closeResult.workflowState, 'closed');
     assert.equal(closeResult.releasePullRequestUrl, 'https://example.test/pr/42');

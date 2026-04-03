@@ -157,6 +157,15 @@ export class GitService {
     await this.runGit(repoPath, ['worktree', 'remove', '--force', wt]);
   }
 
+  /**
+   * Creates a read-only linked worktree pointing to `origin/<branch>`.
+   * Used for coverage runs on the base branch after a sprint is merged.
+   */
+  async createCoverageWorktree(repoPath: string, worktreePath: string, branch: string): Promise<void> {
+    await this.runGit(repoPath, ['fetch', 'origin', branch]);
+    await this.runGit(repoPath, ['worktree', 'add', '--detach', worktreePath, `origin/${branch}`]);
+  }
+
   async commitAll(input: CommitChangesInput): Promise<{ committed: boolean }> {
     await this.runGit(input.repoPath, ['add', '.']);
     const diffResult = await this.runGit(

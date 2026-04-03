@@ -117,6 +117,8 @@ export interface PlatformStoreApi {
   }): { rows: KanbanAgentTurnRecord[]; total: number };
   getKanbanAgentTurn(id: string): KanbanAgentTurnRecord | null;
   updateKanbanAgentTurnStreamError(id: string, streamError: string | null): void;
+  getProjectCoverage(projectId: string): import('./types').ProjectCoverageRecord;
+  updateProjectCoverage(projectId: string, coverage: number): { updated: boolean; coverage: number };
 }
 
 export interface WorkflowServiceApi {
@@ -503,6 +505,21 @@ export function createPlatformApp(options: CreatePlatformAppOptions): PlatformAp
           : notFoundResponse('Project', projectParams.projectId);
       }
 
+      // ─── Coverage endpoints ────────────────────────────────────────────────
+      const coverageParams = matchPath('/api/projects/:projectId/coverage', pathname);
+      if (request.method === 'GET' && coverageParams) {
+        return jsonResponse(options.store.getProjectCoverage(coverageParams.projectId));
+      }
+      if (request.method === 'POST' && coverageParams) {
+        const body = await readRequestBody<{ coverage?: unknown }>(request);
+        const coverage = Number(body?.coverage);
+        if (!isFinite(coverage) || coverage < 0 || coverage > 100) {
+          return jsonResponse({ error: 'coverage must be a number between 0 and 100' }, 400);
+        }
+        const result = options.store.updateProjectCoverage(coverageParams.projectId, coverage);
+        return jsonResponse(result);
+      }
+
       if (request.method === 'GET' && pathname === '/api/sprints') {
         return jsonResponse(options.store.listSprints(searchParams.get('projectId') ?? undefined));
       }
@@ -809,9 +826,13 @@ export function createPlatformApp(options: CreatePlatformAppOptions): PlatformAp
 
       const closeTaskParams = matchPath('/api/workflows/tasks/:taskSessionId/close', pathname);
       if (request.method === 'POST' && closeTaskParams) {
-        return jsonResponse(
-          await options.workflowService.closeTask(closeTaskParams.taskSessionId),
-        );
+        try {
+          return jsonResponse(
+            await options.workflowService.closeTask(closeTaskParams.taskSessionId),
+          );
+        } catch (e) {
+          return jsonResponse({ error: e instanceof Error ? e.message : String(e) }, 400);
+        }
       }
 
       const deleteTaskParams = matchPath('/api/workflows/tasks/:taskSessionId', pathname);

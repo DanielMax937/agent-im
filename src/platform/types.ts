@@ -64,6 +64,17 @@ export interface ProjectRepository {
   scmTokenEnvVar?: string;
 }
 
+/**
+ * Per-project unit-test coverage record. Coverage is the total lines percentage (0–100) from
+ * coverage/coverage-summary.json. Only updated when the new value is higher than the stored value.
+ */
+export interface ProjectCoverageRecord {
+  projectId: string;
+  /** Lines coverage percentage (0–100). Starts at 0 for new projects. */
+  coverage: number;
+  updatedAt: string;
+}
+
 export interface Project {
   id: string;
   name: string;
@@ -90,6 +101,12 @@ export interface Project {
    */
   kanbanLaneSkills?: Partial<Record<KanbanAgentKind, string[]>>;
   repository: ProjectRepository;
+  /**
+   * Shell command to run unit tests and produce `coverage/coverage-summary.json`.
+   * Defaults to `npm test -- --coverage --coverageReporters=json-summary`.
+   * Set to empty string to skip automated coverage checking on close.
+   */
+  coverageCommand?: string;
   agents: ProjectAgentProfile[];
   createdAt: string;
   updatedAt: string;

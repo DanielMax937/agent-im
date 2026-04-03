@@ -1,6 +1,9 @@
 import crypto from 'node:crypto';
+import { exec } from 'node:child_process';
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
+import { promisify } from 'node:util';
 
 import { loadConfig, normalizeRunners, resolveRuntimeForPlatformInstance } from '../config';
 import { PendingPermissions } from '../permission-gateway';
@@ -1941,9 +1944,122 @@ export class WorkflowService {
     }
   }
 
+  /**
+   * Creates a temporary worktree on `baseBranch`, runs the configured test coverage command,
+   * parses `coverage/coverage-summary.json`, and updates the project's stored coverage.
+   * Throws if tests fail or if coverage regresses below the stored high-water mark.
+   */
+  private async runCoverageAndUpdateAfterClose(
+    project: Project,
+    baseBranch: string,
+    taskSessionId: string,
+  ): Promise<void> {
+    const coverageCmd = project.coverageCommand;
+    if (coverageCmd === '') {
+      // Explicitly disabled by project config.
+      getKanbanLogger().info({ projectId: project.id, taskSessionId }, 'Coverage check skipped (coverageCommand is empty)');
+      return;
+    }
+    const cmd = coverageCmd ?? 'npm test -- --coverage --coverageReporters=json-summary';
+    const repoPath = project.repository.localPath;
+    const tmpDir = path.join(os.tmpdir(), `cti-cov-${Date.now()}-${taskSessionId.slice(0, 8)}`);
+    const execAsync = promisify(exec);
+
+    try {
+      await this.deps.gitService.createCoverageWorktree(repoPath, tmpDir, baseBranch);
+
+      // Symlink node_modules from main repo so tests can find dependencies immediately.
+      const mainModules = path.join(repoPath, 'node_modules');
+      const wtModules = path.join(tmpDir, 'node_modules');
+      if (fs.existsSync(mainModules) && !fs.existsSync(wtModules)) {
+        try {
+          fs.symlinkSync(mainModules, wtModules);
+        } catch {
+          // Non-fatal; test command may still work via workspace/hoisting.
+        }
+      }
+
+      try {
+        await execAsync(cmd, { cwd: tmpDir, timeout: 300_000 });
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        throw new Error(`Test execution failed on ${baseBranch}: ${msg.slice(0, 1200)}`);
+      }
+
+      const summaryPath = path.join(tmpDir, 'coverage', 'coverage-summary.json');
+      if (!fs.existsSync(summaryPath)) {
+        throw new Error(
+          `Coverage report not found at coverage/coverage-summary.json. Ensure the test command generates it (e.g. --coverageReporters=json-summary).`,
+        );
+      }
+
+      const summary = JSON.parse(fs.readFileSync(summaryPath, 'utf-8')) as {
+        total?: { lines?: { pct?: number } };
+      };
+      const pct = summary?.total?.lines?.pct;
+      if (typeof pct !== 'number' || !isFinite(pct)) {
+        throw new Error(`Invalid coverage value in coverage/coverage-summary.json`);
+      }
+
+      const saved = this.deps.store.getProjectCoverage(project.id);
+      if (pct < saved.coverage) {
+        throw new Error(
+          `Coverage regression: ${baseBranch} coverage is ${pct.toFixed(2)}% but the project high-water mark is ${saved.coverage.toFixed(2)}%. Fix coverage regressions before closing.`,
+        );
+      }
+
+      const result = this.deps.store.updateProjectCoverage(project.id, pct);
+      getKanbanLogger().info(
+        { projectId: project.id, coverage: pct, updated: result.updated, taskSessionId },
+        'Post-close coverage check passed',
+      );
+    } finally {
+      try {
+        await this.deps.gitService.removeTaskWorktree(repoPath, tmpDir);
+      } catch {
+        try {
+          fs.rmSync(tmpDir, { recursive: true, force: true });
+        } catch {
+          /* best-effort cleanup */
+        }
+      }
+    }
+  }
+
   async closeTask(taskSessionId: string, deferStopInstanceId?: string): Promise<TaskSession> {
     const taskSession = this.requireTaskSession(taskSessionId);
     this.assertTransition(taskSession.workflowState, 'closed');
+
+    const project = this.requireProject(taskSession.projectId);
+    const sprint = this.requireSprint(taskSession.sprintId);
+
+    // Feature 5a: Verify the release PR has been merged before allowing close.
+    const prNumber = taskSession.releasePullRequestNumber;
+    if (prNumber != null) {
+      let mergeStatus: Awaited<ReturnType<typeof this.deps.scmClient.getPullRequestMergeStatus>>;
+      try {
+        mergeStatus = await this.deps.scmClient.getPullRequestMergeStatus(project, prNumber);
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        getKanbanLogger().warn({ err: e, taskSessionId, prNumber }, 'Could not verify release PR merge status');
+        throw new Error(
+          `Cannot verify release PR #${prNumber} merge status: ${msg.slice(0, 400)}. Check SCM credentials or merge the PR manually and retry.`,
+        );
+      }
+      if (mergeStatus.terminalState !== 'merged') {
+        throw new Error(
+          `Release PR #${prNumber} has not been merged yet (${mergeStatus.reason ?? mergeStatus.terminalState ?? 'not merged'}). Merge the release PR on the host first, then close this task.`,
+        );
+      }
+    }
+
+    // Feature 5b: Run tests on the base branch, parse coverage, and update project high-water mark.
+    this.assertProjectLocalRepositoryPath(project);
+    await this.runCoverageAndUpdateAfterClose(
+      project,
+      sprint.baseBranch ?? project.repository.baseBranch,
+      taskSessionId,
+    );
 
     let releasePatch: Partial<TaskSession> = {};
     if (taskSession.workflowState === 'pending_release') {

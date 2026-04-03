@@ -422,6 +422,8 @@ describe('Platform app integration', () => {
       });
       assert.equal((proceedRelease.body as { workflowState: string }).workflowState, 'pending_release');
 
+      // Simulate human merging the release PR on the host.
+      scmClient.mergeStatusResult = { canMerge: false, terminalState: 'merged', reason: 'PR is already merged' };
       const closeTask = await fetchJson(server.baseUrl, `/api/workflows/tasks/${taskHappy.id}/close`, {
         method: 'POST',
       });

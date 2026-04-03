@@ -12,6 +12,7 @@ import type {
   KanbanAgentTurnRecord,
   PendingApprovalRecord,
   Project,
+  ProjectCoverageRecord,
   Sprint,
   TaskConversationEntry,
   TaskQueueMessage,
@@ -83,6 +84,7 @@ export class JsonPlatformStore {
   private agentInstances = new Map<string, AgentInstanceRecord>();
   private queues = new Map<string, TaskQueueMessage[]>();
   private approvals = new Map<string, PendingApprovalRecord>();
+  private coverageMap = new Map<string, ProjectCoverageRecord>();
 
   constructor(options?: JsonPlatformStoreOptions) {
     const dbPath = options?.dbPath ?? defaultDbPath();
@@ -204,6 +206,12 @@ export class JsonPlatformStore {
       CREATE INDEX IF NOT EXISTS idx_kanban_turns_project_task ON kanban_agent_turns(project_id, task_id);
       CREATE INDEX IF NOT EXISTS idx_kanban_turns_session ON kanban_agent_turns(task_session_id);
       CREATE INDEX IF NOT EXISTS idx_kanban_turns_created ON kanban_agent_turns(created_at);
+
+      CREATE TABLE IF NOT EXISTS project_coverage (
+        project_id TEXT PRIMARY KEY NOT NULL,
+        coverage REAL NOT NULL DEFAULT 0,
+        updated_at TEXT NOT NULL
+      );
     `);
   }
 
@@ -281,6 +289,7 @@ export class JsonPlatformStore {
     this.agentInstances.clear();
     this.queues.clear();
     this.approvals.clear();
+    this.coverageMap.clear();
 
     for (const row of this.db.prepare('SELECT id, payload FROM projects').all() as { id: string; payload: string }[]) {
       this.projects.set(row.id, JSON.parse(row.payload) as Project);
@@ -302,6 +311,9 @@ export class JsonPlatformStore {
     }
     for (const row of this.db.prepare('SELECT id, payload FROM approvals').all() as { id: string; payload: string }[]) {
       this.approvals.set(row.id, JSON.parse(row.payload) as PendingApprovalRecord);
+    }
+    for (const row of this.db.prepare('SELECT project_id, coverage, updated_at FROM project_coverage').all() as { project_id: string; coverage: number; updated_at: string }[]) {
+      this.coverageMap.set(row.project_id, { projectId: row.project_id, coverage: row.coverage, updatedAt: row.updated_at });
     }
   }
 
@@ -774,5 +786,43 @@ export class JsonPlatformStore {
         streamError: row.stream_error ?? undefined,
       })),
     };
+  }
+
+  // ─── Project Coverage ──────────────────────────────────────────────────────
+
+  /**
+   * Returns the coverage record for a project. Defaults to coverage=0 if not yet set.
+   */
+  getProjectCoverage(projectId: string): ProjectCoverageRecord {
+    return (
+      this.coverageMap.get(projectId) ?? {
+        projectId,
+        coverage: 0,
+        updatedAt: new Date(0).toISOString(),
+      }
+    );
+  }
+
+  /**
+   * Updates the project's coverage only when `newCoverage > current`.
+   * Returns whether an update was performed and the new current value.
+   */
+  updateProjectCoverage(projectId: string, newCoverage: number): { updated: boolean; coverage: number } {
+    const current = this.getProjectCoverage(projectId);
+    if (newCoverage <= current.coverage) {
+      return { updated: false, coverage: current.coverage };
+    }
+    const record: ProjectCoverageRecord = {
+      projectId,
+      coverage: newCoverage,
+      updatedAt: now(),
+    };
+    this.coverageMap.set(projectId, record);
+    this.db
+      .prepare(
+        'INSERT OR REPLACE INTO project_coverage (project_id, coverage, updated_at) VALUES (?, ?, ?)',
+      )
+      .run(projectId, newCoverage, record.updatedAt);
+    return { updated: true, coverage: newCoverage };
   }
 }

@@ -817,7 +817,16 @@ export default function BoardPage() {
         const res = await fetch(`/api/workflows/tasks/${encodeURIComponent(task.id)}/close`, {
           method: 'POST',
         });
-        if (!res.ok) throw new Error(await res.text());
+        if (!res.ok) {
+          let errMsg: string;
+          try {
+            const body = (await res.json()) as { error?: string };
+            errMsg = body?.error ?? (await res.text());
+          } catch {
+            errMsg = await res.text();
+          }
+          throw new Error(`[${task.issueId}] ${errMsg}`);
+        }
       }
       setBulkCloseOpen(false);
       setBulkCloseSelectedTaskIds([]);

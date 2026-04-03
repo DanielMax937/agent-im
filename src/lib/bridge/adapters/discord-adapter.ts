@@ -30,6 +30,7 @@ import {
   AutoModeRedisTransport,
   runAutoModeRedisInboundLoop,
 } from '../redis-local-transport';
+import { buildDiscordRestProxyAgent, configureDiscordGatewayProxy } from '../discord-ws-proxy';
 
 /** Max number of message IDs to keep for dedup. */
 const DEDUP_MAX = 1000;
@@ -142,9 +143,14 @@ export class DiscordAdapter extends BaseChannelAdapter {
 
     const token = this.d('bridge_discord_bot_token') || '';
 
+    const cfg = loadConfig();
+    configureDiscordGatewayProxy(cfg.proxy);
+
     // Dynamic import to avoid bundler resolving native modules
     const djs = await loadDiscordJs();
     const { Client, GatewayIntentBits, Partials } = djs;
+
+    const restProxyAgent = buildDiscordRestProxyAgent(cfg.proxy);
 
     this.client = new Client({
       intents: [
@@ -154,6 +160,7 @@ export class DiscordAdapter extends BaseChannelAdapter {
         GatewayIntentBits.DirectMessages,
       ],
       partials: [Partials.Channel],
+      ...(restProxyAgent ? { rest: { agent: restProxyAgent } } : {}),
     });
 
     // Register event handlers before login
@@ -207,6 +214,7 @@ export class DiscordAdapter extends BaseChannelAdapter {
       }
       this.client = null;
     }
+    configureDiscordGatewayProxy(undefined);
 
     // Reject all waiting consumers
     for (const waiter of this.waiters) {

@@ -12,12 +12,14 @@
     "dev:bridge": "NODE_OPTIONS='--experimental-sqlite' tsx src/main.ts",
     "dev:web": "NODE_OPTIONS='--experimental-sqlite' PATH=\"/opt/homebrew/bin:$HOME/.local/bin:$PATH\" next dev",
     "start": "NODE_OPTIONS='--experimental-sqlite' PATH=\"/opt/homebrew/bin:$HOME/.local/bin:$PATH\" next start",
-    "test": "CTI_HOME=$(mktemp -d) CTI_KANBAN_PLATFORM_DIR=cti-home NODE_OPTIONS='--experimental-sqlite' node --test --test-concurrency=1 --import tsx --test-timeout=15000 src/__tests__/*.test.ts"
+    "test": "CTI_HOME=$(mktemp -d) CTI_KANBAN_PLATFORM_DIR=cti-home NODE_OPTIONS='--experimental-sqlite' node --test --test-concurrency=1 --import tsx --test-timeout=15000 src/__tests__/*.test.ts",
+    "postinstall": "patch-package"
   },
   "dependencies": {
     "@anthropic-ai/claude-agent-sdk": "^0.2.62",
     "@larksuiteoapi/node-sdk": "^1.59.0",
     "discord.js": "^14.25.1",
+    "https-proxy-agent": "^7.0.6",
     "markdown-it": "^14.1.1",
     "next": "^16.1.6",
     "pino": "^10.3.1",
@@ -37,6 +39,7 @@
     "@types/react-dom": "^19.2.3",
     "@types/ws": "^8.5.0",
     "esbuild": "^0.25.0",
+    "patch-package": "^8.0.1",
     "tsx": "^4.21.0",
     "typescript": "^5"
   },

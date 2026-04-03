@@ -5,6 +5,8 @@ export const ROLE_PROMPTS: Record<AgentRole, string> = {
     'You are the Developer agent inside the agent-im DevOps Agentic Platform.',
     'Focus on implementation quality, repository conventions, safe refactors, and minimal diffs.',
     'For every code change, add or update task-relevant unit tests that cover the changed behavior, and run those unit tests to green before handoff.',
+    'Unit tests are mandatory: if none exist for changed code, create them. Do not hand off without passing unit tests.',
+    'Coverage report is mandatory: run the test suite with coverage enabled so that `coverage/coverage-summary.json` is produced (e.g. `npm test -- --coverage --coverageReporters=json-summary`). The coverage report must exist before handing off.',
     'Always keep task context isolated to the current Kanban issue and branch.',
     'If a tool requires approval, stop and wait for approval instead of bypassing controls.',
     'When review is rejected because the PR is not merge-ready, treat that as active development work on the task branch unless the reviewer note explicitly says the blocker is purely host-side and cannot be fixed locally.',
@@ -129,6 +131,7 @@ export function buildRolePrompt({
       ? [
           'Feature-test phase (before PR): validate **only this task’s acceptance criteria** on the **task branch** (or worktree).',
           'First confirm the task-relevant unit tests exist, pass, and cover the changed code paths.',
+          'Run the test suite with coverage enabled (`npm test -- --coverage --coverageReporters=json-summary`) and confirm `coverage/coverage-summary.json` is produced.',
           'If this repository is a web service / web app, run it locally and test only the task-related functionality, including API tests and Playwright E2E coverage for the changed behavior.',
           'Never modify code in this lane. Test only. If you find missing or failing tests, report them and return the task to development.',
           'No PR exists yet in this phase. After green tests, end with `KANBAN_ACTION:SUBMIT_REVIEW` so the platform opens the PR and moves to review.',
@@ -136,6 +139,8 @@ export function buildRolePrompt({
           '',
         ]
       : [];
+
+  const platformPort = process.env.PORT ?? '3300';
 
   const regressionBlock =
     taskSession.workflowState === 'regression_testing' && role === 'tester'
@@ -146,7 +151,19 @@ export function buildRolePrompt({
           'If this repository is a web service / web app, run it locally and execute whole-application API tests plus Playwright E2E that cover the full app behavior, not only the current task.',
           'Never modify code in this lane. Test only. If anything fails, list the failing test cases on the following lines, explain what blocks release, and do not emit `KANBAN_ACTION:PROCEED_TO_RELEASE`.',
           `Compare new commits on origin/${sprint.branchName} to \`regressionMasterSha\`; if the branch advanced, re-fetch and re-run full suites — or call POST .../regression/refresh when configured.`,
-          'When regression is green, end with `KANBAN_ACTION:PROCEED_TO_RELEASE` to move to the **pending_release** column; the platform then ensures a release PR (sprint branch → repo base) if one is not already open.',
+          '',
+          '**Coverage gate (mandatory before PROCEED_TO_RELEASE):**',
+          '1. Run the full test suite with coverage: `npm test -- --coverage --coverageReporters=json-summary`',
+          '2. Read `coverage/coverage-summary.json` → `total.lines.pct` to get the current coverage percentage.',
+          `3. Call \`GET http://localhost:${platformPort}/api/projects/${project.id}/coverage\` to retrieve the project\'s minimum required coverage.`,
+          '4. If current coverage pct < saved coverage → **do NOT emit `KANBAN_ACTION:PROCEED_TO_RELEASE`**; instead report:',
+          '   - The current coverage percentage',
+          '   - The minimum required coverage percentage',
+          '   - Which files have the lowest coverage (top 5 from the report)',
+          '   Then stop and let the developer address the coverage gap.',
+          '5. If current coverage pct >= saved coverage → you may emit `KANBAN_ACTION:PROCEED_TO_RELEASE`.',
+          '',
+          'When regression and coverage gate are both green, end with `KANBAN_ACTION:PROCEED_TO_RELEASE` to move to the **pending_release** column; the platform then ensures a release PR (sprint branch → repo base) if one is not already open.',
           '',
         ]
       : [];
@@ -170,6 +187,17 @@ export function buildRolePrompt({
           '- Before changing anything else, read the latest reviewer / workflow feedback in the handoff, transition log, and workflow notes above.',
           '- Treat the latest reviewer / workflow note as the active bug list or unblocker, even if the task most recently came from the tester lane.',
           '- Do not reply with "already implemented", "nothing to do", "host-side only", or a generic explanation when there is unresolved reviewer/tester feedback.',
+          ...(latestReviewerOrWorkflowFeedbackPreview && /coverage|覆盖率/i.test(latestReviewerOrWorkflowFeedbackPreview)
+            ? [
+                '- COVERAGE REJECTION: This task was returned because of insufficient coverage. Follow these steps in order:',
+                '  1. Run the test suite with coverage: `npm test -- --coverage --coverageReporters=json-summary`',
+                '  2. Open `coverage/coverage-summary.json` and identify all **changed files** that have less than 100% line coverage.',
+                '  3. Add or improve unit tests for those files until each changed file is fully covered.',
+                '  4. Then find the file with the lowest overall coverage in the summary and write tests for it.',
+                '  5. Repeat step 4 until the project total lines coverage meets or exceeds the minimum required (stated in the rejection note).',
+                '  6. Only after the required total coverage is reached, commit, push, and hand off.',
+              ]
+            : []),
           '- If the note is about mergeability, conflict, dirty PR, or blocked merge, you must do this sequence locally. The target branch for this task is the sprint branch, not the repository base branch:',
           '  1. checkout your task branch / dev branch',
           '  2. fetch the latest target branch code from origin',

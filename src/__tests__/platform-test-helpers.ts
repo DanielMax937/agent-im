@@ -91,6 +91,10 @@ export class FakeGitService {
   async removeTaskWorktree(_repoPath: string, worktreePath: string): Promise<void> {
     this.calls.push(`removeTaskWorktree:${worktreePath}`);
   }
+
+  async createCoverageWorktree(_repoPath: string, worktreePath: string, _branch: string): Promise<void> {
+    this.calls.push(`createCoverageWorktree:${worktreePath}`);
+  }
 }
 
 export class FakeScmClient implements ScmClient {
@@ -207,6 +211,8 @@ export function createProject(store: JsonPlatformStore, overrides: Partial<Proje
       scmProject: 'demo/agent-im',
       scmTokenEnvVar: 'GITHUB_TOKEN',
     },
+    // Disable coverage command in tests to avoid running real npm test.
+    coverageCommand: overrides.coverageCommand ?? '',
     agents: overrides.agents ?? [],
     createdAt: overrides.createdAt ?? now,
     updatedAt: overrides.updatedAt ?? now,
