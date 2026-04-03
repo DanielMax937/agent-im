@@ -1288,4 +1288,72 @@ describe('WorkflowService', () => {
     assert.ok(scmClient.calls.some((c) => c.startsWith('findOpenPullRequest:')));
     assert.ok(scmClient.calls.includes('postPullRequestDiscussionComment'));
   });
+
+  it('private repo: mergeApprovedPullRequestAndStartRegression sets self-host-runner lane without starting AI instance', async () => {
+    const { workflowService, store, instanceManager } = createHarness();
+    const project = createProject(store, { isPrivate: true });
+    const sprint = createSprint(store, project.id);
+    const taskSession = createTaskSession(store, project.id, sprint.id, {
+      workflowState: 'review',
+      pullRequestNumber: 5,
+    });
+
+    const result = await workflowService.startRegressionTesting(taskSession.id);
+
+    assert.equal(result.workflowState, 'regression_testing');
+    assert.equal(result.kanbanAgent, 'self-host-runner');
+    // No AI instance should have been started for the self-host-runner lane
+    assert.equal(instanceManager.started.filter((s) => s.includes(taskSession.id)).length, 0);
+  });
+
+  it('processCiCallback advances private-repo task to pending_release on success', async () => {
+    const { workflowService, store, scmClient } = createHarness();
+    const project = createProject(store, { isPrivate: true });
+    const sprint = createSprint(store, project.id);
+    const taskSession = createTaskSession(store, project.id, sprint.id, {
+      workflowState: 'regression_testing',
+      kanbanAgent: 'self-host-runner',
+    });
+
+    const result = await workflowService.processCiCallback(taskSession.id, 'success', undefined, 78.5);
+
+    assert.equal(result.workflowState, 'pending_release');
+    const coverage = store.getProjectCoverage(project.id);
+    assert.equal(coverage.coverage, 78.5);
+    // Coverage history should have an entry
+    const history = store.getCoverageHistory(project.id);
+    assert.ok(history.length > 0);
+    assert.equal(history[0].coverage, 78.5);
+  });
+
+  it('processCiCallback returns private-repo task to development on failure', async () => {
+    const { workflowService, store } = createHarness();
+    const project = createProject(store, { isPrivate: true });
+    const sprint = createSprint(store, project.id);
+    const taskSession = createTaskSession(store, project.id, sprint.id, {
+      workflowState: 'regression_testing',
+      kanbanAgent: 'self-host-runner',
+    });
+
+    const result = await workflowService.processCiCallback(taskSession.id, 'failure', 'Build failed: ld error');
+
+    assert.equal(result.workflowState, 'in_progress');
+    const t = store.getTaskSession(taskSession.id)!;
+    assert.ok(t.handoffComment?.includes('Build failed: ld error'));
+  });
+
+  it('processCiCallback rejects when task is not in regression_testing with self-host-runner', async () => {
+    const { workflowService, store } = createHarness();
+    const project = createProject(store, { isPrivate: true });
+    const sprint = createSprint(store, project.id);
+    const taskSession = createTaskSession(store, project.id, sprint.id, {
+      workflowState: 'regression_testing',
+      // No kanbanAgent set — should reject
+    });
+
+    await assert.rejects(
+      () => workflowService.processCiCallback(taskSession.id, 'success'),
+      /self-host-runner/,
+    );
+  });
 });

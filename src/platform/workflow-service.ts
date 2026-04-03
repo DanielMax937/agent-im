@@ -57,12 +57,22 @@ const DEPENDENCY_SATISFIED_STATES = new Set<TaskWorkflowState>(['pending_release
 const ALLOWED_TRANSITIONS: Record<TaskWorkflowState, TaskWorkflowState[]> = {
   todo: ['pending_start'],
   pending_start: ['in_progress'],
-  in_progress: ['pre_testing'],
+  // Hotfix path: in_progress → testing (skippping pre_testing) handled by applyKanbanWorkflowAction
+  in_progress: ['pre_testing', 'testing'],
   pre_testing: ['testing'],
   testing: ['review', 'in_progress'],
   review: ['in_progress', 'regression_testing'],
-  regression_testing: ['pending_release'],
-  pending_release: ['closed'],
+  // pending_uat inserted by proceedToPendingRelease when project.requiresUat is true
+  regression_testing: ['pending_uat', 'pending_release', 'in_progress'],
+  pending_uat: ['pending_release', 'regression_testing'],
+  pending_release: ['closing', 'closed'],
+  /** Transient: async PR/coverage check running; finalises to closed or reverts to pending_release. */
+  closing: ['closed', 'pending_release'],
+  /** Blocked: restores to blockedFromState when unblocked; runner is stopped. */
+  blocked: [
+    'todo', 'pending_start', 'in_progress', 'pre_testing', 'review',
+    'testing', 'regression_testing', 'pending_uat', 'pending_release',
+  ],
   closed: [],
 };
 
@@ -88,7 +98,10 @@ export function roleForActiveWorkflowState(state: TaskWorkflowState): AgentRole 
     case 'regression_testing':
       return 'tester';
     case 'pending_release':
-      /** Human-only column: ensure/link release PR + PR comment; no runner. */
+    case 'pending_uat':
+    case 'closing':
+    case 'blocked':
+      /** Human-only or transient columns: no automated runner. */
       return null;
     default:
       return null;
@@ -610,7 +623,12 @@ export class WorkflowService {
         logSkip('START_TESTING requires developer in in_progress');
         return;
       }
-      await this.startTesting(taskSession.id, defer);
+      // Hotfix flag: skip pre_testing and go directly to feature testing.
+      if (taskSession.isHotfix) {
+        await this.startFeatureTesting(taskSession.id, defer);
+      } else {
+        await this.startTesting(taskSession.id, defer);
+      }
       return;
     }
 
@@ -778,6 +796,7 @@ export class WorkflowService {
       issueId,
       title: input.title,
       ...(dependsOnIssueIds.length ? { dependsOnIssueIds } : {}),
+      ...(input.isHotfix ? { isHotfix: true } : {}),
       workflowState: 'todo',
       runtime: 'claude',
       role: 'developer',
@@ -1358,12 +1377,15 @@ export class WorkflowService {
     );
     const assignPatch = mergeKanbanAssignee(taskSession, 'copilot-test', member?.id);
 
+    const fromState = taskSession.workflowState; // 'pre_testing' or 'in_progress' (hotfix)
+    const actionLabel = taskSession.isHotfix ? '进入功能测试（快速通道）' : '进入功能测试';
+
     await notifyWorkflowStateTransition({
       task: taskSession,
-      from: 'pre_testing',
+      from: fromState,
       to: 'testing',
-      outgoingRole: 'tester',
-      actionLabel: '进入功能测试',
+      outgoingRole: taskSession.isHotfix ? 'developer' : 'tester',
+      actionLabel,
     });
 
     const updatedTaskSession = this.deps.store.upsertTaskSession({
@@ -1378,7 +1400,7 @@ export class WorkflowService {
       ...assignPatch,
       historyComments: [
         ...(taskSession.historyComments ?? []),
-        buildTransitionHistoryComment(taskSession, 'pre_testing', 'testing', 'tester', '进入功能测试'),
+        buildTransitionHistoryComment(taskSession, fromState, 'testing', taskSession.isHotfix ? 'developer' : 'tester', actionLabel),
       ],
     });
 
@@ -1387,7 +1409,7 @@ export class WorkflowService {
     );
     this.enqueueKickoffPrompt(this.requireTaskSession(updatedTaskSession.id));
 
-    await this.appendWorkflowComment(updatedTaskSession.id, 'Started feature tester (branch scope).');
+    await this.appendWorkflowComment(updatedTaskSession.id, taskSession.isHotfix ? 'Started feature tester (hotfix — pre_testing skipped).' : 'Started feature tester (branch scope).');
 
     return updatedTaskSession;
   }
@@ -1585,6 +1607,40 @@ export class WorkflowService {
     const remoteRef = `origin/${mergeTarget}`;
     const baselineSha = await this.deps.gitService.resolveRefSha(repoPath, remoteRef);
 
+    // Private repos: skip AI agent, set self-host-runner lane, wait for CI webhook.
+    if (project.isPrivate) {
+      const webhookUrl = `/api/workflows/tasks/${taskSession.id}/ci-result`;
+      await notifyWorkflowStateTransition({
+        task: taskSession,
+        from: 'review',
+        to: 'regression_testing',
+        outgoingRole: 'reviewer',
+        actionLabel: '合并 PR，等待 Self-Hosted Runner CI',
+      });
+
+      const updatedTaskSession = this.deps.store.upsertTaskSession({
+        ...taskSession,
+        workflowState: 'regression_testing',
+        regressionMasterSha: baselineSha,
+        workingDirectory: repoPath,
+        worktreePath: undefined,
+        branchName: mergeTarget,
+        kanbanAgent: 'self-host-runner',
+        preferredSkills: [],
+        handoffComment: `等待 Self-Hosted Runner CI 结果。CI workflow 完成后请调用：POST ${webhookUrl}`,
+        historyComments: [
+          ...(taskSession.historyComments ?? []),
+          buildTransitionHistoryComment(taskSession, 'review', 'regression_testing', 'reviewer', '合并 PR，等待 Self-Hosted Runner CI'),
+        ],
+      });
+
+      await this.appendWorkflowComment(
+        updatedTaskSession.id,
+        `Merged PR #${taskSession.pullRequestNumber}; regression baseline ${mergeTarget} @ ${baselineSha.slice(0, 7)}.\n\n**等待 Self-Hosted Runner CI 结果** — GitHub Actions workflow 完成后请回调：\n\`POST ${webhookUrl}\`\nBody: \`{"status":"success"|"failure","reason":"...","coverage":83.4}\``,
+      );
+      return updatedTaskSession;
+    }
+
     const allTasks = this.projectTasks(project.id);
     const { member, runtimeProfileIdHint } = resolveKanbanAssignment(project, 'copilot-test', taskSession, allTasks, {});
     const testerProfile = pickRuntimeProfile(
@@ -1648,7 +1704,7 @@ export class WorkflowService {
     return this.mergeApprovedPullRequestAndStartRegression(taskSessionId, deferStopInstanceId);
   }
 
-  private async returnTestingToDevelopment(
+  protected async returnTestingToDevelopment(
     taskSessionId: string,
     comment: string,
     deferStopInstanceId?: string,
@@ -1707,6 +1763,55 @@ export class WorkflowService {
       updated.id,
       `${taskSession.workflowState === 'regression_testing' ? 'Returned from regression testing' : 'Returned from feature testing'} to development: ${comment}`,
     );
+  }
+
+  /**
+   * Called by the CI webhook when the self-hosted runner CI run finishes.
+   * Only valid for tasks in `regression_testing` with `kanbanAgent === 'self-host-runner'`.
+   *
+   * - `status === 'success'`: optionally records coverage then proceeds to pending_release.
+   * - `status === 'failure'`: returns the task to `in_progress` with the failure reason.
+   */
+  async processCiCallback(
+    taskSessionId: string,
+    status: 'success' | 'failure',
+    reason?: string,
+    coverage?: number,
+  ): Promise<TaskSession> {
+    const taskSession = this.requireTaskSession(taskSessionId);
+    if (taskSession.workflowState !== 'regression_testing') {
+      throw new Error(
+        `processCiCallback: task ${taskSessionId} is not in regression_testing (was: ${taskSession.workflowState})`,
+      );
+    }
+    if (taskSession.kanbanAgent !== 'self-host-runner') {
+      throw new Error(
+        `processCiCallback: task ${taskSessionId} is not using self-host-runner lane (was: ${taskSession.kanbanAgent ?? 'none'})`,
+      );
+    }
+
+    if (status === 'success') {
+      if (typeof coverage === 'number' && isFinite(coverage) && coverage >= 0 && coverage <= 100) {
+        const project = this.requireProject(taskSession.projectId);
+        const sprint = this.requireSprint(taskSession.sprintId);
+        this.deps.store.updateProjectCoverage(
+          project.id,
+          coverage,
+          `ci-callback:${sprint.branchName}`,
+        );
+      }
+      await this.appendWorkflowComment(
+        taskSessionId,
+        `Self-Hosted Runner CI 通过${typeof coverage === 'number' ? `（覆盖率：${coverage.toFixed(2)}%）` : ''}. 进入 pending_release.`,
+      );
+      return this.proceedToPendingRelease(taskSessionId);
+    }
+
+    // Failure: return to development
+    const failureReason =
+      reason?.trim() || 'Self-Hosted Runner CI 未通过，请检查构建日志并修复后重新提交。';
+    await this.returnTestingToDevelopment(taskSessionId, failureReason);
+    return this.requireTaskSession(taskSessionId);
   }
 
   /**
@@ -1857,15 +1962,21 @@ export class WorkflowService {
   }
 
   /**
-   * After regression passes: move to **pending_release** (human-only). Ensures sprint/integration → base
-   * release PR (create or reuse), posts instructions on that PR, then stops — **no** agent runner.
+   * After regression passes: move to **pending_uat** (when `project.requiresUat`) or directly to
+   * **pending_release** (default). Stops the runner — human or UAT approver proceeds next.
    */
   async proceedToPendingRelease(taskSessionId: string, deferStopInstanceId?: string): Promise<TaskSession> {
     const taskSession = this.requireTaskSession(taskSessionId);
+    const project = this.requireProject(taskSession.projectId);
+
+    // If UAT required, gate before pending_release
+    if (project.requiresUat && taskSession.workflowState === 'regression_testing') {
+      return this.proceedToUat(taskSessionId, deferStopInstanceId);
+    }
+
     this.assertTransition(taskSession.workflowState, 'pending_release');
     await this.stopInstancesForTask(taskSession.id, deferStopInstanceId);
 
-    const project = this.requireProject(taskSession.projectId);
     this.assertProjectLocalRepositoryPath(project);
     const sprint = this.requireSprint(taskSession.sprintId);
     const mergeTarget = sprint.branchName;
@@ -1873,12 +1984,15 @@ export class WorkflowService {
 
     const releasePatch = await this.ensureReleasePullRequestMergeTargetToBase(taskSession);
 
+    const fromState = taskSession.workflowState as 'regression_testing' | 'pending_uat';
+    const actionLabel = fromState === 'pending_uat' ? 'UAT通过，进入合并主干' : '回归通过，进入合并主干';
+
     await notifyWorkflowStateTransition({
       task: taskSession,
-      from: 'regression_testing',
+      from: fromState,
       to: 'pending_release',
       outgoingRole: 'tester',
-      actionLabel: '回归通过，进入合并主干',
+      actionLabel,
     });
 
     const updated = this.deps.store.upsertTaskSession({
@@ -1895,10 +2009,10 @@ export class WorkflowService {
         ...(taskSession.historyComments ?? []),
         buildTransitionHistoryComment(
           taskSession,
-          'regression_testing',
+          fromState,
           'pending_release',
           'tester',
-          '回归通过，进入合并主干',
+          actionLabel,
         ),
       ],
     });
@@ -1911,6 +2025,77 @@ export class WorkflowService {
     );
 
     await this.processDeveloperAssignmentQueue(sprint.id);
+    return updated;
+  }
+
+  /** Move regression_testing → pending_uat when project.requiresUat is set. */
+  private async proceedToUat(taskSessionId: string, deferStopInstanceId?: string): Promise<TaskSession> {
+    const taskSession = this.requireTaskSession(taskSessionId);
+    this.assertTransition(taskSession.workflowState, 'pending_uat');
+    await this.stopInstancesForTask(taskSession.id, deferStopInstanceId);
+
+    await notifyWorkflowStateTransition({
+      task: taskSession,
+      from: 'regression_testing',
+      to: 'pending_uat',
+      outgoingRole: 'tester',
+      actionLabel: '回归通过，等待UAT',
+    });
+
+    const updated = this.deps.store.upsertTaskSession({
+      ...taskSession,
+      workflowState: 'pending_uat',
+      historyComments: [
+        ...(taskSession.historyComments ?? []),
+        buildTransitionHistoryComment(taskSession, 'regression_testing', 'pending_uat', 'tester', '回归通过，等待UAT'),
+      ],
+    });
+
+    await this.appendWorkflowComment(updated.id, 'Regression passed. Awaiting UAT approval before release.');
+    return updated;
+  }
+
+  /** Human approves UAT: pending_uat → pending_release. */
+  async uatApprove(taskSessionId: string): Promise<TaskSession> {
+    const taskSession = this.requireTaskSession(taskSessionId);
+    if (taskSession.workflowState !== 'pending_uat') {
+      throw new Error(`Task ${taskSessionId} is not in pending_uat state`);
+    }
+    return this.proceedToPendingRelease(taskSessionId);
+  }
+
+  /** Human rejects UAT: pending_uat → regression_testing (re-runs regression). */
+  async uatReject(taskSessionId: string, reason: string): Promise<TaskSession> {
+    const taskSession = this.requireTaskSession(taskSessionId);
+    if (taskSession.workflowState !== 'pending_uat') {
+      throw new Error(`Task ${taskSessionId} is not in pending_uat state`);
+    }
+    this.assertTransition('pending_uat', 'regression_testing');
+
+    await notifyWorkflowStateTransition({
+      task: taskSession,
+      from: 'pending_uat',
+      to: 'regression_testing',
+      outgoingRole: null,
+      actionLabel: 'UAT打回',
+    });
+
+    const updated = this.deps.store.upsertTaskSession({
+      ...taskSession,
+      workflowState: 'regression_testing',
+      historyComments: [
+        ...(taskSession.historyComments ?? []),
+        buildTransitionHistoryComment(taskSession, 'pending_uat', 'regression_testing', null, 'UAT打回'),
+      ],
+    });
+
+    await this.appendWorkflowComment(updated.id, `UAT rejected. Reason: ${reason}. Re-running regression.`);
+
+    const project = this.requireProject(taskSession.projectId);
+    const regressionRole = roleForActiveWorkflowState('regression_testing') ?? 'tester';
+    await this.deps.instanceManager.upsertAndStart(this.buildAgentInstance(updated, regressionRole));
+    this.enqueueKickoffPrompt(this.requireTaskSession(updated.id));
+
     return updated;
   }
 
@@ -2028,12 +2213,15 @@ export class WorkflowService {
 
   async closeTask(taskSessionId: string, deferStopInstanceId?: string): Promise<TaskSession> {
     const taskSession = this.requireTaskSession(taskSessionId);
-    this.assertTransition(taskSession.workflowState, 'closed');
+    // Allow close from pending_release OR from the closing (async) transient state
+    if (taskSession.workflowState !== 'pending_release' && taskSession.workflowState !== 'closing') {
+      this.assertTransition(taskSession.workflowState, 'closed');
+    }
 
     const project = this.requireProject(taskSession.projectId);
     const sprint = this.requireSprint(taskSession.sprintId);
 
-    // Feature 5a: Verify the release PR has been merged before allowing close.
+    // Verify the release PR has been merged before allowing close.
     const prNumber = taskSession.releasePullRequestNumber;
     if (prNumber != null) {
       let mergeStatus: Awaited<ReturnType<typeof this.deps.scmClient.getPullRequestMergeStatus>>;
@@ -2053,7 +2241,7 @@ export class WorkflowService {
       }
     }
 
-    // Feature 5b: Run tests on the base branch, parse coverage, and update project high-water mark.
+    // Run tests on the base branch, parse coverage, and update project high-water mark.
     this.assertProjectLocalRepositoryPath(project);
     await this.runCoverageAndUpdateAfterClose(
       project,
@@ -2099,6 +2287,112 @@ export class WorkflowService {
   }
 
   /**
+   * Async close: immediately marks the task as `closing` (HTTP returns quickly),
+   * then runs the PR verification + coverage check in the background.
+   * On success → `closed`; on failure → reverts to `pending_release` and appends an error comment.
+   */
+  async initiateCloseAsync(taskSessionId: string): Promise<TaskSession> {
+    const taskSession = this.requireTaskSession(taskSessionId);
+    if (taskSession.workflowState !== 'pending_release') {
+      throw new Error(`Task ${taskSessionId} must be in pending_release to initiate close (was: ${taskSession.workflowState})`);
+    }
+    this.assertTransition('pending_release', 'closing');
+
+    // Optimistically move to `closing`
+    const closingSession = this.deps.store.upsertTaskSession({
+      ...taskSession,
+      workflowState: 'closing',
+      historyComments: [
+        ...(taskSession.historyComments ?? []),
+        buildTransitionHistoryComment(taskSession, 'pending_release', 'closing', 'tester', '正在验证合并并检查覆盖率'),
+      ],
+    });
+
+    // Run in background — do NOT await
+    this.closeTask(taskSessionId).then(
+      () => { /* success: closeTask already moved to closed */ },
+      async (err: unknown) => {
+        const msg = err instanceof Error ? err.message : String(err);
+        getKanbanLogger().warn({ err, taskSessionId }, 'initiateCloseAsync: background close failed');
+        // Revert to pending_release and surface the error
+        try {
+          const latest = this.deps.store.getTaskSession(taskSessionId);
+          if (latest && latest.workflowState === 'closing') {
+            this.deps.store.upsertTaskSession({ ...latest, workflowState: 'pending_release' });
+          }
+        } catch { /* best-effort */ }
+        await this.appendWorkflowComment(taskSessionId, `关闭验证失败: ${msg.slice(0, 800)}`).catch(() => {});
+      },
+    );
+
+    return closingSession;
+  }
+
+  /**
+   * Block a task: stops its runner, saves `blockedFromState` + `blockReason`, moves to `blocked`.
+   */
+  async blockTask(taskSessionId: string, reason: string): Promise<TaskSession> {
+    const taskSession = this.requireTaskSession(taskSessionId);
+    const blockableStates: ReadonlySet<string> = new Set([
+      'in_progress', 'pre_testing', 'review', 'testing', 'regression_testing', 'pending_uat', 'pending_release',
+    ]);
+    if (!blockableStates.has(taskSession.workflowState)) {
+      throw new Error(`Cannot block a task in state "${taskSession.workflowState}"`);
+    }
+    await this.stopInstancesForTask(taskSession.id);
+
+    const updated = this.deps.store.upsertTaskSession({
+      ...taskSession,
+      workflowState: 'blocked',
+      blockedFromState: taskSession.workflowState,
+      blockReason: reason,
+      historyComments: [
+        ...(taskSession.historyComments ?? []),
+        buildTransitionHistoryComment(taskSession, taskSession.workflowState, 'blocked', null, '任务阻塞'),
+      ],
+    });
+    await this.appendWorkflowComment(updated.id, `任务被阻塞: ${reason}`);
+    return updated;
+  }
+
+  /**
+   * Unblock a task: restores to `blockedFromState` and restarts its runner.
+   */
+  async unblockTask(taskSessionId: string): Promise<TaskSession> {
+    const taskSession = this.requireTaskSession(taskSessionId);
+    if (taskSession.workflowState !== 'blocked') {
+      throw new Error(`Task ${taskSessionId} is not blocked`);
+    }
+    const resumeState = taskSession.blockedFromState ?? 'in_progress';
+    this.assertTransition('blocked', resumeState);
+
+    const { blockedFromState: _b, blockReason: _r, ...rest } = taskSession;
+    const updated = this.deps.store.upsertTaskSession({
+      ...rest,
+      workflowState: resumeState,
+      historyComments: [
+        ...(taskSession.historyComments ?? []),
+        buildTransitionHistoryComment(taskSession, 'blocked', resumeState, null, '阻塞解除'),
+      ],
+    });
+
+    const role = roleForActiveWorkflowState(resumeState);
+    if (role) {
+      let inst = this.deps.store.findAgentInstance(updated.id, role);
+      if (!inst) {
+        await this.deps.instanceManager.upsertAndStart(this.buildAgentInstance(updated, role));
+      } else if (inst.status === 'stopped' || inst.status === 'error') {
+        this.deps.store.upsertAgentInstance({ ...inst, status: 'starting', lastError: undefined });
+        await this.deps.instanceManager.upsertAndStart(inst);
+      }
+      this.enqueueKickoffPrompt(this.requireTaskSession(updated.id));
+    }
+
+    await this.appendWorkflowComment(updated.id, `任务阻塞解除，已恢复到 ${resumeState}`);
+    return updated;
+  }
+
+  /**
    * Permanently remove task data (instances, queues, approvals, monitor rows).
    * Stops all agent runners / LLM providers for this task the same way as `closeTask` (no defer).
    */
@@ -2136,7 +2430,21 @@ export class WorkflowService {
       if (task.workflowState === 'todo' || task.workflowState === 'pending_start' || task.workflowState === 'closed')
         continue;
 
+      // Transient closing state: restart background close
+      if (task.workflowState === 'closing') {
+        this.initiateCloseAsync(task.id).catch((e: unknown) => {
+          getKanbanLogger().warn({ err: e, taskId: task.id }, 'resumeKanbanAfterRestart: initiateCloseAsync failed');
+        });
+        continue;
+      }
+
+      // Blocked tasks: no runner; skip
+      if (task.workflowState === 'blocked') continue;
+
       if (task.workflowState === 'regression_testing') {
+        // Self-host-runner tasks: no AI agent; just wait for CI webhook — skip instance restart
+        if (task.kanbanAgent === 'self-host-runner') continue;
+
         const last = lastAssistantContentForRole(task, 'tester');
         if (last) {
           const parsed = parseKanbanAction(last);
@@ -2249,7 +2557,10 @@ export class WorkflowService {
       review: 0,
       testing: 0,
       regression_testing: 0,
+      pending_uat: 0,
       pending_release: 0,
+      closing: 0,
+      blocked: 0,
       closed: 0,
     });
     const tasksByState = emptyCounts();

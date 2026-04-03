@@ -12,6 +12,7 @@ type FormState = {
   name: string;
   owner: string;
   issueIdPrefix: string;
+  isPrivate: boolean;
   remoteUrl: string;
   localPath: string;
   baseBranch: string;
@@ -30,6 +31,7 @@ function emptyForm(): FormState {
     name: '',
     owner: '',
     issueIdPrefix: '',
+    isPrivate: false,
     remoteUrl: '',
     localPath: '',
     baseBranch: 'main',
@@ -50,6 +52,7 @@ function projectToForm(p: Project): FormState {
     name: p.name,
     owner: p.owner ?? '',
     issueIdPrefix: p.issueIdPrefix ?? '',
+    isPrivate: p.isPrivate ?? false,
     remoteUrl: r.remoteUrl,
     localPath: r.localPath,
     baseBranch: r.baseBranch,
@@ -96,6 +99,7 @@ function buildProjectPayload(form: FormState, existing: Project | null): Project
     name: form.name.trim(),
     ...(ownerTrim ? { owner: ownerTrim } : {}),
     ...(prefixTrim ? { issueIdPrefix: prefixTrim } : {}),
+    ...(form.isPrivate ? { isPrivate: true } : {}),
     ...(existing?.kanbanRoleRunners ? { kanbanRoleRunners: existing.kanbanRoleRunners } : {}),
     ...(existing?.kanbanRoleMembers ? { kanbanRoleMembers: existing.kanbanRoleMembers } : {}),
     repository: repo,
@@ -271,6 +275,9 @@ export default function ProjectsPage() {
                     </td>
                     <td>
                       {p.repository.scmProvider} · {p.repository.scmProject}
+                      {(p as { isPrivate?: boolean }).isPrivate ? (
+                        <span style={{ marginLeft: 6, fontSize: '0.75rem', color: '#94a3b8' }} title="私有仓库 — Self-Hosted Runner CI">🔒</span>
+                      ) : null}
                     </td>
                     <td>
                       <div className="ui-actions">
@@ -431,6 +438,19 @@ export default function ProjectsPage() {
               onChange={(e) => setForm((f) => ({ ...f, scmTokenEnvVar: e.target.value }))}
               placeholder="GITHUB_TOKEN"
             />
+          </label>
+          <label style={{ gridColumn: '1 / -1', display: 'flex', alignItems: 'center', gap: '0.5rem', cursor: 'pointer' }}>
+            <input
+              type="checkbox"
+              checked={form.isPrivate}
+              onChange={(e) => setForm((f) => ({ ...f, isPrivate: e.target.checked }))}
+            />
+            <span>
+              私有仓库（使用 Self-Hosted Runner 进行 CI）
+              <span className="ui-muted" style={{ fontSize: '0.78rem', marginLeft: '0.5rem' }}>
+                启用后，回归测试阶段不启动 AI agent，改为等待 GitHub Actions self-hosted runner webhook 回调
+              </span>
+            </span>
           </label>
           <label style={{ gridColumn: '1 / -1' }}>
             Agent 配置（JSON 数组，可选）

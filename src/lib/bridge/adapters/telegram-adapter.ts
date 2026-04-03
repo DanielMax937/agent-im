@@ -49,6 +49,7 @@ import {
   MASTER_VERIFICATION_WALKTHROUGH_PREFIX,
   buildMasterVerificationWalkthroughPrompt,
   parseVerificationOutcome,
+  COVERAGE_RESULT_PREFIX,
 } from '../master-verification-walkthrough';
 import {
   isImageEnabled,
@@ -552,24 +553,31 @@ export class TelegramAdapter extends BaseChannelAdapter {
       `---\n${reportBody}\n---\n\n` +
       sessionContextBlock +
       `### Your Decision\n` +
-      `You are a strict quality gate. Evaluate the assistant's work against the original goal.\n\n` +
-      `**Your standard: pursue perfection.** If there is ANY possible improvement — even small, optional, or cosmetic — ` +
-      `you MUST send follow-up instructions. This includes but is not limited to:\n` +
-      `- Missing edge cases or error handling\n` +
-      `- Code that works but could be cleaner, faster, or more robust\n` +
-      `- Missing or incomplete tests\n` +
-      `- Documentation or comments that could be added\n` +
-      `- Any TODO, FIXME, or "nice to have" the assistant mentioned but skipped\n\n` +
-      `**A task is ONLY truly finished when ALL of the following are true:**\n` +
-      `1. Every aspect of the goal is fully implemented with no shortcuts\n` +
-      `2. You have explicitly asked the assistant to run tests/verification AND the assistant has confirmed tests pass\n` +
-      `3. There is genuinely ZERO remaining improvement possible — not even a tiny one\n\n` +
-      `**If tests have not been run yet**, your follow-up MUST include: "please run tests to verify your changes".\n\n` +
-      `**Output format:**\n` +
-      `- If ANY improvement is possible: write specific follow-up instructions. ` +
-      `Include the phrase "needs improvement" so the system forwards your response to the assistant.\n` +
-      `- ONLY if the task is truly 100% complete with verified tests and zero possible improvements: ` +
-      `write a clear summary for the user. Do NOT include "needs improvement" or "please fix" in this case.\n\n` +
+      `You are a quality gate. Evaluate the assistant's work against the original goal.\n\n` +
+      `**Evaluation rubric:**\n\n` +
+      `**Must send follow-up (blocking issues):**\n` +
+      `- Goal not fully achieved — functionality missing or incorrect\n` +
+      `- Tests not run, failing, or absent when the task involves code changes\n` +
+      `- Security vulnerability, crash, or data loss risk\n` +
+      `- Critical edge cases not handled\n\n` +
+      `**May pass (non-blocking):**\n` +
+      `- Code style or formatting preferences\n` +
+      `- Optional optimizations or refactors not required by the goal\n` +
+      `- Minor cosmetic or documentation improvements\n` +
+      `- TODOs or "nice to have" items not part of the original request\n` +
+      `(You may mention non-blocking suggestions in your summary, but they must NOT prevent the task from passing.)\n\n` +
+      `**A task is finished when ALL of the following are true:**\n` +
+      `1. Every aspect of the goal is fully implemented\n` +
+      `2. Tests have been run and passed (or confirmed N/A for non-code tasks)\n` +
+      `3. No blocking issues remain\n\n` +
+      `**Output format (required — use structured token, not keywords):**\n` +
+      `- Write your evaluation as a concise message for the user.\n` +
+      `- Before the verdict line, include one tag indicating whether the task involved code changes:\n` +
+      `  \`TASK_INVOLVES_CODE: yes\`  (modified or created source/test files)\n` +
+      `  \`TASK_INVOLVES_CODE: no\`   (documentation, explanation, config-only, no code files changed)\n` +
+      `- The **last line** of your reply must be the tagged JSON verdict (no text after it):\n` +
+      `  Pass:    \`REVIEW_RESULT_JSON: {"pass": true}\`\n` +
+      `  Reject:  \`REVIEW_RESULT_JSON: {"pass": false, "reason": "<short reason>"}\`\n\n` +
       `Keep it concise — your response goes directly to the user via Telegram.`;
     const chatId = this.hybridMirrorChatId || this.imGet('telegram_chat_id') || undefined;
     await this.autoModeRedis.pushMasterInput(slaveReport, 'default', chatId).catch(() => {});
@@ -614,22 +622,57 @@ export class TelegramAdapter extends BaseChannelAdapter {
           `[telegram-adapter] Master verification: PASSED. ` +
             `responseLen=${payload.responseText.length}`,
         );
+        // Parse COVERAGE_RESULT: tag and update the baseline in Redis if improved
+        const coverageMatch = payload.responseText.match(
+          new RegExp(`${COVERAGE_RESULT_PREFIX}\\s*([0-9]+(?:\\.[0-9]+)?)`, 'i'),
+        );
+        if (coverageMatch) {
+          const measured = parseFloat(coverageMatch[1]);
+          if (!isNaN(measured)) {
+            const updated = await this.autoModeRedis.updateCoverageBaseline(measured).catch(() => false);
+            console.log(
+              `[telegram-adapter] Coverage baseline ${updated ? 'updated' : 'unchanged'}: ${measured}%`,
+            );
+          }
+        }
         await this.autoModeRedis.setReverifyPending(false).catch(() => {});
+        await this.autoModeRedis.resetReviewLoops().catch(() => {});
         await this.autoModeRedis.incrMasterTurns().catch(() => {});
         await this.sendAutoModeTaskFinishedNotice(payload.outboundChatId);
         return;
       }
 
-      console.log(
-        `[telegram-adapter] Master verification: ${outcome === 'failed' ? 'FAILED' : 'UNKNOWN (treat as failed)'}. ` +
-          `responseLen=${payload.responseText.length}, preview=${JSON.stringify(payload.responseText.slice(0, 150))}`,
-      );
+      // Improvement 3: unknown outcome → alert user instead of silently retrying
+      if (outcome === 'unknown') {
+        console.warn(
+          `[telegram-adapter] Master verification: UNKNOWN outcome (no VERIFICATION_OUTCOME tag). ` +
+            `responseLen=${payload.responseText.length}, preview=${JSON.stringify(payload.responseText.slice(0, 150))}`,
+        );
+        const chatId = payload.outboundChatId || this.hybridMirrorChatId || this.imGet('telegram_chat_id');
+        const token = this.botToken;
+        if (chatId && token) {
+          await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              chat_id: chatId,
+              text: `⚠️ *Auto Mode*: 验证结果无法解析（未找到 \`VERIFICATION_OUTCOME:\` 标记），已按失败处理，继续重试。\n\n预览：${payload.responseText.slice(0, 200)}`,
+              parse_mode: 'Markdown',
+            }),
+          }).catch(() => {});
+        }
+      } else {
+        console.log(
+          `[telegram-adapter] Master verification: FAILED. ` +
+            `responseLen=${payload.responseText.length}, preview=${JSON.stringify(payload.responseText.slice(0, 150))}`,
+        );
+      }
       await this.autoModeRedis.setSlaveBusy(600).catch(() => {});
       writeRunnerStatus({ slaveBusy: true, slaveSince: Date.now() });
 
       const unknownNote =
         outcome === 'unknown'
-          ? '**Note:** No clear `VERIFICATION_OUTCOME: PASSED` line — treat as failed verification until fixed.\n\n'
+          ? '**Note:** No clear `VERIFICATION_OUTCOME: PASSED` line found — treated as failed verification. Ensure your reply ends with `VERIFICATION_OUTCOME: PASSED` or `VERIFICATION_OUTCOME: FAILED`.\n\n'
           : '';
       const handoff =
         `## Follow-up from Master (verification)\n\n` +
@@ -640,8 +683,9 @@ export class TelegramAdapter extends BaseChannelAdapter {
         `The master ran frontend (Playwright + local Chrome DOM checks) and/or API (curl) checks and found issues.\n\n` +
         `**Requirements:**\n` +
         `1. Fix every issue listed above.\n` +
-        `2. Re-verify (tests, manual checks).\n` +
-        `3. Reply with a **Slave Execution Report** when done.\n\n` +
+        `2. If any code files were modified: ensure unit tests cover your changes and all tests pass.\n` +
+        `3. Re-verify (tests, manual checks).\n` +
+        `4. Reply with a **Slave Execution Report** when done.\n\n` +
         `Do better this time.`;
       await this.autoModeRedis
         .pushSlaveHandoff(handoff, payload.outboundChatId)
@@ -671,8 +715,38 @@ export class TelegramAdapter extends BaseChannelAdapter {
       );
       await this.autoModeRedis.incrMasterTurns().catch(() => {});
       const isReverify = await this.autoModeRedis.isReverifyPending();
+
+      // Improvement 4: pass slave report body as sourceText for better mode inference
+      // Improvement 5: coverage gate — only for code tasks, with Redis-persisted baseline
+      const coverageCommand = process.env.CTI_AUTO_COVERAGE_COMMAND || undefined;
+      const coverageMinPctRaw = process.env.CTI_AUTO_COVERAGE_MIN_PCT;
+      const coverageMinPct = coverageMinPctRaw ? parseFloat(coverageMinPctRaw) : undefined;
+
+      // Parse TASK_INVOLVES_CODE: yes|no from master's static review response
+      const taskInvolvesCodeMatch = payload.responseText.match(/TASK_INVOLVES_CODE:\s*(yes|no)/i);
+      const taskInvolvesCode = taskInvolvesCodeMatch
+        ? taskInvolvesCodeMatch[1].toLowerCase() === 'yes'
+        : undefined;
+
+      // Fetch stored peak coverage baseline from Redis (null = no history yet)
+      const coverageBaseline = coverageCommand && taskInvolvesCode === true
+        ? await this.autoModeRedis.getCoverageBaseline().catch(() => null)
+        : undefined;
+
+      if (coverageCommand) {
+        console.log(
+          `[telegram-adapter] Coverage gate: taskInvolvesCode=${taskInvolvesCode}, ` +
+            `baseline=${coverageBaseline ?? 'none'}, minPct=${coverageMinPct ?? 'none'}`,
+        );
+      }
+
       const verificationPrompt = buildMasterVerificationWalkthroughPrompt(trimmed, {
         isReverify,
+        sourceText: payload.userPrompt,
+        coverageCommand,
+        coverageMinPct: coverageMinPct !== undefined && !isNaN(coverageMinPct) ? coverageMinPct : undefined,
+        coverageBaseline,
+        taskInvolvesCode,
       });
       await this.autoModeRedis
         .pushMasterInput(verificationPrompt, 'default', payload.outboundChatId)
@@ -684,6 +758,34 @@ export class TelegramAdapter extends BaseChannelAdapter {
       `[telegram-adapter] Master evaluation: NEEDS FOLLOW-UP (${reviewDecision}). ` +
         `responseLen=${payload.responseText.length}, preview=${JSON.stringify(payload.responseText.slice(0, 150))}`,
     );
+
+    // Improvement 2: enforce per-review-cycle loop cap (CTI_AUTO_REVIEW_MAX_LOOPS, default 5)
+    const maxReviewLoops = parseInt(process.env.CTI_AUTO_REVIEW_MAX_LOOPS || '5', 10);
+    const reviewLoops = await this.autoModeRedis.incrReviewLoops().catch(() => 0);
+    if (reviewLoops >= maxReviewLoops) {
+      console.warn(
+        `[telegram-adapter] Review loop cap reached (${reviewLoops}/${maxReviewLoops}). ` +
+          `Halting auto dispatch — human intervention required.`,
+      );
+      const chatId = payload.outboundChatId || this.hybridMirrorChatId || this.imGet('telegram_chat_id');
+      const token = this.botToken;
+      if (chatId && token) {
+        await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            chat_id: chatId,
+            text:
+              `⚠️ *Auto Mode*: 评审循环已达上限 ${maxReviewLoops} 次，自动派发已暂停，请人工介入。\n\n` +
+              `最后一次 Master 反馈：\n${payload.responseText.slice(0, 400)}`,
+            parse_mode: 'Markdown',
+          }),
+        }).catch(() => {});
+      }
+      await this.autoModeRedis.incrMasterTurns().catch(() => {});
+      return;
+    }
+
     await this.autoModeRedis.setSlaveBusy(600).catch(() => {});
     writeRunnerStatus({ slaveBusy: true, slaveSince: Date.now() });
 
@@ -696,8 +798,9 @@ export class TelegramAdapter extends BaseChannelAdapter {
       `**Requirements:**\n` +
       `1. Carefully read the master's feedback above — address every point.\n` +
       `2. Fix the issues, then re-verify your work.\n` +
-      `3. Double-check edge cases and test your changes.\n` +
-      `4. Provide a clear summary of what you fixed.\n\n` +
+      `3. If any code files were modified: ensure unit tests cover your changes and all tests pass.\n` +
+      `4. Double-check edge cases and test your changes.\n` +
+      `5. Provide a clear summary of what you fixed.\n\n` +
       `Do better this time.`;
     await this.autoModeRedis
       .pushSlaveHandoff(handoff, payload.outboundChatId)
@@ -1005,6 +1108,7 @@ export class TelegramAdapter extends BaseChannelAdapter {
       await rt.setSessionSummary(finalSummary).catch(() => {});
       await rt.setLastUserRequest(msg.text.trim()).catch(() => {});
       await rt.setReverifyPending(false).catch(() => {});
+      await rt.resetReviewLoops().catch(() => {});
 
       // Set slave busy
       await rt.setSlaveBusy(600).catch(() => {});
@@ -1024,7 +1128,10 @@ export class TelegramAdapter extends BaseChannelAdapter {
         `**Requirements:**\n` +
         `1. Complete the task to the highest quality possible.\n` +
         `2. Be thorough — check edge cases, validate your work, verify the outcome.\n` +
-        `3. If the task involves code, run tests/linting to confirm correctness.\n` +
+        `3. **If you modify or create any source code files:**\n` +
+        `   a. Write or update unit tests covering your changes — this is mandatory, not optional.\n` +
+        `   b. Run the full test suite and confirm all tests pass.\n` +
+        `   c. Run linting to confirm no new errors.\n` +
         `4. If ambiguous, interpret in the way most helpful to the user.\n` +
         `5. Provide a clear, concise summary of what you did and the result.\n\n` +
         `### Reporting & idle rules\n` +

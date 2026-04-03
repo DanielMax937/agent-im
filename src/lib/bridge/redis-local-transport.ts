@@ -363,6 +363,53 @@ export class AutoModeRedisTransport {
     return v === '1';
   }
 
+  // ── Per-task review loop counter (kanbanConfirmationMaxLoops analogue) ──
+
+  /** Increment the review-loop counter and return the new value. */
+  async incrReviewLoops(): Promise<number> {
+    if (!this.client) return 0;
+    return this.client.incr(this.keyMaster('review_loops'));
+  }
+
+  /** Get the current review-loop count. */
+  async getReviewLoops(): Promise<number> {
+    if (!this.client) return 0;
+    const v = await this.client.get(this.keyMaster('review_loops'));
+    return v ? parseInt(v, 10) : 0;
+  }
+
+  /** Reset the review-loop counter (call on task completion or new user message). */
+  async resetReviewLoops(): Promise<void> {
+    if (!this.client) return;
+    await this.client.del(this.keyMaster('review_loops'));
+  }
+
+  // ── Coverage baseline (persists across tasks, updated only when coverage improves) ──
+
+  /**
+   * Get the stored peak coverage percentage for this bridge.
+   * Returns `null` when no baseline has been recorded yet.
+   */
+  async getCoverageBaseline(): Promise<number | null> {
+    if (!this.client) return null;
+    const v = await this.client.get(this.keyMaster('coverage_baseline'));
+    if (v === null) return null;
+    const n = parseFloat(v);
+    return isNaN(n) ? null : n;
+  }
+
+  /**
+   * Update the coverage baseline only if `newCoverage` is strictly greater than the stored value.
+   * Returns `true` when the baseline was updated, `false` when it was not (new value not higher).
+   */
+  async updateCoverageBaseline(newCoverage: number): Promise<boolean> {
+    if (!this.client) return false;
+    const current = await this.getCoverageBaseline();
+    if (current !== null && newCoverage <= current) return false;
+    await this.client.set(this.keyMaster('coverage_baseline'), String(newCoverage));
+    return true;
+  }
+
   // ── Slave busy lock (prevents concurrent handoffs) ──
 
   /** Check if slave is currently processing a task. */
@@ -391,7 +438,7 @@ export class AutoModeRedisTransport {
   async resetAll(): Promise<void> {
     if (!this.client) return;
     const suffixes: AutoRedisQueueSuffix[] = [
-      'input', 'out', 'turns', 'resp', 'summary', 'busy', 'last_user', 'reverify',
+      'input', 'out', 'turns', 'resp', 'summary', 'busy', 'last_user', 'reverify', 'review_loops',
     ];
     for (const suffix of suffixes) {
       await this.client.del(this.keyMaster(suffix));

@@ -25,6 +25,7 @@ const EMPTY_MAPPING: Record<KanbanAgentKind, string> = {
   'codex-senior': '',
   'claude-review': '',
   'copilot-test': '',
+  'self-host-runner': '',
 };
 
 function emptyMembers(): Record<KanbanAgentKind, KanbanRoleMember[]> {
@@ -34,6 +35,7 @@ function emptyMembers(): Record<KanbanAgentKind, KanbanRoleMember[]> {
     'codex-senior': [],
     'claude-review': [],
     'copilot-test': [],
+    'self-host-runner': [],
   };
 }
 
@@ -44,6 +46,7 @@ function emptyLaneSkills(): Record<KanbanAgentKind, string[]> {
     'codex-senior': [],
     'claude-review': [],
     'copilot-test': [],
+    'self-host-runner': [],
   };
 }
 

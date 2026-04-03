@@ -114,11 +114,49 @@ export interface MasterVerificationWalkthroughOptions {
   isReverify?: boolean;
   /** Explicit override for verification scope. */
   mode?: MasterVerificationMode;
+  /**
+   * Raw slave execution report body (or any full-context text). When provided,
+   * `inferMasterVerificationMode` scans this first instead of only the truncated summary tail,
+   * giving a more reliable UI vs API mode decision.
+   */
+  sourceText?: string;
+  /**
+   * Shell command to run for coverage gate (e.g. `npm run test:coverage`).
+   * Only applied when `taskInvolvesCode` is `true` (or unset/unknown).
+   */
+  coverageCommand?: string;
+  /**
+   * Historical peak coverage percentage stored from previous passing verifications.
+   * When provided, the coverage gate requires new coverage ≥ this value.
+   * Takes precedence over `coverageMinPct` if both are set.
+   */
+  coverageBaseline?: number | null;
+  /**
+   * Hard-coded minimum required coverage percentage (0–100) from config.
+   * Used as floor when `coverageBaseline` is null/unset.
+   */
+  coverageMinPct?: number;
+  /**
+   * Whether the slave's work involved code changes. Coverage gate is only added when this is
+   * `true`. When `undefined` (unknown), coverage gate is skipped to avoid false positives.
+   */
+  taskInvolvesCode?: boolean;
 }
 
-export function inferMasterVerificationMode(sessionSummaryTail: string): MasterVerificationMode {
+export function inferMasterVerificationMode(
+  sessionSummaryTail: string,
+  sourceText?: string,
+): MasterVerificationMode {
+  // Prefer scanning the full source text (slave report body) — it is not truncated.
+  const haystack = sourceText ?? sessionSummaryTail;
   for (const pattern of UI_SIGNAL_PATTERNS) {
-    if (pattern.test(sessionSummaryTail)) return 'ui_and_api';
+    if (pattern.test(haystack)) return 'ui_and_api';
+  }
+  // Fallback: also scan the summary tail in case sourceText was API-only but summary reveals UI context.
+  if (sourceText) {
+    for (const pattern of UI_SIGNAL_PATTERNS) {
+      if (pattern.test(sessionSummaryTail)) return 'ui_and_api';
+    }
   }
   return 'api_only';
 }
@@ -175,6 +213,37 @@ function buildUiAndApiChecks(): string {
 `;
 }
 
+function buildCoverageGate(coverageCommand: string, minPct?: number, baseline?: number | null): string {
+  // Effective minimum: take the higher of baseline and hard-coded minPct
+  const effectiveMin = baseline != null && (minPct === undefined || baseline > minPct)
+    ? baseline
+    : minPct;
+  const baselineNote = baseline != null
+    ? `   - Previous peak coverage: **${baseline}%** (stored from last passing verification).`
+    : `   - No previous coverage baseline recorded yet — this run establishes the baseline.`;
+  const minLine = effectiveMin !== undefined
+    ? `   - The total coverage **must be ≥ ${effectiveMin}%**. If it is lower, output \`VERIFICATION_OUTCOME: FAILED\` and include the actual coverage and the required minimum in \`## Issues found\`.`
+    : `   - Record the total coverage percentage in your narrative. After this run, end your output with: \`COVERAGE_RESULT: <percentage>\` so the system can record it as the baseline.`;
+  const reportLine = effectiveMin !== undefined
+    ? `   - After reporting coverage, end your output with: \`COVERAGE_RESULT: <percentage>\` (numeric, e.g. \`COVERAGE_RESULT: 83.5\`).`
+    : '';
+  return `### Coverage gate (required — code changes detected)
+
+1. **Run the test coverage command**
+   \`\`\`
+   ${coverageCommand}
+   \`\`\`
+   - Extract the overall/total coverage percentage from the command output or generated report file (e.g. \`coverage-summary.json\`, lcov).
+${baselineNote}
+${minLine}
+${reportLine}
+   - If the command fails to run, output \`VERIFICATION_OUTCOME: FAILED\` and include the error.
+
+`;
+}
+
+export const COVERAGE_RESULT_PREFIX = 'COVERAGE_RESULT:';
+
 /**
  * @param sessionSummaryTail Rolling session summary (truncated) for context
  */
@@ -183,9 +252,16 @@ export function buildMasterVerificationWalkthroughPrompt(
   options?: MasterVerificationWalkthroughOptions,
 ): string {
   const ctx = sessionSummaryTail.slice(-3500);
-  const mode = options?.mode ?? inferMasterVerificationMode(ctx);
+  const mode = options?.mode ?? inferMasterVerificationMode(ctx, options?.sourceText);
   const checks = mode === 'ui_and_api' ? buildUiAndApiChecks() : buildApiOnlyChecks();
   const modeLine = mode === 'ui_and_api' ? 'UI_AND_API' : 'API_ONLY';
+
+  // Coverage gate: only when a command is configured AND the task explicitly involves code changes.
+  // When taskInvolvesCode is undefined (unknown), skip to avoid false positives on non-code tasks.
+  const shouldRunCoverage = !!(options?.coverageCommand && options?.taskInvolvesCode === true);
+  const coverageSection = shouldRunCoverage
+    ? buildCoverageGate(options!.coverageCommand!, options?.coverageMinPct, options?.coverageBaseline)
+    : '';
 
   return `${MASTER_VERIFICATION_WALKTHROUGH_PREFIX}
 
@@ -197,7 +273,7 @@ ${modeLine}
 ### Session context (rolling summary tail)
 ${ctx}
 
-${checks}
+${coverageSection}${checks}
 
 ### Output format (required)
 

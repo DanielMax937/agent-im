@@ -214,6 +214,7 @@ export function createProject(store: JsonPlatformStore, overrides: Partial<Proje
     // Disable coverage command in tests to avoid running real npm test.
     coverageCommand: overrides.coverageCommand ?? '',
     agents: overrides.agents ?? [],
+    ...(overrides.isPrivate !== undefined ? { isPrivate: overrides.isPrivate } : {}),
     createdAt: overrides.createdAt ?? now,
     updatedAt: overrides.updatedAt ?? now,
   });
@@ -252,6 +253,7 @@ export function createTaskSession(
     workflowState: overrides.workflowState ?? 'in_progress',
     runtime: overrides.runtime ?? 'codex',
     role: overrides.role ?? 'developer',
+    kanbanAgent: overrides.kanbanAgent,
     sessionId: overrides.sessionId ?? 'session-1',
     providerSessionId: overrides.providerSessionId,
     workingDirectory: overrides.workingDirectory ?? '/tmp/agent-im',

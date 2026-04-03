@@ -1,9 +1,13 @@
 export type AgentRuntime = 'claude' | 'codex' | 'cursor' | 'copilot';
 export type AgentRole = 'developer' | 'reviewer' | 'tester';
 /**
- * Kanban columns: 待办 | 队列 | 开发中 | 前置测试 | 测试中 | 评审 | 回归测试中 | 合并主干 | 完成
- * `pending_start`: assigned from todo, waiting in sprint FIFO until dependencies are satisfied
- * (`pending_release` or `closed`, or no deps).
+ * Kanban columns:
+ * 待办 | 队列 | 开发中 | 前置测试 | 测试中 | 评审 | 回归测试中 | UAT | 合并主干 | 关闭中 | 完成
+ *
+ * New states added:
+ * - `blocked`: task is externally blocked (any active lane → blocked → resume back to same lane)
+ * - `pending_uat`: optional UAT approval gate between regression_testing and pending_release
+ * - `closing`: async PR-merge verification + coverage check running; moves to closed or back to pending_release
  */
 export type TaskWorkflowState =
   | 'todo'
@@ -13,8 +17,14 @@ export type TaskWorkflowState =
   | 'review'
   | 'testing'
   | 'regression_testing'
+  /** Optional UAT gate: enabled when `project.requiresUat` is true; human approves to proceed to pending_release. */
+  | 'pending_uat'
   /** Sprint/integration → base release PR ensured when entering; then human merges on host and tester closes. */
   | 'pending_release'
+  /** Async close in progress: PR merge verified, coverage check running. Moves to closed or back to pending_release. */
+  | 'closing'
+  /** Task was blocked by an external dependency; runner paused. Unblocks back to `blockedFromState`. */
+  | 'blocked'
   | 'closed';
 
 /**
@@ -24,8 +34,10 @@ export type TaskWorkflowState =
  * - claude-review: code review
  * - copilot-test: feature testing on task branch
  * - codex-senior: escalation developer after repeated review pushback
+ * - self-host-runner: CI gate for private repos; no AI agent — waits for GitHub Actions
+ *   self-hosted runner webhook callback to advance the workflow
  */
-export type KanbanAgentKind = 'agent-dev' | 'pre-tester' | 'claude-review' | 'copilot-test' | 'codex-senior';
+export type KanbanAgentKind = 'agent-dev' | 'pre-tester' | 'claude-review' | 'copilot-test' | 'codex-senior' | 'self-host-runner';
 
 /** One human or logical assignee in a Kanban lane; each has their own runner profile. */
 export interface KanbanRoleMember {
@@ -75,6 +87,16 @@ export interface ProjectCoverageRecord {
   updatedAt: string;
 }
 
+/** One entry in the per-project coverage history (immutable; inserted on every successful update). */
+export interface ProjectCoverageHistoryEntry {
+  id: string;
+  projectId: string;
+  coverage: number;
+  /** Optional context label (e.g. branch name or sprint id). */
+  context?: string;
+  recordedAt: string;
+}
+
 export interface Project {
   id: string;
   name: string;
@@ -102,11 +124,29 @@ export interface Project {
   kanbanLaneSkills?: Partial<Record<KanbanAgentKind, string[]>>;
   repository: ProjectRepository;
   /**
-   * Shell command to run unit tests and produce `coverage/coverage-summary.json`.
+   * Shell command to run unit tests and produce coverage output.
    * Defaults to `npm test -- --coverage --coverageReporters=json-summary`.
    * Set to empty string to skip automated coverage checking on close.
    */
   coverageCommand?: string;
+  /**
+   * Path (relative to repo root) where the coverage summary JSON lives.
+   * Supports `coverage/coverage-summary.json` (Jest/c8 json-summary format, default)
+   * or `coverage/lcov.info` (lcov format — lines coverage extracted from SF/LH/LF records).
+   */
+  coverageSummaryPath?: string;
+  /**
+   * When true, a `pending_uat` state is inserted between `regression_testing` and `pending_release`.
+   * A human must explicitly approve (POST /api/workflows/tasks/:id/uat-approve) to proceed.
+   */
+  requiresUat?: boolean;
+  /**
+   * When true, this project's repository is private and CI runs on a self-hosted GitHub Actions
+   * runner (e.g. a local Mac Mini). The `regression_testing` lane will not start an AI agent;
+   * instead it waits for a webhook callback from the CI runner:
+   *   POST /api/workflows/tasks/:taskSessionId/ci-result
+   */
+  isPrivate?: boolean;
   agents: ProjectAgentProfile[];
   createdAt: string;
   updatedAt: string;
@@ -203,6 +243,23 @@ export interface TaskSession {
   confirmationLoopCount?: number;
   lastError?: string;
   systemPrompt?: string;
+  /** When true, this task is a hotfix: the pre_testing lane is skipped (in_progress → testing directly). */
+  isHotfix?: boolean;
+  /** When `workflowState === 'blocked'`: the state to restore when unblocked. */
+  blockedFromState?: TaskWorkflowState;
+  /** Human-readable reason why this task was blocked. */
+  blockReason?: string;
+  /** Latest structured test result from the tester lane. Updated each time a tester turn completes. */
+  lastTestResult?: {
+    /** Lines coverage percentage 0–100 (if available). */
+    coverage?: number;
+    /** Number of tests run. */
+    testCount?: number;
+    /** Short list of failing test names/commands. */
+    failingTests?: string[];
+    /** ISO timestamp when this result was recorded. */
+    timestamp: string;
+  };
   conversationHistory: TaskConversationEntry[];
   /** Chronological handoff summaries (per transition) and manual API comments; also appended to each role’s system prompt. */
   historyComments?: TaskHistoryComment[];
@@ -280,6 +337,8 @@ export interface CreateTaskInput {
   title: string;
   /** Issue ids of existing tasks in the same project that must reach pending_release or closed before this task can start dev. */
   dependsOnIssueIds?: string[];
+  /** When true, skip pre_testing lane: developer hands off directly from in_progress to testing. */
+  isHotfix?: boolean;
 }
 
 export interface AssignTaskInput {

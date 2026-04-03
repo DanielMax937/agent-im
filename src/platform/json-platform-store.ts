@@ -12,6 +12,7 @@ import type {
   KanbanAgentTurnRecord,
   PendingApprovalRecord,
   Project,
+  ProjectCoverageHistoryEntry,
   ProjectCoverageRecord,
   Sprint,
   TaskConversationEntry,
@@ -212,6 +213,15 @@ export class JsonPlatformStore {
         coverage REAL NOT NULL DEFAULT 0,
         updated_at TEXT NOT NULL
       );
+
+      CREATE TABLE IF NOT EXISTS project_coverage_history (
+        id TEXT PRIMARY KEY NOT NULL,
+        project_id TEXT NOT NULL,
+        coverage REAL NOT NULL,
+        context TEXT,
+        recorded_at TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_coverage_history_project ON project_coverage_history(project_id, recorded_at);
     `);
   }
 
@@ -806,23 +816,61 @@ export class JsonPlatformStore {
   /**
    * Updates the project's coverage only when `newCoverage > current`.
    * Returns whether an update was performed and the new current value.
+   * Also appends an entry to the coverage history regardless of whether the max was updated.
    */
-  updateProjectCoverage(projectId: string, newCoverage: number): { updated: boolean; coverage: number } {
+  updateProjectCoverage(
+    projectId: string,
+    newCoverage: number,
+    context?: string,
+  ): { updated: boolean; coverage: number } {
     const current = this.getProjectCoverage(projectId);
+    const ts = now();
+    // Always record history (even if this run is lower than current max)
+    const historyId = crypto.randomUUID();
+    this.db
+      .prepare(
+        'INSERT INTO project_coverage_history (id, project_id, coverage, context, recorded_at) VALUES (?, ?, ?, ?, ?)',
+      )
+      .run(historyId, projectId, newCoverage, context ?? null, ts);
+
     if (newCoverage <= current.coverage) {
       return { updated: false, coverage: current.coverage };
     }
     const record: ProjectCoverageRecord = {
       projectId,
       coverage: newCoverage,
-      updatedAt: now(),
+      updatedAt: ts,
     };
     this.coverageMap.set(projectId, record);
     this.db
       .prepare(
         'INSERT OR REPLACE INTO project_coverage (project_id, coverage, updated_at) VALUES (?, ?, ?)',
       )
-      .run(projectId, newCoverage, record.updatedAt);
+      .run(projectId, newCoverage, ts);
     return { updated: true, coverage: newCoverage };
+  }
+
+  /**
+   * Returns the most-recent N coverage history entries for a project (descending by recorded_at).
+   */
+  getCoverageHistory(projectId: string, limit = 20): ProjectCoverageHistoryEntry[] {
+    const rows = this.db
+      .prepare(
+        'SELECT id, project_id, coverage, context, recorded_at FROM project_coverage_history WHERE project_id = ? ORDER BY recorded_at DESC LIMIT ?',
+      )
+      .all(projectId, limit) as {
+      id: string;
+      project_id: string;
+      coverage: number;
+      context: string | null;
+      recorded_at: string;
+    }[];
+    return rows.map((r) => ({
+      id: r.id,
+      projectId: r.project_id,
+      coverage: r.coverage,
+      context: r.context ?? undefined,
+      recordedAt: r.recorded_at,
+    }));
   }
 }

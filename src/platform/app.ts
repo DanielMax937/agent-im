@@ -118,7 +118,8 @@ export interface PlatformStoreApi {
   getKanbanAgentTurn(id: string): KanbanAgentTurnRecord | null;
   updateKanbanAgentTurnStreamError(id: string, streamError: string | null): void;
   getProjectCoverage(projectId: string): import('./types').ProjectCoverageRecord;
-  updateProjectCoverage(projectId: string, coverage: number): { updated: boolean; coverage: number };
+  updateProjectCoverage(projectId: string, coverage: number, context?: string): { updated: boolean; coverage: number };
+  getCoverageHistory(projectId: string, limit?: number): import('./types').ProjectCoverageHistoryEntry[];
 }
 
 export interface WorkflowServiceApi {
@@ -139,6 +140,17 @@ export interface WorkflowServiceApi {
   rejectReview(taskSessionId: string, comment: string): Promise<TaskSession>;
   handleTestFailure(input: { taskSessionId: string; summary: string; log: string }): Promise<TaskSession>;
   closeTask(taskSessionId: string): Promise<TaskSession>;
+  initiateCloseAsync(taskSessionId: string): Promise<TaskSession>;
+  blockTask(taskSessionId: string, reason: string): Promise<TaskSession>;
+  unblockTask(taskSessionId: string): Promise<TaskSession>;
+  uatApprove(taskSessionId: string): Promise<TaskSession>;
+  uatReject(taskSessionId: string, reason: string): Promise<TaskSession>;
+  processCiCallback(
+    taskSessionId: string,
+    status: 'success' | 'failure',
+    reason?: string,
+    coverage?: number,
+  ): Promise<TaskSession>;
   syncReviewCommentToPrAndTask(taskSessionId: string, body: string): Promise<void>;
   deleteTask(taskSessionId: string): Promise<void>;
   resolveApproval(approvalId: string, input: unknown): boolean;
@@ -511,13 +523,20 @@ export function createPlatformApp(options: CreatePlatformAppOptions): PlatformAp
         return jsonResponse(options.store.getProjectCoverage(coverageParams.projectId));
       }
       if (request.method === 'POST' && coverageParams) {
-        const body = await readRequestBody<{ coverage?: unknown }>(request);
+        const body = await readRequestBody<{ coverage?: unknown; context?: unknown }>(request);
         const coverage = Number(body?.coverage);
         if (!isFinite(coverage) || coverage < 0 || coverage > 100) {
           return jsonResponse({ error: 'coverage must be a number between 0 and 100' }, 400);
         }
-        const result = options.store.updateProjectCoverage(coverageParams.projectId, coverage);
+        const context = typeof body?.context === 'string' ? body.context : undefined;
+        const result = options.store.updateProjectCoverage(coverageParams.projectId, coverage, context);
         return jsonResponse(result);
+      }
+
+      const coverageHistoryParams = matchPath('/api/projects/:projectId/coverage/history', pathname);
+      if (request.method === 'GET' && coverageHistoryParams) {
+        const limit = Math.min(Number(searchParams.get('limit') ?? '20'), 100) || 20;
+        return jsonResponse(options.store.getCoverageHistory(coverageHistoryParams.projectId, limit));
       }
 
       if (request.method === 'GET' && pathname === '/api/sprints') {
@@ -829,6 +848,78 @@ export function createPlatformApp(options: CreatePlatformAppOptions): PlatformAp
         try {
           return jsonResponse(
             await options.workflowService.closeTask(closeTaskParams.taskSessionId),
+          );
+        } catch (e) {
+          return jsonResponse({ error: e instanceof Error ? e.message : String(e) }, 400);
+        }
+      }
+
+      const closeAsyncParams = matchPath('/api/workflows/tasks/:taskSessionId/close-async', pathname);
+      if (request.method === 'POST' && closeAsyncParams) {
+        try {
+          return jsonResponse(
+            await options.workflowService.initiateCloseAsync(closeAsyncParams.taskSessionId),
+          );
+        } catch (e) {
+          return jsonResponse({ error: e instanceof Error ? e.message : String(e) }, 400);
+        }
+      }
+
+      const blockTaskParams = matchPath('/api/workflows/tasks/:taskSessionId/block', pathname);
+      if (request.method === 'POST' && blockTaskParams) {
+        const body = await readRequestBody<{ reason?: unknown }>(request);
+        const reason = typeof body?.reason === 'string' && body.reason.trim() ? body.reason.trim() : 'Blocked by human.';
+        try {
+          return jsonResponse(await options.workflowService.blockTask(blockTaskParams.taskSessionId, reason));
+        } catch (e) {
+          return jsonResponse({ error: e instanceof Error ? e.message : String(e) }, 400);
+        }
+      }
+
+      const unblockTaskParams = matchPath('/api/workflows/tasks/:taskSessionId/unblock', pathname);
+      if (request.method === 'POST' && unblockTaskParams) {
+        try {
+          return jsonResponse(await options.workflowService.unblockTask(unblockTaskParams.taskSessionId));
+        } catch (e) {
+          return jsonResponse({ error: e instanceof Error ? e.message : String(e) }, 400);
+        }
+      }
+
+      const uatApproveParams = matchPath('/api/workflows/tasks/:taskSessionId/uat-approve', pathname);
+      if (request.method === 'POST' && uatApproveParams) {
+        try {
+          return jsonResponse(await options.workflowService.uatApprove(uatApproveParams.taskSessionId));
+        } catch (e) {
+          return jsonResponse({ error: e instanceof Error ? e.message : String(e) }, 400);
+        }
+      }
+
+      const uatRejectParams = matchPath('/api/workflows/tasks/:taskSessionId/uat-reject', pathname);
+      if (request.method === 'POST' && uatRejectParams) {
+        const body = await readRequestBody<{ reason?: unknown }>(request);
+        const reason = typeof body?.reason === 'string' && body.reason.trim() ? body.reason.trim() : 'UAT rejected.';
+        try {
+          return jsonResponse(await options.workflowService.uatReject(uatRejectParams.taskSessionId, reason));
+        } catch (e) {
+          return jsonResponse({ error: e instanceof Error ? e.message : String(e) }, 400);
+        }
+      }
+
+      const ciResultParams = matchPath('/api/workflows/tasks/:taskSessionId/ci-result', pathname);
+      if (request.method === 'POST' && ciResultParams) {
+        const body = await readRequestBody<{ status?: unknown; reason?: unknown; coverage?: unknown }>(request);
+        const status = body?.status;
+        if (status !== 'success' && status !== 'failure') {
+          return jsonResponse({ error: 'status must be "success" or "failure"' }, 400);
+        }
+        const reason = typeof body?.reason === 'string' ? body.reason : undefined;
+        const coverage = body?.coverage != null ? Number(body.coverage) : undefined;
+        if (coverage !== undefined && (!isFinite(coverage) || coverage < 0 || coverage > 100)) {
+          return jsonResponse({ error: 'coverage must be a number between 0 and 100' }, 400);
+        }
+        try {
+          return jsonResponse(
+            await options.workflowService.processCiCallback(ciResultParams.taskSessionId, status, reason, coverage),
           );
         } catch (e) {
           return jsonResponse({ error: e instanceof Error ? e.message : String(e) }, 400);

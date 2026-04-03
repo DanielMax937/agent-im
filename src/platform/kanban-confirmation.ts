@@ -8,16 +8,22 @@ export function kanbanConfirmationMaxLoops(): number {
 const WORKFLOW_STATE_HINT: Record<TaskWorkflowState, string> = {
   todo: 'todo',
   pending_start: 'pending_start (queued for first dev run; dependencies + FIFO)',
-  in_progress: 'in_progress (developer: START_TESTING → pre_testing)',
+  in_progress: 'in_progress (developer: START_TESTING → pre_testing, or skips to testing if isHotfix)',
   pre_testing:
     'pre_testing (pre-tester: START_FEATURE_TESTING when prerequisites/env are ready; otherwise report missing env and wait for manual hookup)',
   testing: 'testing (tester: SUBMIT_REVIEW → PR + review, or RETURN_TO_DEVELOPMENT with failing cases)',
   review:
     'review (reviewer: REJECT_REVIEW → dev with comment; APPROVE_MERGE only when PR merge-ready on host → merge + regression)',
   regression_testing:
-    'regression_testing (tester: PROCEED_TO_RELEASE when regression OK → pending_release + release PR; otherwise report failing cases and wait)',
+    'regression_testing (tester: PROCEED_TO_RELEASE when regression OK → pending_uat or pending_release + release PR; otherwise report failing cases and wait)',
+  pending_uat:
+    'pending_uat (no agent — UAT approval gate; human approves via API /uat-approve or rejects via /uat-reject)',
   pending_release:
     'pending_release (no agent — merge release PR on host, then close task via API)',
+  closing:
+    'closing (transient — PR merge verification + coverage check running in background; moves to closed or reverts to pending_release)',
+  blocked:
+    'blocked (no agent — task externally blocked; unblock via API /unblock)',
   closed: 'closed',
 };
 

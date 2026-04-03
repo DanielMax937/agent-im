@@ -1360,6 +1360,45 @@ export default function AdminPage() {
                         />
                       </label>
                       <label className="ui-field">
+                        <span>评审循环上限（CTI_AUTO_REVIEW_MAX_LOOPS，默认 5）</span>
+                        <input
+                          type="number"
+                          min={1}
+                          value={spec.autoReviewMaxLoops ?? ''}
+                          onChange={(e) =>
+                            updateImBot({
+                              autoReviewMaxLoops: e.target.value ? Number(e.target.value) : undefined,
+                            })
+                          }
+                          placeholder="5"
+                        />
+                      </label>
+                      <label className="ui-field">
+                        <span>覆盖率检查命令（CTI_AUTO_COVERAGE_COMMAND，可选）</span>
+                        <input
+                          value={spec.autoCoverageCommand ?? ''}
+                          onChange={(e) =>
+                            updateImBot({ autoCoverageCommand: e.target.value || undefined })
+                          }
+                          placeholder="npm run test:coverage"
+                        />
+                      </label>
+                      <label className="ui-field">
+                        <span>最低覆盖率 %（CTI_AUTO_COVERAGE_MIN_PCT，可选）</span>
+                        <input
+                          type="number"
+                          min={0}
+                          max={100}
+                          value={spec.autoCoverageMinPct ?? ''}
+                          onChange={(e) =>
+                            updateImBot({
+                              autoCoverageMinPct: e.target.value ? Number(e.target.value) : undefined,
+                            })
+                          }
+                          placeholder="80"
+                        />
+                      </label>
+                      <label className="ui-field">
                         <span>Redis 命名空间（可选，双桥共用）</span>
                         <input
                           value={spec.autoRedisNamespace ?? ''}

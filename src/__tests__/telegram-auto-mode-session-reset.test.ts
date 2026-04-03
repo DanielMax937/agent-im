@@ -183,6 +183,7 @@ test('Telegram auto-mode user message starts fresh master/slave sessions and rep
       setSessionSummary: (summary: string) => Promise<void>;
       setLastUserRequest: (text: string) => Promise<void>;
       setReverifyPending: (pending: boolean) => Promise<void>;
+      resetReviewLoops: () => Promise<void>;
       setSlaveBusy: (ttlSeconds?: number) => Promise<void>;
       pushSlaveHandoff: (text: string, outboundChatId?: string) => Promise<void>;
       incrMasterTurns: () => Promise<number>;
@@ -196,6 +197,7 @@ test('Telegram auto-mode user message starts fresh master/slave sessions and rep
     },
     async setLastUserRequest() {},
     async setReverifyPending() {},
+    async resetReviewLoops() {},
     async setSlaveBusy() {},
     async pushSlaveHandoff(text: string) {
       handoffs.push(text);

@@ -36,6 +36,8 @@ export const DEFAULT_KANBAN_LANE_SKILL_LINES: Record<KanbanAgentKind, string[]> 
     'verification-before-completion',
     '仅验证本 task 功能点；合并冲突与合入 master 在后续步骤处理',
   ],
+  /** No AI agent for this lane — CI runs on a self-hosted GitHub Actions runner. */
+  'self-host-runner': [],
 };
 
 /**
@@ -90,6 +92,15 @@ export function resolveKanbanAgent(
         runtime: 'copilot',
         kanbanAgent: 'copilot-test',
         preferredSkills: DEFAULT_KANBAN_LANE_SKILL_LINES['copilot-test'],
+      };
+    case 'self-host-runner':
+      // No AI agent — CI runs on a self-hosted GitHub Actions runner.
+      // Role/runtime are recorded for audit but no instance is started.
+      return {
+        role: 'tester',
+        runtime: 'claude',
+        kanbanAgent: 'self-host-runner',
+        preferredSkills: [],
       };
   }
 }

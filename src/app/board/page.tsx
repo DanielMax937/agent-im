@@ -23,7 +23,9 @@ const COLUMNS: { key: TaskWorkflowState; label: string }[] = [
   { key: 'testing', label: '测试中' },
   { key: 'review', label: '评审中' },
   { key: 'regression_testing', label: '回归测试中' },
+  { key: 'pending_uat', label: 'UAT' },
   { key: 'pending_release', label: '合并主干' },
+  { key: 'blocked', label: '阻塞' },
   { key: 'closed', label: '完成' },
 ];
 
@@ -39,6 +41,7 @@ const KANBAN_AGENT_LABELS: Record<KanbanAgentKind, string> = {
   'claude-review': 'claude-review',
   'copilot-test': 'copilot-测试',
   'codex-senior': 'codex-高级开发',
+  'self-host-runner': 'self-host-runner (CI)',
 };
 
 const TODO_ASSIGN_AGENTS: KanbanAgentKind[] = ['agent-dev', 'codex-senior'];
@@ -169,6 +172,7 @@ export default function BoardPage() {
   /** Selected `issueId`s that must close before this card leaves the queue */
   const [createDependsOnIssueIds, setCreateDependsOnIssueIds] = useState<string[]>([]);
   const [createDepsDropdownOpen, setCreateDepsDropdownOpen] = useState(false);
+  const [createIsHotfix, setCreateIsHotfix] = useState(false);
   const createDepsDropdownRef = useRef<HTMLDivElement>(null);
   /** 待办批量领取：弹窗开关与选中任务 id */
   const [bulkAssignOpen, setBulkAssignOpen] = useState(false);
@@ -454,7 +458,9 @@ export default function BoardPage() {
     const map = new Map<TaskWorkflowState, TaskSession[]>();
     for (const col of COLUMNS) map.set(col.key, []);
     for (const t of tasks) {
-      const list = map.get(t.workflowState);
+      // `closing` tasks are shown inside the pending_release column (with a spinner badge)
+      const displayState = t.workflowState === 'closing' ? 'pending_release' : t.workflowState;
+      const list = map.get(displayState);
       if (list) list.push(t);
     }
     return map;
@@ -554,12 +560,14 @@ export default function BoardPage() {
           sprintId,
           title: createTitle.trim(),
           ...(dependsOnIssueIds?.length ? { dependsOnIssueIds } : {}),
+          ...(createIsHotfix ? { isHotfix: true } : {}),
         }),
       });
       if (!res.ok) throw new Error(await res.text());
       setCreateTitle('');
       setCreateDependsOnIssueIds([]);
       setCreateDepsDropdownOpen(false);
+      setCreateIsHotfix(false);
       await load();
       await loadDependencyPickerTasks(createProjectId);
     } catch (e) {
@@ -1166,6 +1174,86 @@ export default function BoardPage() {
     }
   }
 
+  async function blockTaskApi(task: TaskSession) {
+    const reason = window.prompt(`阻塞任务「${task.issueId}」——请输入阻塞原因：`);
+    if (reason === null) return; // cancelled
+    setBusy(true);
+    setError(null);
+    try {
+      const res = await fetch(`/api/workflows/tasks/${encodeURIComponent(task.id)}/block`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ reason: reason.trim() || '已阻塞' }),
+      });
+      if (!res.ok) {
+        const body = await res.json().catch(() => null) as { error?: string } | null;
+        throw new Error(body?.error ?? await res.text());
+      }
+      await load();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function unblockTaskApi(task: TaskSession) {
+    setBusy(true);
+    setError(null);
+    try {
+      const res = await fetch(`/api/workflows/tasks/${encodeURIComponent(task.id)}/unblock`, { method: 'POST' });
+      if (!res.ok) {
+        const body = await res.json().catch(() => null) as { error?: string } | null;
+        throw new Error(body?.error ?? await res.text());
+      }
+      await load();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function uatApproveApi(task: TaskSession) {
+    setBusy(true);
+    setError(null);
+    try {
+      const res = await fetch(`/api/workflows/tasks/${encodeURIComponent(task.id)}/uat-approve`, { method: 'POST' });
+      if (!res.ok) {
+        const body = await res.json().catch(() => null) as { error?: string } | null;
+        throw new Error(body?.error ?? await res.text());
+      }
+      await load();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function uatRejectApi(task: TaskSession) {
+    const reason = window.prompt(`UAT 打回任务「${task.issueId}」——请输入打回原因：`);
+    if (reason === null) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const res = await fetch(`/api/workflows/tasks/${encodeURIComponent(task.id)}/uat-reject`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ reason: reason.trim() || 'UAT 打回' }),
+      });
+      if (!res.ok) {
+        const body = await res.json().catch(() => null) as { error?: string } | null;
+        throw new Error(body?.error ?? await res.text());
+      }
+      await load();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
   async function submitManualQueue() {
     if (!manualModalTask) return;
     const text = manualQueueText.trim();
@@ -1223,7 +1311,12 @@ export default function BoardPage() {
       task.workflowState !== 'todo' &&
       task.workflowState !== 'pending_start' &&
       task.workflowState !== 'pending_release' &&
-      task.workflowState !== 'closed'
+      task.workflowState !== 'pending_uat' &&
+      task.workflowState !== 'closing' &&
+      task.workflowState !== 'blocked' &&
+      task.workflowState !== 'closed' &&
+      // Self-host-runner CI wait: no manual advance (CI webhook pushes it)
+      !(task.workflowState === 'regression_testing' && task.kanbanAgent === 'self-host-runner')
     );
   }
 
@@ -1302,8 +1395,10 @@ export default function BoardPage() {
           <p className="ui-muted">
             待办 {kanbanStatus.tasksByState.todo} · 队列 {kanbanStatus.tasksByState.pending_start ?? 0} · 开发中{' '}
             {kanbanStatus.tasksByState.in_progress} · 前置测试 {kanbanStatus.tasksByState.pre_testing ?? 0} · 评审 {kanbanStatus.tasksByState.review} · 测试{' '}
-            {kanbanStatus.tasksByState.testing} · 回归 {kanbanStatus.tasksByState.regression_testing} · 合并主干{' '}
-            {kanbanStatus.tasksByState.pending_release} · 完成{' '}
+            {kanbanStatus.tasksByState.testing} · 回归 {kanbanStatus.tasksByState.regression_testing}
+            {(kanbanStatus.tasksByState as Record<string, number>).pending_uat ? ` · UAT ${(kanbanStatus.tasksByState as Record<string, number>).pending_uat}` : ''} · 合并主干{' '}
+            {kanbanStatus.tasksByState.pending_release}
+            {(kanbanStatus.tasksByState as Record<string, number>).blocked ? ` · 阻塞 ${(kanbanStatus.tasksByState as Record<string, number>).blocked}` : ''} · 完成{' '}
             {kanbanStatus.tasksByState.closed}
           </p>
           <p className="ui-muted">运行中实例数：{kanbanStatus.instances.length}</p>
@@ -1316,7 +1411,9 @@ export default function BoardPage() {
                     <span className="ui-muted" style={{ display: 'block', marginTop: '0.25rem' }}>
                       待办 {row.tasksByState.todo} · 队列 {row.tasksByState.pending_start ?? 0} · 开发中{' '}
                       {row.tasksByState.in_progress} · 前置测试 {row.tasksByState.pre_testing ?? 0} · 评审 {row.tasksByState.review} · 测试 {row.tasksByState.testing} · 回归{' '}
-                      {row.tasksByState.regression_testing} · 合并主干 {row.tasksByState.pending_release} · 完成{' '}
+                      {row.tasksByState.regression_testing}
+                      {(row.tasksByState as Record<string, number>).pending_uat ? ` · UAT ${(row.tasksByState as Record<string, number>).pending_uat}` : ''} · 合并主干 {row.tasksByState.pending_release}
+                      {(row.tasksByState as Record<string, number>).blocked ? ` · 阻塞 ${(row.tasksByState as Record<string, number>).blocked}` : ''} · 完成{' '}
                       {row.tasksByState.closed}
                     </span>
                   </li>
@@ -1553,6 +1650,14 @@ export default function BoardPage() {
           <button type="button" className="ui-btn" disabled={busy || !projects.length} onClick={() => void createTask()}>
             创建
           </button>
+          <label style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', fontSize: '0.85rem', cursor: 'pointer' }}>
+            <input
+              type="checkbox"
+              checked={createIsHotfix}
+              onChange={(e) => setCreateIsHotfix(e.target.checked)}
+            />
+            快速通道（跳过前置测试）
+          </label>
         </div>
       </section>
 
@@ -1599,6 +1704,26 @@ export default function BoardPage() {
                       >
                         {task.title}
                       </button>
+                      {task.isHotfix ? (
+                        <span style={{ display: 'inline-block', fontSize: '0.65rem', fontWeight: 700, background: '#f59e0b', color: '#000', borderRadius: 4, padding: '1px 6px', marginRight: 4 }}>
+                          HOTFIX
+                        </span>
+                      ) : null}
+                      {task.workflowState === 'closing' ? (
+                        <p className="ui-card-meta" style={{ color: 'var(--ui-accent, #38bdf8)' }}>
+                          ⏳ 正在验证合并并检查覆盖率…
+                        </p>
+                      ) : null}
+                      {task.workflowState === 'regression_testing' && task.kanbanAgent === 'self-host-runner' ? (
+                        <p className="ui-card-meta" style={{ color: 'var(--ui-accent, #38bdf8)' }}>
+                          ⏳ 等待 Self-Hosted Runner CI 结果…
+                        </p>
+                      ) : null}
+                      {task.workflowState === 'blocked' ? (
+                        <p className="ui-card-meta" style={{ color: '#f87171' }}>
+                          🚫 {task.blockReason ?? '已阻塞'}
+                        </p>
+                      ) : null}
                       {task.dependsOnIssueIds?.length ? (
                         <p className="ui-card-meta ui-muted">依赖: {task.dependsOnIssueIds.join(', ')}</p>
                       ) : null}
@@ -1621,20 +1746,77 @@ export default function BoardPage() {
                           领取
                         </button>
                       ) : null}
-                      {canManualAdvance(task) ? (
+                      {task.workflowState === 'regression_testing' && task.kanbanAgent === 'self-host-runner' ? (
                         <button
                           type="button"
                           className="ui-btn ghost ui-btn-tiny"
-                          disabled={busy || !!task.agentGenerating}
-                          title={task.agentGenerating ? 'Agent 正在生成回复，请稍后再手动推进' : undefined}
+                          title="复制 CI Webhook URL（粘贴到 GitHub Actions workflow）"
                           onClick={(e) => {
                             e.stopPropagation();
-                            setManualModalTask(task);
-                            setManualQueueText('');
+                            const url = `${window.location.origin}/api/workflows/tasks/${task.id}/ci-result`;
+                            void navigator.clipboard.writeText(url).then(() => {
+                              alert(`已复制 Webhook URL:\n${url}`);
+                            });
                           }}
                         >
-                          手动推进
+                          📋 复制 Webhook URL
                         </button>
+                      ) : null}
+                      {task.workflowState === 'pending_uat' ? (
+                        <>
+                          <button
+                            type="button"
+                            className="ui-btn ghost ui-btn-tiny"
+                            disabled={busy}
+                            onClick={(e) => { e.stopPropagation(); void uatApproveApi(task); }}
+                          >
+                            ✅ UAT通过
+                          </button>
+                          <button
+                            type="button"
+                            className="ui-btn ghost ui-btn-tiny"
+                            disabled={busy}
+                            onClick={(e) => { e.stopPropagation(); void uatRejectApi(task); }}
+                          >
+                            ❌ UAT打回
+                          </button>
+                        </>
+                      ) : null}
+                      {task.workflowState === 'blocked' ? (
+                        <button
+                          type="button"
+                          className="ui-btn ghost ui-btn-tiny"
+                          disabled={busy}
+                          onClick={(e) => { e.stopPropagation(); void unblockTaskApi(task); }}
+                        >
+                          解除阻塞
+                        </button>
+                      ) : null}
+                      {canManualAdvance(task) ? (
+                        <>
+                          <button
+                            type="button"
+                            className="ui-btn ghost ui-btn-tiny"
+                            disabled={busy || !!task.agentGenerating}
+                            title={task.agentGenerating ? 'Agent 正在生成回复，请稍后再手动推进' : undefined}
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              setManualModalTask(task);
+                              setManualQueueText('');
+                            }}
+                          >
+                            手动推进
+                          </button>
+                          <button
+                            type="button"
+                            className="ui-btn ghost ui-btn-tiny"
+                            disabled={busy}
+                            title="阻塞此任务（停止 runner）"
+                            onClick={(e) => { e.stopPropagation(); void blockTaskApi(task); }}
+                          >
+                            阻塞
+                          </button>
+                        </>
                       ) : null}
                       <button
                         type="button"

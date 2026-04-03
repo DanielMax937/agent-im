@@ -168,6 +168,23 @@ export interface ImInstanceSpec {
   autoRedisUrl?: string;
   autoMaxTurns?: number;
   /**
+   * Auto mode master review loop cap. When the master sends follow-up to the slave this many times
+   * without verification passing, auto dispatch is halted and a Telegram alert is sent.
+   * Maps to `CTI_AUTO_REVIEW_MAX_LOOPS`. Default: 5.
+   */
+  autoReviewMaxLoops?: number;
+  /**
+   * Shell command to run for the coverage gate in the master verification walkthrough.
+   * Maps to `CTI_AUTO_COVERAGE_COMMAND`. When set, master must run the command and confirm
+   * coverage meets `autoCoverageMinPct`. Example: `npm run test:coverage`.
+   */
+  autoCoverageCommand?: string;
+  /**
+   * Minimum required coverage percentage (0–100) for the coverage gate.
+   * Maps to `CTI_AUTO_COVERAGE_MIN_PCT`. Only meaningful when `autoCoverageCommand` is set.
+   */
+  autoCoverageMinPct?: number;
+  /**
    * Auto mode **slave** pipeline only: dedicated runner profile (runtime, executables, etc.).
    * Merged into the bot runner list by id; master uses each chat’s current runner (`/runner`).
    */

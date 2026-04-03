@@ -155,6 +155,9 @@ export function buildSlaveEnvFromRunner(
   if (spec.autoRedisUrl) env.CTI_AUTO_REDIS_URL = spec.autoRedisUrl;
   if (spec.autoRedisNamespace) env.CTI_AUTO_REDIS_NAMESPACE = spec.autoRedisNamespace;
   if (spec.autoMaxTurns !== undefined) env.CTI_AUTO_MAX_TURNS = String(spec.autoMaxTurns);
+  if (spec.autoReviewMaxLoops !== undefined) env.CTI_AUTO_REVIEW_MAX_LOOPS = String(spec.autoReviewMaxLoops);
+  if (spec.autoCoverageCommand) env.CTI_AUTO_COVERAGE_COMMAND = spec.autoCoverageCommand;
+  if (spec.autoCoverageMinPct !== undefined) env.CTI_AUTO_COVERAGE_MIN_PCT = String(spec.autoCoverageMinPct);
   // Carry forward proxy
   if (parentConfig.proxy) env.CTI_PROXY = parentConfig.proxy;
   // Auto-mode timeouts + chunk logging (from saved config; else legacy: inherit generating process env)
@@ -504,6 +507,14 @@ function imInstanceSpecFromRow(o: Record<string, unknown>): ImInstanceSpec | nul
       : undefined;
   const autoSlaveExternal =
     typeof o.autoSlaveExternal === "boolean" ? o.autoSlaveExternal : undefined;
+  const autoReviewMaxLoops =
+    typeof o.autoReviewMaxLoops === "number" ? o.autoReviewMaxLoops : undefined;
+  const autoCoverageCommand =
+    typeof o.autoCoverageCommand === "string" && o.autoCoverageCommand.trim()
+      ? o.autoCoverageCommand.trim()
+      : undefined;
+  const autoCoverageMinPct =
+    typeof o.autoCoverageMinPct === "number" ? o.autoCoverageMinPct : undefined;
   return {
     id,
     channel: ch,
@@ -546,6 +557,9 @@ function imInstanceSpecFromRow(o: Record<string, unknown>): ImInstanceSpec | nul
     autoSlaveRunner,
     autoRedisNamespace,
     autoSlaveExternal,
+    autoReviewMaxLoops,
+    autoCoverageCommand,
+    autoCoverageMinPct,
     runners: parseRunnersField(o.runners),
     defaultRunnerId:
       typeof o.defaultRunnerId === "string" && o.defaultRunnerId.trim()
@@ -701,6 +715,24 @@ function applyImBotToSettings(m: Map<string, string>, config: Config): void {
     m.set(
       imScopedStoreKey(base, id, `bridge_${base}_auto_max_turns`),
       String(spec.autoMaxTurns),
+    );
+  }
+  if (spec.autoReviewMaxLoops !== undefined) {
+    m.set(
+      imScopedStoreKey(base, id, `bridge_${base}_auto_review_max_loops`),
+      String(spec.autoReviewMaxLoops),
+    );
+  }
+  if (spec.autoCoverageCommand) {
+    m.set(
+      imScopedStoreKey(base, id, `bridge_${base}_auto_coverage_command`),
+      spec.autoCoverageCommand,
+    );
+  }
+  if (spec.autoCoverageMinPct !== undefined) {
+    m.set(
+      imScopedStoreKey(base, id, `bridge_${base}_auto_coverage_min_pct`),
+      String(spec.autoCoverageMinPct),
     );
   }
 }
