@@ -61,6 +61,18 @@ function inferKanbanAgentForTodoAuto(task: TaskSession): KanbanAgentKind {
   return 'agent-dev';
 }
 
+/** True when the lane has「单 lane 默认 runner」or at least one roster member（与 `membersForKind` / `runnerProfileForLane` 一致）。 */
+function laneHasRunnerConfig(
+  kind: KanbanAgentKind,
+  mapping: Partial<Record<KanbanAgentKind, string>>,
+  members: Partial<Record<KanbanAgentKind, KanbanRoleMember[]>>,
+): boolean {
+  const rid = mapping[kind]?.trim();
+  if (rid) return true;
+  const roster = members[kind];
+  return Array.isArray(roster) && roster.length > 0;
+}
+
 const ROLE_SOURCE_LABELS: Record<'developer' | 'reviewer' | 'tester', string> = {
   developer: '开发',
   reviewer: '评审',
@@ -165,6 +177,9 @@ export default function BoardPage() {
   const [bulkLaneMembersByKind, setBulkLaneMembersByKind] = useState<
     Partial<Record<KanbanAgentKind, KanbanRoleMember[]>> | null
   >(null);
+  const [bulkAssignKanbanMapping, setBulkAssignKanbanMapping] = useState<
+    Partial<Record<KanbanAgentKind, string>> | null
+  >(null);
   /** 合并主干列：批量标记完成 */
   const [bulkCloseOpen, setBulkCloseOpen] = useState(false);
   const [bulkCloseSelectedTaskIds, setBulkCloseSelectedTaskIds] = useState<string[]>([]);
@@ -190,6 +205,10 @@ export default function BoardPage() {
   /** Loaded when assign modal opens — project kanbanRoleMembers from API */
   const [laneMembersByKind, setLaneMembersByKind] = useState<
     Partial<Record<KanbanAgentKind, KanbanRoleMember[]>> | null
+  >(null);
+  /** `mapping` from kanban-roles API (`kanbanRoleRunners`); null = not loaded yet */
+  const [assignModalKanbanMapping, setAssignModalKanbanMapping] = useState<
+    Partial<Record<KanbanAgentKind, string>> | null
   >(null);
   const [modalAssignMode, setModalAssignMode] = useState<'auto' | 'manual'>('auto');
   /** `kind:memberId` for manual pick; lane inferred from which roster the person belongs to */
@@ -228,6 +247,25 @@ export default function BoardPage() {
     }
     return out;
   }, [laneMembersByKind]);
+
+  const assignModalCanAssignFromTodo = useMemo(() => {
+    if (!assignModalTask || assignModalKanbanMapping === null || laneMembersByKind === null) return false;
+    if (modalTodoAssignOptions.length > 0 && modalAssignMode === 'manual') {
+      if (!modalAssigneeOptionValue.trim()) return false;
+      const parsed = parseTodoAssigneeOptionValue(modalAssigneeOptionValue.trim());
+      if (!parsed) return false;
+      return laneHasRunnerConfig(parsed.kind, assignModalKanbanMapping, laneMembersByKind);
+    }
+    const lane = inferKanbanAgentForTodoAuto(assignModalTask);
+    return laneHasRunnerConfig(lane, assignModalKanbanMapping, laneMembersByKind);
+  }, [
+    assignModalTask,
+    assignModalKanbanMapping,
+    laneMembersByKind,
+    modalTodoAssignOptions.length,
+    modalAssignMode,
+    modalAssigneeOptionValue,
+  ]);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -445,6 +483,34 @@ export default function BoardPage() {
     }
     return out;
   }, [bulkLaneMembersByKind]);
+
+  const bulkTodoAssignSelectedTasks = useMemo(
+    () => todoColumnTasks.filter((t) => bulkSelectedTaskIds.includes(t.id)),
+    [todoColumnTasks, bulkSelectedTaskIds],
+  );
+
+  const bulkTodoAssignFromTodoAllowed = useMemo(() => {
+    if (bulkLaneMembersByKind === null || bulkAssignKanbanMapping === null) return false;
+    if (bulkTodoAssignSelectedTasks.length === 0) return false;
+    if (bulkModalTodoAssignOptions.length > 0 && bulkAssignMode === 'manual') {
+      if (!bulkAssigneeOptionValue.trim()) return false;
+      const parsed = parseTodoAssigneeOptionValue(bulkAssigneeOptionValue.trim());
+      if (!parsed) return false;
+      return laneHasRunnerConfig(parsed.kind, bulkAssignKanbanMapping, bulkLaneMembersByKind);
+    }
+    for (const task of bulkTodoAssignSelectedTasks) {
+      const lane = inferKanbanAgentForTodoAuto(task);
+      if (!laneHasRunnerConfig(lane, bulkAssignKanbanMapping, bulkLaneMembersByKind)) return false;
+    }
+    return true;
+  }, [
+    bulkLaneMembersByKind,
+    bulkAssignKanbanMapping,
+    bulkTodoAssignSelectedTasks,
+    bulkModalTodoAssignOptions.length,
+    bulkAssignMode,
+    bulkAssigneeOptionValue,
+  ]);
 
   const bulkSelectedSpansMultipleProjects = useMemo(() => {
     const selected = todoColumnTasks.filter((t) => bulkSelectedTaskIds.includes(t.id));
@@ -843,6 +909,7 @@ export default function BoardPage() {
     const task = assignModalTask;
     if (!task) {
       setLaneMembersByKind(null);
+      setAssignModalKanbanMapping(null);
       return;
     }
     let cancelled = false;
@@ -852,10 +919,19 @@ export default function BoardPage() {
           cache: 'no-store',
         });
         if (!res.ok) throw new Error(await res.text());
-        const data = (await res.json()) as { members?: Partial<Record<KanbanAgentKind, KanbanRoleMember[]>> };
-        if (!cancelled) setLaneMembersByKind(data.members ?? {});
+        const data = (await res.json()) as {
+          members?: Partial<Record<KanbanAgentKind, KanbanRoleMember[]>>;
+          mapping?: Partial<Record<KanbanAgentKind, string>>;
+        };
+        if (!cancelled) {
+          setLaneMembersByKind(data.members ?? {});
+          setAssignModalKanbanMapping(data.mapping ?? {});
+        }
       } catch {
-        if (!cancelled) setLaneMembersByKind({});
+        if (!cancelled) {
+          setLaneMembersByKind({});
+          setAssignModalKanbanMapping({});
+        }
       }
     })();
     return () => {
@@ -866,6 +942,7 @@ export default function BoardPage() {
   useEffect(() => {
     if (!bulkAssignOpen || !bulkAssignProjectIdForRoles) {
       setBulkLaneMembersByKind(null);
+      setBulkAssignKanbanMapping(null);
       return;
     }
     let cancelled = false;
@@ -876,10 +953,19 @@ export default function BoardPage() {
           { cache: 'no-store' },
         );
         if (!res.ok) throw new Error(await res.text());
-        const data = (await res.json()) as { members?: Partial<Record<KanbanAgentKind, KanbanRoleMember[]>> };
-        if (!cancelled) setBulkLaneMembersByKind(data.members ?? {});
+        const data = (await res.json()) as {
+          members?: Partial<Record<KanbanAgentKind, KanbanRoleMember[]>>;
+          mapping?: Partial<Record<KanbanAgentKind, string>>;
+        };
+        if (!cancelled) {
+          setBulkLaneMembersByKind(data.members ?? {});
+          setBulkAssignKanbanMapping(data.mapping ?? {});
+        }
       } catch {
-        if (!cancelled) setBulkLaneMembersByKind({});
+        if (!cancelled) {
+          setBulkLaneMembersByKind({});
+          setBulkAssignKanbanMapping({});
+        }
       }
     })();
     return () => {
@@ -898,9 +984,36 @@ export default function BoardPage() {
       setError('批量分配仅支持同一项目内的任务，请取消勾选其他项目的卡片或先筛选项目');
       return;
     }
+    if (bulkAssignKanbanMapping === null || bulkLaneMembersByKind === null) {
+      setError('正在加载该项目的角色与 Runner 配置，请稍后重试');
+      return;
+    }
     if (bulkAssignMode === 'manual' && bulkModalTodoAssignOptions.length > 0 && !bulkAssigneeOptionValue.trim()) {
       setError('已选择「指定人员」时请选择一个负责人');
       return;
+    }
+    if (bulkModalTodoAssignOptions.length > 0 && bulkAssignMode === 'manual') {
+      const parsed = parseTodoAssigneeOptionValue(bulkAssigneeOptionValue.trim());
+      if (!parsed) {
+        setError('请选择一个负责人');
+        return;
+      }
+      if (!laneHasRunnerConfig(parsed.kind, bulkAssignKanbanMapping, bulkLaneMembersByKind)) {
+        setError(
+          `无法分配：请先在「角色与 Runner」为 ${KANBAN_AGENT_LABELS[parsed.kind]} 配置「单 lane 默认 runner」或至少一名人员。`,
+        );
+        return;
+      }
+    } else {
+      for (const task of selected) {
+        const lane = inferKanbanAgentForTodoAuto(task);
+        if (!laneHasRunnerConfig(lane, bulkAssignKanbanMapping, bulkLaneMembersByKind)) {
+          setError(
+            `无法分配：请先在「角色与 Runner」为 ${KANBAN_AGENT_LABELS[lane]} 配置「单 lane 默认 runner」或至少一名人员（当前任务 ${task.issueId} 将走该 lane）。`,
+          );
+          return;
+        }
+      }
     }
     setBusy(true);
     setError(null);
@@ -948,8 +1061,27 @@ export default function BoardPage() {
   async function confirmAssignFromTodo() {
     const task = assignModalTask;
     if (!task) return;
-    if (modalAssignMode === 'manual' && modalTodoAssignOptions.length > 0 && !modalAssigneeOptionValue.trim()) {
+    if (assignModalKanbanMapping === null || laneMembersByKind === null) {
+      setError('正在加载该项目的角色与 Runner 配置，请稍后重试');
+      return;
+    }
+    if (modalTodoAssignOptions.length > 0 && modalAssignMode === 'manual' && !modalAssigneeOptionValue.trim()) {
       setError('已选择「指定人员」时请选择一个负责人');
+      return;
+    }
+    let laneForRunner: KanbanAgentKind = inferKanbanAgentForTodoAuto(task);
+    if (modalTodoAssignOptions.length > 0 && modalAssignMode === 'manual') {
+      const parsed = parseTodoAssigneeOptionValue(modalAssigneeOptionValue.trim());
+      if (!parsed) {
+        setError('请选择一个负责人');
+        return;
+      }
+      laneForRunner = parsed.kind;
+    }
+    if (!laneHasRunnerConfig(laneForRunner, assignModalKanbanMapping, laneMembersByKind)) {
+      setError(
+        `无法分配：请先在「角色与 Runner」为 ${KANBAN_AGENT_LABELS[laneForRunner]} 配置「单 lane 默认 runner」或至少一名人员。`,
+      );
       return;
     }
     setBusy(true);
@@ -1583,15 +1715,25 @@ export default function BoardPage() {
                   </select>
                 ) : null}
               </div>
-            ) : laneMembersByKind !== null ? (
+            ) : null}
+            {assignModalKanbanMapping === null || laneMembersByKind === null ? (
               <p className="ui-muted ui-small" style={{ marginTop: '0.75rem' }}>
-                该项目未在「角色与 Runner」配置负责人列表；将使用默认开发 lane（agent-开发）与默认 runner。
+                正在加载角色与 Runner 配置…
               </p>
-            ) : (
+            ) : !assignModalCanAssignFromTodo ? (
+              <p className="ui-small" style={{ marginTop: '0.75rem', color: '#f87171' }}>
+                无法分配：请先打开{' '}
+                <a href="/board/roles" className="ui-link">
+                  角色与 Runner
+                </a>
+                ，为当前将使用的开发 lane 配置「单 lane 默认 runner」或至少一名人员（自动分配时按任务可能使用{' '}
+                <code>agent-开发</code> 或 <code>codex-高级开发</code>；指定人员时以所选 lane 为准）。
+              </p>
+            ) : modalTodoAssignOptions.length === 0 ? (
               <p className="ui-muted ui-small" style={{ marginTop: '0.75rem' }}>
-                正在加载人员配置…
+                该项目已为当前将使用的开发 lane 配置「单 lane 默认 runner」或至少一名人员，可分配并启动。
               </p>
-            )}
+            ) : null}
             <label style={{ display: 'block', marginTop: '0.75rem' }}>
               交接说明（可选，有内容时会写入工作流 comment）
               <textarea
@@ -1606,7 +1748,12 @@ export default function BoardPage() {
               <button type="button" className="ui-btn ghost" disabled={busy} onClick={() => setAssignModalTask(null)}>
                 取消
               </button>
-              <button type="button" className="ui-btn primary" disabled={busy} onClick={() => void confirmAssignFromTodo()}>
+              <button
+                type="button"
+                className="ui-btn primary"
+                disabled={busy || !assignModalCanAssignFromTodo}
+                onClick={() => void confirmAssignFromTodo()}
+              >
                 分配并启动 runner
               </button>
             </div>
@@ -1760,15 +1907,24 @@ export default function BoardPage() {
                       </select>
                     ) : null}
                   </div>
-                ) : bulkLaneMembersByKind !== null ? (
+                ) : null}
+                {bulkAssignKanbanMapping === null || bulkLaneMembersByKind === null ? (
                   <p className="ui-muted ui-small" style={{ marginTop: '0.35rem' }}>
-                    该项目未配置负责人列表；将使用默认 agent-开发 lane 与默认 runner。
+                    正在加载角色与 Runner 配置…
                   </p>
-                ) : (
+                ) : !bulkTodoAssignFromTodoAllowed ? (
+                  <p className="ui-small" style={{ marginTop: '0.35rem', color: '#f87171' }}>
+                    无法分配：请先在{' '}
+                    <a href="/board/roles" className="ui-link">
+                      角色与 Runner
+                    </a>{' '}
+                    为对应项目配置各 lane 的默认 runner 或人员（自动分配时按任务分别使用 agent-开发 / codex-高级开发 lane；指定人员时以所选 lane 为准）。
+                  </p>
+                ) : bulkModalTodoAssignOptions.length === 0 ? (
                   <p className="ui-muted ui-small" style={{ marginTop: '0.35rem' }}>
-                    正在加载人员配置…
+                    已为所选任务将使用的开发 lane 配置 runner 或人员，可批量分配。
                   </p>
-                )}
+                ) : null}
                 <label style={{ display: 'block', marginTop: '0.75rem' }}>
                   交接说明（可选，将写入每个任务的工作流 comment）
                   <textarea
@@ -1796,7 +1952,8 @@ export default function BoardPage() {
                 disabled={
                   busy ||
                   bulkSelectedTaskIds.length === 0 ||
-                  bulkSelectedSpansMultipleProjects
+                  bulkSelectedSpansMultipleProjects ||
+                  !bulkTodoAssignFromTodoAllowed
                 }
                 onClick={() => void confirmBulkAssignFromTodo()}
               >

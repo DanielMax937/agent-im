@@ -1,7 +1,7 @@
 import crypto from 'node:crypto';
 import path from 'node:path';
 
-import { loadConfig, resolveRuntimeForPlatformInstance } from '../config';
+import { loadConfig, normalizeRunners, resolveRuntimeForPlatformInstance } from '../config';
 import { PendingPermissions } from '../permission-gateway';
 import { resolveProvider } from '../runtime-provider';
 import {
@@ -134,6 +134,45 @@ function pickRuntimeProfile(
     if (c?.trim()) return c.trim();
   }
   return undefined;
+}
+
+/**
+ * Effective runtime + optional runner id for workflow logs. `task.runtime` is the lane default;
+ * when `runtimeProfileId` is set, the running provider follows `resolveRuntimeForPlatformInstance`
+ * (same as InstanceManager).
+ */
+function runnerSuffixForWorkflowLog(
+  task: Pick<TaskSession, 'runtime' | 'runtimeProfileId'>,
+): string {
+  const cfg = loadConfig();
+  const effective = resolveRuntimeForPlatformInstance(cfg, {
+    runtime: task.runtime,
+    runtimeProfileId: task.runtimeProfileId,
+  });
+  const pid = task.runtimeProfileId?.trim();
+  if (!pid) return String(effective);
+  const runner = normalizeRunners(cfg).find((r) => r.id === pid);
+  const label = runner?.label?.trim();
+  const showLabel = label && label !== pid;
+  return `${effective} · runner ${pid}${showLabel ? ` (${label})` : ''}`;
+}
+
+function formatKanbanRunnerSummary(
+  task: Pick<TaskSession, 'runtime' | 'runtimeProfileId' | 'kanbanAgent'>,
+): string {
+  const lane = task.kanbanAgent ?? 'agent-dev';
+  return `${lane} / ${runnerSuffixForWorkflowLog(task)}`;
+}
+
+function formatDeveloperStartFromQueueLine(
+  task: Pick<TaskSession, 'runtime' | 'runtimeProfileId' | 'kanbanAgent' | 'role'>,
+  branchName: string,
+  worktreePath: string | undefined,
+): string {
+  const lane = task.kanbanAgent ?? 'agent-dev';
+  const role = task.role ?? 'developer';
+  const inner = `${role}/${runnerSuffixForWorkflowLog(task)}`;
+  return `Started from queue → ${lane} (${inner}) on ${branchName}${worktreePath ? ` (worktree ${worktreePath})` : ''}.`;
 }
 
 function runtimeForRole(role: AgentRole, taskSession: TaskSession): AgentRuntime {
@@ -336,7 +375,7 @@ export class WorkflowService {
     this.enqueueKickoffPrompt(this.requireTaskSession(next.id));
     await this.appendWorkflowComment(
       next.id,
-      `Started from queue → ${next.kanbanAgent ?? 'agent-dev'} (${next.role}/${next.runtime}) on ${branchName}${worktreePath ? ` (worktree ${worktreePath})` : ''}.`,
+      formatDeveloperStartFromQueueLine(next, branchName, worktreePath),
     );
   }
 
@@ -972,10 +1011,7 @@ export class WorkflowService {
         `Handoff (read before running): ${handoff.trim()}`,
       );
     }
-    await this.appendWorkflowComment(
-      next.id,
-      `Queued for development (${resolved.kanbanAgent} / ${resolved.runtime}).`,
-    );
+    await this.appendWorkflowComment(next.id, `Queued for development (${formatKanbanRunnerSummary(next)}).`);
 
     await this.processDeveloperAssignmentQueue(sprint.id);
     return this.requireTaskSession(next.id);
@@ -1052,8 +1088,8 @@ export class WorkflowService {
 
     const logLine =
       reason === 'merge_conflict'
-        ? `Merge blocked (not mergeable). Round ${nextCount}. Assigned developer to resolve conflicts on the task branch, push, then re-run feature test → submit for review. Escalation runtime: ${resolved.runtime}. Detail: ${commentWithPrContext}`
-        : `Review rejected (round ${nextCount}). Escalation runtime: ${resolved.runtime}. Comment: ${commentWithPrContext}`;
+        ? `Merge blocked (not mergeable). Round ${nextCount}. Assigned developer to resolve conflicts on the task branch, push, then re-run feature test → submit for review. Escalation: ${formatKanbanRunnerSummary(updated)}. Detail: ${commentWithPrContext}`
+        : `Review rejected (round ${nextCount}). Escalation: ${formatKanbanRunnerSummary(updated)}. Comment: ${commentWithPrContext}`;
     await this.appendWorkflowComment(updated.id, logLine);
     return updated;
   }
