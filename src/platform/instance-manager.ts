@@ -9,6 +9,7 @@ import {
   buildKanbanMonitorTurnRecord,
   formatKanbanAgentFullPrompt,
 } from './kanban-agent-turn';
+import { getKanbanLogger } from './kanban-logger';
 import { JsonPlatformStore } from './json-platform-store';
 import { notifyKanbanTelegram } from './kanban-notify';
 import { buildRolePrompt } from './prompts';
@@ -40,6 +41,17 @@ function kanbanStreamTimeoutRetries(): number {
   if (raw === undefined || raw === '') return 3;
   const n = parseInt(raw, 10);
   return Number.isFinite(n) && n >= 0 ? n : 3;
+}
+
+/**
+ * Retries after a runtime error (`hasError` from stream, or thrown consume error).
+ * Default 2 → 3 attempts total (1 + retries). Override with `CTI_KANBAN_RUNTIME_ERROR_RETRIES`.
+ */
+function kanbanRuntimeErrorRetries(): number {
+  const raw = process.env.CTI_KANBAN_RUNTIME_ERROR_RETRIES;
+  if (raw === undefined || raw === '') return 2;
+  const n = parseInt(raw, 10);
+  return Number.isFinite(n) && n >= 0 ? n : 2;
 }
 
 function notifyKanbanSideChannel(issueId: string, text: string): void {
@@ -214,119 +226,236 @@ class TaskAgentRunner implements ManagedRunner {
     });
 
     const timeoutMs = kanbanStreamTimeoutMs();
-    const maxAttempts = 1 + kanbanStreamTimeoutRetries();
+    const maxTimeoutAttempts = 1 + kanbanStreamTimeoutRetries();
+    const maxRuntimeAttempts = 1 + kanbanRuntimeErrorRetries();
     let result!: StreamConsumeResult;
 
     this.updateInstance({ generating: true });
     try {
-      let attempt = 0;
-      while (true) {
-        attempt += 1;
-        const stream = this.provider!.streamChat({
-          prompt,
-          sessionId: currentTaskSession.sessionId,
-          sdkSessionId: currentTaskSession.providerSessionId,
-          systemPrompt,
-          workingDirectory: instance.workingDirectory,
-          conversationHistory,
-        });
+      runtimeLoop: for (let runtimeAttempt = 1; runtimeAttempt <= maxRuntimeAttempts; runtimeAttempt++) {
+        let timeoutAttempt = 0;
+        inner: while (true) {
+          timeoutAttempt += 1;
+          const stream = this.provider!.streamChat({
+            prompt,
+            sessionId: currentTaskSession.sessionId,
+            sdkSessionId: currentTaskSession.providerSessionId,
+            systemPrompt,
+            workingDirectory: instance.workingDirectory,
+            conversationHistory,
+          });
 
-        try {
-          result = await consumeAgentStream(stream, {
-            ...(timeoutMs > 0 ? { timeoutMs } : {}),
-            onPermissionRequest: async (permission) => {
-              this.store.savePendingApproval({
-                id: permission.permissionRequestId,
-                instanceId: instance.id,
-                taskId: currentTaskSession.taskId,
-                taskSessionId: currentTaskSession.id,
-                toolName: permission.toolName,
-                toolInput: permission.toolInput,
-                queueKey: currentTaskSession.approvalQueueKey,
-                status: 'pending',
-                createdAt: new Date().toISOString(),
-              });
+          try {
+            result = await consumeAgentStream(stream, {
+              ...(timeoutMs > 0 ? { timeoutMs } : {}),
+              onPermissionRequest: async (permission) => {
+                this.store.savePendingApproval({
+                  id: permission.permissionRequestId,
+                  instanceId: instance.id,
+                  taskId: currentTaskSession.taskId,
+                  taskSessionId: currentTaskSession.id,
+                  toolName: permission.toolName,
+                  toolInput: permission.toolInput,
+                  queueKey: currentTaskSession.approvalQueueKey,
+                  status: 'pending',
+                  createdAt: new Date().toISOString(),
+                });
 
+                notifyKanbanSideChannel(
+                  currentTaskSession.issueId,
+                  [
+                    `Approval required for ${permission.toolName}.`,
+                    `Approval ID: ${permission.permissionRequestId}`,
+                    `Tool input: ${permission.toolInput}`,
+                    `Approve via POST ${this.getApprovalUrl(permission.permissionRequestId)}`,
+                  ].join('\n'),
+                );
+              },
+            });
+          } catch (e) {
+            const msg = e instanceof Error ? e.message : String(e);
+            if (runtimeAttempt < maxRuntimeAttempts) {
+              getKanbanLogger().warn(
+                {
+                  issueId: currentTaskSession.issueId,
+                  taskSessionId: currentTaskSession.id,
+                  instanceId: instance.id,
+                  role: instance.role,
+                  turnId,
+                  runtimeAttempt,
+                  maxRuntimeAttempts,
+                  queueMessageType: queueMessage.type,
+                  errorMessage: msg,
+                  ...(e instanceof Error ? { errName: e.name, errStack: e.stack } : {}),
+                },
+                'Kanban agent stream threw (will retry)',
+              );
+              this.store.updateKanbanAgentTurnStreamError(
+                turnId,
+                `Stream threw (runtime attempt ${runtimeAttempt}/${maxRuntimeAttempts}): ${msg}`,
+              );
               notifyKanbanSideChannel(
                 currentTaskSession.issueId,
                 [
-                  `Approval required for ${permission.toolName}.`,
-                  `Approval ID: ${permission.permissionRequestId}`,
-                  `Tool input: ${permission.toolInput}`,
-                  `Approve via POST ${this.getApprovalUrl(permission.permissionRequestId)}`,
-                ].join('\n'),
+                  `Agent stream failed (${runtimeAttempt}/${maxRuntimeAttempts}).`,
+                  `Queue: ${queueMessage.type}. Retrying…`,
+                  msg,
+                ].join(' '),
               );
-            },
-          });
-        } catch (e) {
-          const msg = e instanceof Error ? e.message : String(e);
-          console.error(
-            `[kanban-instance] Stream failed: instanceId=${instance.id} role=${instance.role} taskSessionId=${taskSession.id} ` +
-            `issueId=${taskSession.issueId} queueType=${queueMessage.type} cwd=${cwd || '-'} cwdExists=${cwdExists} ` +
-            `error=${msg}`
+              continue runtimeLoop;
+            }
+            getKanbanLogger().error(
+              {
+                issueId: currentTaskSession.issueId,
+                taskSessionId: currentTaskSession.id,
+                instanceId: instance.id,
+                role: instance.role,
+                turnId,
+                runtimeAttempt,
+                maxRuntimeAttempts,
+                queueMessageType: queueMessage.type,
+                errorMessage: msg,
+                ...(e instanceof Error ? { errName: e.name, errStack: e.stack } : {}),
+              },
+              'Kanban agent stream threw (final, no more retries)',
+            );
+            this.store.updateKanbanAgentTurnStreamError(turnId, msg);
+            throw e;
+          }
+
+          if (!result.timedOut) {
+            break inner;
+          }
+
+          this.store.updateKanbanAgentTurnStreamError(
+            turnId,
+            `Stream timed out (attempt ${timeoutAttempt}/${maxTimeoutAttempts}, limit ${timeoutMs}ms): ${result.errorMessage}`,
           );
-          this.store.updateKanbanAgentTurnStreamError(turnId, msg);
-          throw e;
+
+          if (timeoutAttempt < maxTimeoutAttempts) {
+            notifyKanbanSideChannel(
+              currentTaskSession.issueId,
+              [
+                `Agent stream timed out (${timeoutAttempt}/${maxTimeoutAttempts}, ${Math.round(timeoutMs / 1000)}s per attempt).`,
+                `Queue message: ${queueMessage.type}. Retrying…`,
+              ].join(' '),
+            );
+            continue inner;
+          }
+
+          const manualMsg = [
+            `Agent stream timed out after ${maxTimeoutAttempts} attempt(s) (${Math.round(timeoutMs / 1000)}s each).`,
+            `Role: ${instance.role}; queue: ${queueMessage.type}.`,
+            'Please handle manually: check the runner, approvals, or network; use the board to enqueue a follow-up or restart the instance.',
+          ].join(' ');
+          notifyKanbanSideChannel(currentTaskSession.issueId, manualMsg);
+          this.store.appendConversationEntry(currentTaskSession.id, {
+            role: 'system',
+            source: 'workflow',
+            content: manualMsg,
+          });
+          const taskAfterTimeout = this.requireTaskSession(currentTaskSession.id);
+          this.store.upsertTaskSession({
+            ...taskAfterTimeout,
+            lastError: manualMsg,
+            updatedAt: new Date().toISOString(),
+          });
+          this.store.updateKanbanAgentTurnStreamError(turnId, result.errorMessage);
+          getKanbanLogger().warn(
+            {
+              issueId: currentTaskSession.issueId,
+              taskSessionId: currentTaskSession.id,
+              instanceId: instance.id,
+              role: instance.role,
+              turnId,
+              queueMessageType: queueMessage.type,
+              timeoutMs,
+              maxTimeoutAttempts,
+              errorMessage: result.errorMessage,
+              cwd,
+              cwdExists,
+            },
+            'Kanban agent stream timed out (exhausted, no more attempts)',
+          );
+          return false;
         }
 
-        if (!result.timedOut) {
-          break;
+        if (!result.hasError) {
+          break runtimeLoop;
         }
 
-        this.store.updateKanbanAgentTurnStreamError(
-          turnId,
-          `Stream timed out (attempt ${attempt}/${maxAttempts}, limit ${timeoutMs}ms): ${result.errorMessage}`,
-        );
-
-        if (attempt < maxAttempts) {
+        const errMsg = result.errorMessage.trim() ? result.errorMessage : 'Unknown runtime error';
+        if (runtimeAttempt < maxRuntimeAttempts) {
+          getKanbanLogger().warn(
+            {
+              issueId: currentTaskSession.issueId,
+              taskSessionId: currentTaskSession.id,
+              instanceId: instance.id,
+              role: instance.role,
+              turnId,
+              runtimeAttempt,
+              maxRuntimeAttempts,
+              queueMessageType: queueMessage.type,
+              errorMessage: errMsg,
+              timedOut: result.timedOut,
+              providerSessionId: result.providerSessionId,
+            },
+            'Kanban agent runtime error from stream (will retry)',
+          );
+          this.store.updateKanbanAgentTurnStreamError(
+            turnId,
+            `Runtime error (attempt ${runtimeAttempt}/${maxRuntimeAttempts}): ${errMsg}`,
+          );
           notifyKanbanSideChannel(
             currentTaskSession.issueId,
             [
-              `Agent stream timed out (${attempt}/${maxAttempts}, ${Math.round(timeoutMs / 1000)}s per attempt).`,
-              `Queue message: ${queueMessage.type}. Retrying…`,
+              `Runtime error (${runtimeAttempt}/${maxRuntimeAttempts}) for role ${instance.role}.`,
+              `Queue: ${queueMessage.type}. Retrying…`,
+              errMsg,
             ].join(' '),
           );
-          continue;
+          continue runtimeLoop;
         }
-
-        const manualMsg = [
-          `Agent stream timed out after ${maxAttempts} attempt(s) (${Math.round(timeoutMs / 1000)}s each).`,
-          `Role: ${instance.role}; queue: ${queueMessage.type}.`,
-          'Please handle manually: check the runner, approvals, or network; use the board to enqueue a follow-up or restart the instance.',
-        ].join(' ');
-        notifyKanbanSideChannel(currentTaskSession.issueId, manualMsg);
-        this.store.appendConversationEntry(currentTaskSession.id, {
-          role: 'system',
-          source: 'workflow',
-          content: manualMsg,
-        });
-        const taskAfterTimeout = this.requireTaskSession(currentTaskSession.id);
-        this.store.upsertTaskSession({
-          ...taskAfterTimeout,
-          lastError: manualMsg,
-          updatedAt: new Date().toISOString(),
-        });
-        this.store.updateKanbanAgentTurnStreamError(turnId, result.errorMessage);
-        return false;
+        break runtimeLoop;
       }
     } finally {
       this.updateInstance({ generating: false });
     }
 
     const nextTaskSession = this.requireTaskSession(instance.taskSessionId);
+    const resolvedRuntimeErr = result.errorMessage.trim()
+      ? result.errorMessage
+      : result.hasError
+        ? 'Unknown runtime error'
+        : '';
     this.store.upsertTaskSession({
       ...nextTaskSession,
       providerSessionId: result.providerSessionId ?? nextTaskSession.providerSessionId,
-      lastError: result.hasError ? result.errorMessage : undefined,
+      lastError: result.hasError ? resolvedRuntimeErr : undefined,
     });
 
     this.store.updateKanbanAgentTurnStreamError(
       turnId,
-      result.hasError ? (result.errorMessage.trim() ? result.errorMessage : 'Unknown runtime error') : null,
+      result.hasError ? resolvedRuntimeErr : null,
     );
 
     if (result.hasError) {
-      notifyKanbanSideChannel(currentTaskSession.issueId, `Runtime error: ${result.errorMessage}`);
+      getKanbanLogger().warn(
+        {
+          issueId: currentTaskSession.issueId,
+          taskSessionId: currentTaskSession.id,
+          instanceId: instance.id,
+          role: instance.role,
+          turnId,
+          queueMessageType: queueMessage.type,
+          errorMessage: resolvedRuntimeErr,
+          rawErrorMessage: result.errorMessage,
+          timedOut: result.timedOut,
+          providerSessionId: result.providerSessionId,
+        },
+        'Kanban agent turn finished with runtime error',
+      );
+      notifyKanbanSideChannel(currentTaskSession.issueId, `Runtime error: ${resolvedRuntimeErr}`);
       return false;
     }
 
