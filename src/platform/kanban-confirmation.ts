@@ -1,4 +1,5 @@
 import type { AgentRole, TaskSession, TaskWorkflowState } from './types';
+import { renderPrompt } from '../prompts/loader';
 
 export function kanbanConfirmationMaxLoops(): number {
   const raw = Number(process.env.CTI_KANBAN_CONFIRMATION_MAX_LOOPS ?? '100');
@@ -69,18 +70,13 @@ export function buildSystemCheckPrompt(taskSession: TaskSession, role: AgentRole
           : role === 'tester' && taskSession.workflowState === 'regression_testing'
             ? `Regression tester rule: (1) run full test suites with coverage (\`npm test -- --coverage --coverageReporters=json-summary\`); (2) read \`coverage/coverage-summary.json\` total.lines.pct; (3) call \`GET http://localhost:${process.env.PORT ?? '3300'}/api/projects/${taskSession.projectId}/coverage\` to get the minimum required coverage; (4) if current pct < saved minimum, do NOT emit PROCEED_TO_RELEASE — report current and required percentages and list the 5 lowest-coverage files; (5) only emit \`KANBAN_ACTION:PROCEED_TO_RELEASE\` when both regression tests and coverage gate pass.`
             : undefined;
-  return [
-    '[Kanban system check — respond in your next assistant message]',
-    '',
-    `Current workflow state: ${taskSession.workflowState} (${ws}).`,
-    `Your role for this lane: ${role}.`,
-    '',
-    `1) ${roleActionInstruction(taskSession, role)}`,
-    '2) If you are done with this lane, do not send only a prose summary. You must either emit the correct final `KANBAN_ACTION:...` line or explicitly explain why you cannot advance yet.',
-    ...(laneSpecificRule ? [laneSpecificRule] : []),
-    '3) If you still need to implement, fix, or explain more, continue working — do NOT add a KANBAN_ACTION line until you are ready.',
-    '4) If you are blocked, say what you need.',
-    '',
-    `Task: ${taskSession.issueId} — ${taskSession.title}`,
-  ].join('\n');
+  return renderPrompt('kanban/system-check', {
+    workflowState: taskSession.workflowState,
+    workflowStateHint: ws,
+    role,
+    roleActionInstruction: roleActionInstruction(taskSession, role),
+    laneSpecificRule: laneSpecificRule ? laneSpecificRule + '\n' : '',
+    taskIssueId: taskSession.issueId,
+    taskTitle: taskSession.title,
+  });
 }

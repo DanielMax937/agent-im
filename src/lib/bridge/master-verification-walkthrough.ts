@@ -1,3 +1,4 @@
+import { renderPrompt } from '../../prompts/loader';
 /**
  * Second-phase master prompt: after static review passes, master must verify the
  * work and emit a machine-readable outcome. Verification scope is inferred from
@@ -163,55 +164,19 @@ export function inferMasterVerificationMode(
 
 function buildReverifyBlock(options?: MasterVerificationWalkthroughOptions): string {
   return options?.isReverify
-    ? `
-
-### Re-verification (required)
-The slave submitted a new report **after fixing issues**. You must run the required verification for this mode again with the same rigor. Do not assume the previous run still holds.
-
-**Loop until clean:** If you find any bug or mismatch, output \`VERIFICATION_OUTCOME: FAILED\` and list issues; the slave will fix them and you will verify again. Only emit \`VERIFICATION_OUTCOME: PASSED\` when there are no remaining issues.
-`
-    : `
-
-### If verification fails
-Output \`VERIFICATION_OUTCOME: FAILED\` with concrete issues. The slave will fix them and send a new **Slave Execution Report**; you will then run this walkthrough again until a run ends with \`VERIFICATION_OUTCOME: PASSED\`.
-`;
+    ? renderPrompt('bridge/verification-reverify')
+    : renderPrompt('bridge/verification-if-fail');
 }
 
 function buildApiOnlyChecks(): string {
-  return `### Required verification (API_ONLY)
-
-1. **Terminal / API / local command verification**
-   - Use **curl**, shell commands, or other terminal checks to verify the important claims in the slave report.
-   - Prefer lightweight checks that directly prove the answer: status codes, body snippets, local command output, computed values, or file contents as appropriate.
-   - If the task has no HTTP API, state **N/A** and verify via shell/local commands instead.
-
-2. **Browser validation**
-   - Default to **N/A** for this mode.
-   - Only use browser tools if the session context explicitly requires webpage/UI validation.
-
-3. **Finish line**
-   - Decide whether the work is really done based on the checks above. Do not ask the slave to repeat the same verification unless you found a concrete mismatch.
-`;
+  return renderPrompt('bridge/verification-api-only');
 }
+
 
 function buildUiAndApiChecks(): string {
-  return `### Required verification (UI_AND_API)
-
-1. **Frontend — Playwright + local Google Chrome**
-   - Use **Playwright with local Google Chrome** (\`--channel chrome\`) to open the relevant pages and interact as a user would.
-   - Judge the UI by inspecting the **DOM**, page text, attributes, visibility, enabled/disabled state, navigation results, console messages, and network results.
-   - Do **not** use screenshots or image analysis as a required verification step.
-   - Do **not** use Chrome DevTools MCP for this verification flow.
-   - If you cannot load a page or complete the interaction, say why and set outcome to FAILED.
-
-2. **HTTP APIs / terminal checks**
-   - Use **curl** or terminal commands to exercise important endpoints and supporting checks. Record status codes and short body snippets.
-   - If the task has no HTTP API, state **N/A** and skip that part.
-
-3. **Finish line**
-   - Only after completing the applicable UI and API checks, decide if the work is really done.
-`;
+  return renderPrompt('bridge/verification-ui-api');
 }
+
 
 function buildCoverageGate(coverageCommand: string, minPct?: number, baseline?: number | null): string {
   // Effective minimum: take the higher of baseline and hard-coded minPct
@@ -227,20 +192,14 @@ function buildCoverageGate(coverageCommand: string, minPct?: number, baseline?: 
   const reportLine = effectiveMin !== undefined
     ? `   - After reporting coverage, end your output with: \`COVERAGE_RESULT: <percentage>\` (numeric, e.g. \`COVERAGE_RESULT: 83.5\`).`
     : '';
-  return `### Coverage gate (required — code changes detected)
-
-1. **Run the test coverage command**
-   \`\`\`
-   ${coverageCommand}
-   \`\`\`
-   - Extract the overall/total coverage percentage from the command output or generated report file (e.g. \`coverage-summary.json\`, lcov).
-${baselineNote}
-${minLine}
-${reportLine}
-   - If the command fails to run, output \`VERIFICATION_OUTCOME: FAILED\` and include the error.
-
-`;
+  return renderPrompt('bridge/verification-coverage-gate', {
+    coverageCommand,
+    baselineNote,
+    minLine,
+    reportLine,
+  });
 }
+
 
 export const COVERAGE_RESULT_PREFIX = 'COVERAGE_RESULT:';
 
@@ -263,34 +222,12 @@ export function buildMasterVerificationWalkthroughPrompt(
     ? buildCoverageGate(options!.coverageCommand!, options?.coverageMinPct, options?.coverageBaseline)
     : '';
 
-  return `${MASTER_VERIFICATION_WALKTHROUGH_PREFIX}
-
-You are the **master** runner. The initial review accepted the slave's work on paper. You must **prove** it works using the checks required for this verification mode before the task can be marked finished.
-${buildReverifyBlock(options)}
-### Verification mode
-${modeLine}
-
-### Session context (rolling summary tail)
-${ctx}
-
-${coverageSection}${checks}
-
-### Output format (required)
-
-- Brief narrative of what you ran and observed.
-- Start your conclusion section with exactly:
-  \`VERIFICATION_ACTION: ${modeLine}\`
-- If anything is wrong, list issues under \`## Issues found\` with concrete repro steps.
-- End with a single-line JSON verdict:
-  \`${MASTER_VERIFICATION_RESULT_JSON_PREFIX} {"pass": true}\`
-  or
-  \`${MASTER_VERIFICATION_RESULT_JSON_PREFIX} {"pass": false}\`
-- End with **exactly one** machine-readable line:
-  \`VERIFICATION_OUTCOME: PASSED\`
-  or
-  \`VERIFICATION_OUTCOME: FAILED\`
-
-Use **PASSED** only if the required checks for this mode show no blocking issues. Use **FAILED** for any bug, mismatch, missing proof, or incomplete verification.
-
-The user sees this message on Telegram — keep it readable.`;
+  return renderPrompt('bridge/verification-walkthrough', {
+    reverifyBlock: buildReverifyBlock(options),
+    modeLine,
+    sessionContext: ctx,
+    coverageSection,
+    checks,
+    verificationResultJsonPrefix: MASTER_VERIFICATION_RESULT_JSON_PREFIX,
+  });
 }

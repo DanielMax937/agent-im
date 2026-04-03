@@ -24,6 +24,7 @@ import {
   MASTER_VERIFICATION_RESULT_JSON_PREFIX,
   MASTER_VERIFICATION_WALKTHROUGH_PREFIX,
 } from './master-verification-walkthrough';
+import { renderPrompt } from '../../prompts/loader';
 
 export interface PermissionRequestInfo {
   permissionRequestId: string;
@@ -333,27 +334,10 @@ export async function processMessage(
     let systemPrompt = session?.system_prompt || undefined;
     let allowedTools: string[] | undefined;
     if (options?.deliverySource === 'master') {
-      const masterCoord =
-        'You are a manager evaluating your assistant\'s work report.\n\n' +
-        'You will receive a report from your assistant about a task they completed.\n' +
-        'The report includes the original goal and the assistant\'s response.\n\n' +
-        'YOUR JOB:\n' +
-        '- Judge if the assistant\'s work meets the original goal\n' +
-        '- If satisfactory: write a clear, friendly summary of the result for the user\n' +
-        '- If needs improvement: write specific corrections (include "please fix" or "needs improvement")\n\n' +
-        'RULES:\n' +
-        '- NEVER execute tasks yourself — you have no tools\n' +
-        '- Keep responses concise — they go directly to Telegram\n' +
-        '- Focus on whether the goal was achieved, not on style\n' +
-        '- On a passing review, do not mention the literal phrase "needs improvement", even in a negated sentence or instruction\n' +
-        `- The final line of your reply must be exactly one tagged JSON object and nothing after it\n` +
-        `- For pass, use exactly: ${MASTER_REVIEW_RESULT_JSON_PREFIX} {"pass": true}\n` +
-        `- For fail, use exactly this shape: ${MASTER_REVIEW_RESULT_JSON_PREFIX} {"pass": false, "reason": "<short concrete reason>"}\n` +
-        `- Use ${MASTER_REVIEW_RESULT_JSON_PREFIX} {"pass": true} only when the task should advance to verification\n` +
-        `- Use ${MASTER_REVIEW_RESULT_JSON_PREFIX} {"pass": false, "reason": "..."} when the slave must do more work\n` +
-        `- Do not wrap the JSON in code fences\n` +
-        `- Do not add any text after the final tagged JSON line\n` +
-        `- In verification rounds, do not use ${MASTER_REVIEW_RESULT_JSON_PREFIX}; follow the verification prompt and emit ${MASTER_VERIFICATION_RESULT_JSON_PREFIX} instead`;
+      const masterCoord = renderPrompt('system/master-coordinator', {
+        reviewResultJsonPrefix: MASTER_REVIEW_RESULT_JSON_PREFIX,
+        verificationResultJsonPrefix: MASTER_VERIFICATION_RESULT_JSON_PREFIX,
+      });
       systemPrompt = systemPrompt ? `${systemPrompt}\n\n${masterCoord}` : masterCoord;
       // Master must NOT have access to any tools — evaluation only
       allowedTools = [];

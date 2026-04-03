@@ -59,6 +59,7 @@ import {
   inferMimeType,
 } from './telegram-media';
 import type { TelegramPhotoSize, TelegramDocument, MediaDownloadResult } from './telegram-media';
+import { renderPrompt } from '../../../prompts/loader';
 
 const TELEGRAM_API = 'https://api.telegram.org';
 
@@ -553,32 +554,7 @@ export class TelegramAdapter extends BaseChannelAdapter {
       `---\n${reportBody}\n---\n\n` +
       sessionContextBlock +
       `### Your Decision\n` +
-      `You are a quality gate. Evaluate the assistant's work against the original goal.\n\n` +
-      `**Evaluation rubric:**\n\n` +
-      `**Must send follow-up (blocking issues):**\n` +
-      `- Goal not fully achieved — functionality missing or incorrect\n` +
-      `- Tests not run, failing, or absent when the task involves code changes\n` +
-      `- Security vulnerability, crash, or data loss risk\n` +
-      `- Critical edge cases not handled\n\n` +
-      `**May pass (non-blocking):**\n` +
-      `- Code style or formatting preferences\n` +
-      `- Optional optimizations or refactors not required by the goal\n` +
-      `- Minor cosmetic or documentation improvements\n` +
-      `- TODOs or "nice to have" items not part of the original request\n` +
-      `(You may mention non-blocking suggestions in your summary, but they must NOT prevent the task from passing.)\n\n` +
-      `**A task is finished when ALL of the following are true:**\n` +
-      `1. Every aspect of the goal is fully implemented\n` +
-      `2. Tests have been run and passed (or confirmed N/A for non-code tasks)\n` +
-      `3. No blocking issues remain\n\n` +
-      `**Output format (required — use structured token, not keywords):**\n` +
-      `- Write your evaluation as a concise message for the user.\n` +
-      `- Before the verdict line, include one tag indicating whether the task involved code changes:\n` +
-      `  \`TASK_INVOLVES_CODE: yes\`  (modified or created source/test files)\n` +
-      `  \`TASK_INVOLVES_CODE: no\`   (documentation, explanation, config-only, no code files changed)\n` +
-      `- The **last line** of your reply must be the tagged JSON verdict (no text after it):\n` +
-      `  Pass:    \`REVIEW_RESULT_JSON: {"pass": true}\`\n` +
-      `  Reject:  \`REVIEW_RESULT_JSON: {"pass": false, "reason": "<short reason>"}\`\n\n` +
-      `Keep it concise — your response goes directly to the user via Telegram.`;
+      renderPrompt('bridge/static-review');
     const chatId = this.hybridMirrorChatId || this.imGet('telegram_chat_id') || undefined;
     await this.autoModeRedis.pushMasterInput(slaveReport, 'default', chatId).catch(() => {});
   }
@@ -674,19 +650,11 @@ export class TelegramAdapter extends BaseChannelAdapter {
         outcome === 'unknown'
           ? '**Note:** No clear `VERIFICATION_OUTCOME: PASSED` line found — treated as failed verification. Ensure your reply ends with `VERIFICATION_OUTCOME: PASSED` or `VERIFICATION_OUTCOME: FAILED`.\n\n'
           : '';
-      const handoff =
-        `## Follow-up from Master (verification)\n\n` +
-        `### Session Context\n${trimmed}\n\n` +
-        unknownNote +
-        `### Verification findings & bugs to fix\n${payload.responseText.slice(0, 4000)}\n\n` +
-        `### Your Mission (Slave Runner)\n` +
-        `The master ran frontend (Playwright + local Chrome DOM checks) and/or API (curl) checks and found issues.\n\n` +
-        `**Requirements:**\n` +
-        `1. Fix every issue listed above.\n` +
-        `2. If any code files were modified: ensure unit tests cover your changes and all tests pass.\n` +
-        `3. Re-verify (tests, manual checks).\n` +
-        `4. Reply with a **Slave Execution Report** when done.\n\n` +
-        `Do better this time.`;
+      const handoff = renderPrompt('bridge/handoff-verification-followup', {
+        sessionContext: trimmed,
+        unknownNote,
+        verificationFindings: payload.responseText.slice(0, 4000),
+      });
       await this.autoModeRedis
         .pushSlaveHandoff(handoff, payload.outboundChatId)
         .catch(() => {});
@@ -789,19 +757,10 @@ export class TelegramAdapter extends BaseChannelAdapter {
     await this.autoModeRedis.setSlaveBusy(600).catch(() => {});
     writeRunnerStatus({ slaveBusy: true, slaveSince: Date.now() });
 
-    const handoff =
-      `## Follow-up Instructions from Master\n\n` +
-      `### Session Context\n${trimmed}\n\n` +
-      `### Master's Feedback & Corrections\n${payload.responseText.slice(0, 1500)}\n\n` +
-      `### Your Mission (Slave Runner)\n` +
-      `The master reviewed your previous work and found issues.\n\n` +
-      `**Requirements:**\n` +
-      `1. Carefully read the master's feedback above — address every point.\n` +
-      `2. Fix the issues, then re-verify your work.\n` +
-      `3. If any code files were modified: ensure unit tests cover your changes and all tests pass.\n` +
-      `4. Double-check edge cases and test your changes.\n` +
-      `5. Provide a clear summary of what you fixed.\n\n` +
-      `Do better this time.`;
+    const handoff = renderPrompt('bridge/handoff-master-followup', {
+      sessionContext: trimmed,
+      masterFeedback: payload.responseText.slice(0, 1500),
+    });
     await this.autoModeRedis
       .pushSlaveHandoff(handoff, payload.outboundChatId)
       .catch(() => {});
@@ -1120,25 +1079,9 @@ export class TelegramAdapter extends BaseChannelAdapter {
       });
 
       // Build slave handoff with user's original text
-      const handoff =
-        `## Task from User (via Telegram)\n\n` +
-        `### User's Request\n${msg.text}\n\n` +
-        `### Your Mission (Slave Runner)\n` +
-        `You are the execution agent. Complete the user's request above.\n\n` +
-        `**Requirements:**\n` +
-        `1. Complete the task to the highest quality possible.\n` +
-        `2. Be thorough — check edge cases, validate your work, verify the outcome.\n` +
-        `3. **If you modify or create any source code files:**\n` +
-        `   a. Write or update unit tests covering your changes — this is mandatory, not optional.\n` +
-        `   b. Run the full test suite and confirm all tests pass.\n` +
-        `   c. Run linting to confirm no new errors.\n` +
-        `4. If ambiguous, interpret in the way most helpful to the user.\n` +
-        `5. Provide a clear, concise summary of what you did and the result.\n\n` +
-        `### Reporting & idle rules\n` +
-        `- Your reply becomes a **Slave Execution Report** to Master. The report **goal** line is recovered from session history and/or this User's Request — do **not** reply with only greetings.\n` +
-        `- If the user gave **no actionable work** (no repo path, feature, or acceptance criteria), **say exactly what is missing** (e.g. directory, scope, how to verify) instead of only asking "what would you like?".\n` +
-        `- If this turn is **heartbeat / no new instruction**, state clearly: **无新指令，等待 Master 下发** and reference the last concrete task from context if known.\n\n` +
-        `Do your best work. The user is waiting.`;
+      const handoff = renderPrompt('bridge/handoff-user-task', {
+        userRequest: msg.text,
+      });
       await rt.pushSlaveHandoff(handoff, chatId).catch(() => {});
       await rt.incrMasterTurns().catch(() => {});
 

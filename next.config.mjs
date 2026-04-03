@@ -1,6 +1,9 @@
 /** @type {import('next').NextConfig} */
 const nextConfig = {
   output: 'standalone',
+  outputFileTracingIncludes: {
+    '**': ['./src/prompts/**/*.md'],
+  },
   serverExternalPackages: [
     '@anthropic-ai/claude-agent-sdk',
     '@openai/codex-sdk',

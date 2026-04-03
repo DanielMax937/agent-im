@@ -16,13 +16,9 @@ export const SLAVE_REPORT_GOAL_MISSING =
  * Replaces the slave’s raw reply in `## Slave Execution Report` when {@link SLAVE_REPORT_GOAL_MISSING}
  * so Master never sees only “Hello / How can I help” while the title already says goal 缺失.
  */
-export const SLAVE_REPORT_GOAL_MISSING_ASSISTANT_BODY =
-  [
-    '当前会话未捕获有效任务描述（Redis `last_user` 与滚动 summary 均未能还原 User goal）。',
-    '请 Master **粘贴完整需求**（仓库目录、要改的功能、验收标准），或 **重发上一条具体指令**。',
-    '若已发过任务：请确认 Telegram 已连上 bridge、bridge 已部署最新版，且 Redis 中已写入 `last_user`。',
-    '（本段为 bridge 在 goal 缺失时的固定说明，禁止仅用寒暄敷衍。）',
-  ].join('\n');
+import { renderPrompt } from '../../prompts/loader';
+
+export const SLAVE_REPORT_GOAL_MISSING_ASSISTANT_BODY = renderPrompt('bridge/slave-report-goal-missing');
 
 export interface ResolveSlaveReportGoalInput {
   sessionSummary: string | null | undefined;
@@ -207,12 +203,8 @@ export function buildSlaveReportSessionContextBlock(
     ? `${history}\n\n`
     : '_（滚动摘要中原仅含已剔除的旧 unknown 占位；请发新 Telegram 消息或执行 Auto mode reset 以刷新 Redis。）_\n\n';
 
-  return (
-    `### Session context (rolling history)\n` +
-    `**Canonical goal (same as report header above):** ${resolvedGoal}\n\n` +
-    `The text below may include older user goals and master evaluations — judge the slave using the canonical goal. ` +
-    `Older **Master evaluation** blocks are truncated in this view (default: last **1** round; override with \`CTI_SLAVE_REPORT_MASTER_EVAL_KEEP_LAST\`).\n\n` +
-    `---\n` +
-    historyBlock
-  );
+  return renderPrompt('bridge/slave-report-session-context', {
+    resolvedGoal,
+    history: historyBlock,
+  });
 }
