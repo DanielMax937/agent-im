@@ -15,6 +15,8 @@ export const ROLE_PROMPTS: Record<AgentRole, string> = {
     'You are the Reviewer agent inside the agent-im DevOps Agentic Platform.',
     'Focus on security, robustness, missing edge cases, regression risk, and logic gaps.',
     'Review flow is two-step: first assess the code change itself, then assess the host PR state.',
+    'In the review lane, the PR you must assess for `KANBAN_ACTION:APPROVE_MERGE` is the task review PR recorded on this task (`pullRequestUrl` / `pullRequestNumber`), which targets the sprint branch.',
+    'Do not substitute a later integration/release PR (for example sprint branch -> repository base) when deciding whether to approve or reject the current review lane.',
     'Review the open PR on GitHub/GitLab: post findings as **PR discussion comments** on the remote.',
     'Mirror the same review summary into the Kanban task conversation (workflow comment or POST /api/workflows/tasks/.../sync-review-comment if available).',
     'When you are assigned a review task, assume the platform has already created or reused the PR and recorded the latest host mergeability snapshot in the workflow notes below.',
@@ -130,6 +132,18 @@ export function buildRolePrompt({
         ]
       : [];
 
+  const reviewPrBlock =
+    role === 'reviewer' && taskSession.workflowState === 'review'
+      ? [
+          'Active review PR for this lane:',
+          `- Review PR URL: ${taskSession.pullRequestUrl?.trim() || '(missing)'}`,
+          `- Review PR number: ${taskSession.pullRequestNumber != null ? `#${taskSession.pullRequestNumber}` : '(missing)'}`,
+          `- Expected target branch for this review PR: \`${sprint.branchName}\``,
+          '- Use this task review PR as the authoritative host PR for the current review decision. Do not switch to a sprint->base release/integration PR when deciding `APPROVE_MERGE` vs `REJECT_REVIEW`.',
+          '',
+        ]
+      : [];
+
   const developerReworkBlock =
     role === 'developer' && taskSession.workflowState === 'in_progress' && (taskSession.reviewRejectionCount ?? 0) > 0
       ? [
@@ -178,6 +192,7 @@ export function buildRolePrompt({
     ...handoffBlock,
     ...historyLogBlock,
     ...workflowNotesBlock,
+    ...reviewPrBlock,
     ...testingScopeBlock,
     ...regressionBlock,
     ...developerReworkBlock,

@@ -49,6 +49,11 @@ export interface FindOpenPullRequestInput {
 /** Whether the host considers the PR/MR safe to merge (no conflicts; checks/reviews as required by host). */
 export interface PullRequestMergeStatus {
   canMerge: boolean;
+  /**
+   * Terminal host state when the PR is no longer mergeable because it is already finished on the host.
+   * Used so workflow can distinguish "retry later" from "already merged/closed".
+   */
+  terminalState?: 'merged' | 'closed';
   /** Set when `canMerge` is false (draft, conflicts, blocked checks, etc.). */
   reason?: string;
 }
@@ -223,7 +228,19 @@ export class HttpScmClient implements ScmClient {
         mergeable: boolean | null;
         mergeable_state: string;
         draft?: boolean;
+        state?: string;
+        merged?: boolean;
+        merged_at?: string | null;
       };
+      console.warn(
+        `[scm/github] PR #${pullNumber} merge status payload: state=${pr.state ?? '-'} merged=${String(pr.merged ?? false)} merged_at=${pr.merged_at ?? '-'} draft=${String(pr.draft ?? false)} mergeable=${String(pr.mergeable)} mergeable_state=${pr.mergeable_state ?? '-'}`,
+      );
+      if (pr.merged === true || Boolean(pr.merged_at)) {
+        return { canMerge: false, terminalState: 'merged', reason: 'PR is already merged on GitHub' };
+      }
+      if (pr.state === 'closed') {
+        return { canMerge: false, terminalState: 'closed', reason: 'PR is already closed on GitHub' };
+      }
       if (pr.draft) {
         return { canMerge: false, reason: 'PR is still a draft' };
       }

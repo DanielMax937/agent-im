@@ -272,6 +272,72 @@ describe('WorkflowService', () => {
     assert.ok(instanceManager.restarted.includes('tester-instance-1'));
   });
 
+  it('resumeKanbanAfterRestart repairs deleted worktree paths before restarting the active lane', async () => {
+    const { workflowService, project, store } = createHarness();
+    const sprint = createSprint(store, project.id);
+    const taskSession = createTaskSession(store, project.id, sprint.id, {
+      workflowState: 'review',
+      workingDirectory: '/tmp/missing-wt-todolist-8',
+      worktreePath: '/tmp/missing-wt-todolist-8',
+      conversationHistory: [],
+    });
+    store.upsertAgentInstance({
+      id: 'reviewer-instance-1',
+      projectId: project.id,
+      sprintId: sprint.id,
+      taskId: taskSession.taskId,
+      taskSessionId: taskSession.id,
+      runtime: 'claude',
+      role: 'reviewer',
+      status: 'error',
+      branchName: taskSession.branchName,
+      workingDirectory: '/tmp/missing-wt-todolist-8',
+      approvalsRequired: true,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    });
+
+    await workflowService.resumeKanbanAfterRestart();
+
+    const updatedTask = store.getTaskSession(taskSession.id)!;
+    assert.equal(updatedTask.workingDirectory, project.repository.localPath);
+    assert.equal(updatedTask.worktreePath, undefined);
+    const updatedInstance = store.getAgentInstance('reviewer-instance-1')!;
+    assert.equal(updatedInstance.workingDirectory, project.repository.localPath);
+    assert.equal(updatedInstance.status, 'starting');
+  });
+
+  it('normalizeTaskWorkingCopy also repairs persisted running instance working directories', async () => {
+    const { workflowService, project, store } = createHarness();
+    const sprint = createSprint(store, project.id);
+    const taskSession = createTaskSession(store, project.id, sprint.id, {
+      workflowState: 'review',
+      workingDirectory: project.repository.localPath,
+      worktreePath: undefined,
+      conversationHistory: [],
+    });
+    store.upsertAgentInstance({
+      id: 'reviewer-instance-running',
+      projectId: project.id,
+      sprintId: sprint.id,
+      taskId: taskSession.taskId,
+      taskSessionId: taskSession.id,
+      runtime: 'claude',
+      role: 'reviewer',
+      status: 'running',
+      branchName: taskSession.branchName,
+      workingDirectory: '/tmp/missing-wt-todolist-9',
+      approvalsRequired: true,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    });
+
+    await workflowService.resumeKanbanAfterRestart();
+
+    const updatedInstance = store.getAgentInstance('reviewer-instance-running')!;
+    assert.equal(updatedInstance.workingDirectory, project.repository.localPath);
+  });
+
   it('addTaskHistoryComment appends manual history entry', async () => {
     const { workflowService, project, store } = createHarness();
     const sprint = createSprint(store, project.id);
@@ -1001,6 +1067,74 @@ describe('WorkflowService', () => {
     assert.ok(
       t.conversationHistory.some(
         (e) => e.source === 'workflow' && e.content.includes('Host PR check failed after review approval attempt.'),
+      ),
+    );
+  });
+
+  it('keeps review lane when host PR mergeability is still computing', async () => {
+    const { workflowService, project, store, scmClient, instanceManager } = createHarness();
+    scmClient.mergeStatusResult = {
+      canMerge: false,
+      reason: 'PR mergeability is still computing on GitHub; retry APPROVE_MERGE in a moment',
+    };
+    const sprint = createSprint(store, project.id);
+    const taskSession = createTaskSession(store, project.id, sprint.id, {
+      workflowState: 'review',
+      pullRequestNumber: 10,
+      pullRequestUrl: 'https://example.test/pr/10',
+      branchName: 'dev/todolist-9',
+    });
+
+    const updated = await workflowService.startRegressionTesting(taskSession.id);
+
+    assert.equal(updated.workflowState, 'review');
+    assert.deepEqual(scmClient.calls, ['getPullRequestMergeStatus']);
+    assert.equal(instanceManager.started.length, 0);
+    const t = store.getTaskSession(taskSession.id)!;
+    assert.ok(
+      t.conversationHistory.some(
+        (e) =>
+          e.source === 'workflow' &&
+          e.content.includes('Host PR status: not merge-ready yet (PR #10)') &&
+          e.content.includes('retry APPROVE_MERGE in a moment'),
+      ),
+    );
+  });
+
+  it('treats already-merged review PR as a direct regression handoff instead of retrying mergeability', async () => {
+    const { workflowService, project, store, scmClient, instanceManager, gitService } = createHarness();
+    scmClient.mergeStatusResult = {
+      canMerge: false,
+      terminalState: 'merged',
+      reason: 'PR is already merged on GitHub',
+    };
+    const sprint = createSprint(store, project.id);
+    const taskSession = createTaskSession(store, project.id, sprint.id, {
+      workflowState: 'review',
+      pullRequestNumber: 10,
+      pullRequestUrl: 'https://example.test/pr/10',
+      branchName: 'dev/todolist-9',
+    });
+
+    const updated = await workflowService.startRegressionTesting(taskSession.id);
+
+    assert.equal(updated.workflowState, 'regression_testing');
+    assert.deepEqual(scmClient.calls, ['getPullRequestMergeStatus']);
+    assert.ok(instanceManager.started.some((s) => s.startsWith('tester:')));
+    assert.ok(gitService.calls.includes('fetchOrigin'));
+    const t = store.getTaskSession(taskSession.id)!;
+    assert.ok(
+      t.conversationHistory.some(
+        (e) =>
+          e.source === 'workflow' &&
+          e.content.includes('Host PR #10 is already merged on the host; continuing directly to regression startup.'),
+      ),
+    );
+    assert.ok(
+      !t.conversationHistory.some(
+        (e) =>
+          e.source === 'workflow' &&
+          e.content.includes('retry APPROVE_MERGE in a moment'),
       ),
     );
   });

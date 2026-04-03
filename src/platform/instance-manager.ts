@@ -1,4 +1,5 @@
 import crypto from 'node:crypto';
+import fs from 'node:fs';
 
 import type { LLMProvider, PermissionResolution } from '../lib/bridge/host';
 import { loadConfig, normalizeRunners, resolveRuntimeForPlatformInstance } from '../config';
@@ -143,6 +144,14 @@ class TaskAgentRunner implements ManagedRunner {
     const taskSession = this.requireTaskSession(instance.taskSessionId);
     const project = this.requireProject(taskSession.projectId);
     const sprint = this.requireSprint(taskSession.sprintId);
+    const cwd = instance.workingDirectory;
+    const cwdExists = cwd ? fs.existsSync(cwd) : false;
+
+    console.error(
+      `[kanban-instance] Starting prompt: instanceId=${instance.id} role=${instance.role} taskSessionId=${taskSession.id} ` +
+      `issueId=${taskSession.issueId} queueType=${queueMessage.type} cwd=${cwd || '-'} cwdExists=${cwdExists} ` +
+      `branch=${instance.branchName || '-'} runtime=${instance.runtime} runtimeProfileId=${instance.runtimeProfileId || '-'}`
+    );
 
     const historyBeforeUser = [...taskSession.conversationHistory];
 
@@ -251,6 +260,11 @@ class TaskAgentRunner implements ManagedRunner {
           });
         } catch (e) {
           const msg = e instanceof Error ? e.message : String(e);
+          console.error(
+            `[kanban-instance] Stream failed: instanceId=${instance.id} role=${instance.role} taskSessionId=${taskSession.id} ` +
+            `issueId=${taskSession.issueId} queueType=${queueMessage.type} cwd=${cwd || '-'} cwdExists=${cwdExists} ` +
+            `error=${msg}`
+          );
           this.store.updateKanbanAgentTurnStreamError(turnId, msg);
           throw e;
         }

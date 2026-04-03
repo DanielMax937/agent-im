@@ -1,4 +1,5 @@
 import crypto from 'node:crypto';
+import fs from 'node:fs';
 import path from 'node:path';
 
 import { loadConfig, resolveRuntimeForPlatformInstance } from '../config';
@@ -140,6 +141,11 @@ function runtimeForRole(role: AgentRole, taskSession: TaskSession): AgentRuntime
   if (role === 'reviewer') return 'claude';
   if (role === 'tester') return 'copilot';
   return taskSession.runtime;
+}
+
+function isTransientHostMergeabilityReason(reason: string | undefined): boolean {
+  if (!reason) return false;
+  return /retry\s+APPROVE_MERGE\s+in\s+a\s+moment/i.test(reason) || /still computing/i.test(reason);
 }
 
 function defaultSubmitTaskForReviewInput(task: TaskSession): SubmitTaskForReviewInput {
@@ -1311,44 +1317,115 @@ export class WorkflowService {
       project,
       taskSession.pullRequestNumber,
     );
+    getKanbanLogger().info(
+      {
+        taskSessionId: taskSession.id,
+        issueId: taskSession.issueId,
+        pullRequestNumber: taskSession.pullRequestNumber,
+        canMerge: mergeStatus.canMerge,
+        terminalState: mergeStatus.terminalState,
+        reason: mergeStatus.reason,
+      },
+      'review merge-status fetched before regression transition',
+    );
     if (!mergeStatus.canMerge) {
       const why = mergeStatus.reason ?? 'PR/MR is not mergeable';
-      await this.syncHostMergeBlockedComment(
-        taskSession,
-        `PR #${taskSession.pullRequestNumber} is not ready to merge: ${why}`,
-      );
-      return this.transitionReviewToDevelopment(
-        taskSession.id,
-        deferStopInstanceId,
-        'merge_conflict',
-        `PR #${taskSession.pullRequestNumber} is not ready to merge: ${why}`,
-      );
-    }
-
-    try {
-      await this.deps.scmClient.mergePullRequest(project, taskSession.pullRequestNumber);
-    } catch (e) {
-      if (isScmMergeNotMergeableError(project, e)) {
-        const detail = e instanceof Error ? e.message : String(e);
+      if (mergeStatus.terminalState === 'merged') {
+        await this.appendWorkflowComment(
+          taskSession.id,
+          `Host PR #${taskSession.pullRequestNumber} is already merged on the host; continuing directly to regression startup.`,
+        );
+        getKanbanLogger().info(
+          {
+            taskSessionId: taskSession.id,
+            issueId: taskSession.issueId,
+            pullRequestNumber: taskSession.pullRequestNumber,
+          },
+          'review merge-status indicates PR already merged; skipping merge API and continuing to regression',
+        );
+      } else if (mergeStatus.terminalState === 'closed') {
         await this.syncHostMergeBlockedComment(
           taskSession,
-          `Merge API failed because PR became not mergeable: ${detail.slice(0, 600)}`,
-        );
-        void notifyKanbanTelegram(
-          `[Kanban][${taskSession.issueId}] merge API failed (not mergeable); returning task to development for conflict or host-gate resolution.`,
+          `PR #${taskSession.pullRequestNumber} is already closed on the host and cannot be merged from workflow`,
         );
         getKanbanLogger().warn(
-          { taskId: taskSession.id, issueId: taskSession.issueId, pullRequestNumber: taskSession.pullRequestNumber },
-          'merge: API reported not mergeable after pre-check; returning task to development',
+          {
+            taskSessionId: taskSession.id,
+            issueId: taskSession.issueId,
+            pullRequestNumber: taskSession.pullRequestNumber,
+          },
+          'review merge-status indicates PR already closed; returning task to development',
         );
         return this.transitionReviewToDevelopment(
           taskSession.id,
           deferStopInstanceId,
           'merge_conflict',
-          `Merge failed (PR not mergeable): ${detail.slice(0, 400)}`,
+          `PR #${taskSession.pullRequestNumber} is already closed on the host and cannot be merged from workflow`,
+        );
+      } else if (isTransientHostMergeabilityReason(why)) {
+        getKanbanLogger().info(
+          {
+            taskSessionId: taskSession.id,
+            issueId: taskSession.issueId,
+            pullRequestNumber: taskSession.pullRequestNumber,
+            reason: why,
+          },
+          'review merge-status still computing; leaving task in review',
+        );
+        await this.appendWorkflowComment(
+          taskSession.id,
+          `Host PR status: not merge-ready yet (PR #${taskSession.pullRequestNumber}) — ${why}`,
+        );
+        return taskSession;
+      } else {
+        getKanbanLogger().warn(
+          {
+            taskSessionId: taskSession.id,
+            issueId: taskSession.issueId,
+            pullRequestNumber: taskSession.pullRequestNumber,
+            reason: why,
+          },
+          'review merge-status blocked; returning task to development',
+        );
+        await this.syncHostMergeBlockedComment(
+          taskSession,
+          `PR #${taskSession.pullRequestNumber} is not ready to merge: ${why}`,
+        );
+        return this.transitionReviewToDevelopment(
+          taskSession.id,
+          deferStopInstanceId,
+          'merge_conflict',
+          `PR #${taskSession.pullRequestNumber} is not ready to merge: ${why}`,
         );
       }
-      throw e;
+    }
+
+    if (mergeStatus.terminalState !== 'merged') {
+      try {
+        await this.deps.scmClient.mergePullRequest(project, taskSession.pullRequestNumber);
+      } catch (e) {
+        if (isScmMergeNotMergeableError(project, e)) {
+          const detail = e instanceof Error ? e.message : String(e);
+          await this.syncHostMergeBlockedComment(
+            taskSession,
+            `Merge API failed because PR became not mergeable: ${detail.slice(0, 600)}`,
+          );
+          void notifyKanbanTelegram(
+            `[Kanban][${taskSession.issueId}] merge API failed (not mergeable); returning task to development for conflict or host-gate resolution.`,
+          );
+          getKanbanLogger().warn(
+            { taskId: taskSession.id, issueId: taskSession.issueId, pullRequestNumber: taskSession.pullRequestNumber },
+            'merge: API reported not mergeable after pre-check; returning task to development',
+          );
+          return this.transitionReviewToDevelopment(
+            taskSession.id,
+            deferStopInstanceId,
+            'merge_conflict',
+            `Merge failed (PR not mergeable): ${detail.slice(0, 400)}`,
+          );
+        }
+        throw e;
+      }
     }
 
     await this.stopInstancesForTask(taskSession.id, deferStopInstanceId);
@@ -1357,6 +1434,12 @@ export class WorkflowService {
     if (taskWorktreePath) {
       try {
         await this.deps.gitService.removeTaskWorktree(repoPath, taskWorktreePath);
+        taskSession = this.deps.store.upsertTaskSession({
+          ...taskSession,
+          workingDirectory: repoPath,
+          worktreePath: undefined,
+          updatedAt: now(),
+        });
         await this.appendWorkflowComment(
           taskSession.id,
           `Removed local task worktree at ${taskWorktreePath} after PR merge.`,
@@ -1824,7 +1907,8 @@ export class WorkflowService {
     }
 
     const tasks = this.deps.store.listTaskSessions();
-    for (const task of tasks) {
+    for (const rawTask of tasks) {
+      const task = this.normalizeTaskWorkingCopy(rawTask);
       if (task.workflowState === 'todo' || task.workflowState === 'pending_start' || task.workflowState === 'closed')
         continue;
 
@@ -1869,6 +1953,7 @@ export class WorkflowService {
           ...inst,
           status: 'starting',
           lastError: undefined,
+          workingDirectory: task.workingDirectory,
           updatedAt: now(),
         });
       }
@@ -1909,7 +1994,7 @@ export class WorkflowService {
     role: AgentRole,
     runtimeProfileId?: string,
   ): Promise<AgentInstanceRecord> {
-    const taskSession = this.requireTaskSession(taskSessionId);
+    const taskSession = this.normalizeTaskWorkingCopy(this.requireTaskSession(taskSessionId));
     const instance = this.buildAgentInstance(taskSession, role);
     const out = await this.deps.instanceManager.upsertAndStart({
       ...instance,
@@ -2131,22 +2216,23 @@ export class WorkflowService {
   }
 
   private buildAgentInstance(taskSession: TaskSession, role: AgentRole): AgentInstanceRecord {
-    const project = this.requireProject(taskSession.projectId);
+    const normalizedTaskSession = this.normalizeTaskWorkingCopy(taskSession);
+    const project = this.requireProject(normalizedTaskSession.projectId);
     const existing = this.deps.store.findAgentInstance(taskSession.id, role);
-    const rt = runtimeForRole(role, taskSession);
+    const rt = runtimeForRole(role, normalizedTaskSession);
 
     return {
       id: existing?.id ?? crypto.randomUUID(),
-      projectId: taskSession.projectId,
-      sprintId: taskSession.sprintId,
-      taskId: taskSession.taskId,
-      taskSessionId: taskSession.id,
+      projectId: normalizedTaskSession.projectId,
+      sprintId: normalizedTaskSession.sprintId,
+      taskId: normalizedTaskSession.taskId,
+      taskSessionId: normalizedTaskSession.id,
       runtime: rt,
-      runtimeProfileId: taskSession.runtimeProfileId ?? existing?.runtimeProfileId,
+      runtimeProfileId: normalizedTaskSession.runtimeProfileId ?? existing?.runtimeProfileId,
       role,
       status: existing?.status ?? 'starting',
-      branchName: taskSession.branchName,
-      workingDirectory: taskSession.workingDirectory || project.repository.localPath,
+      branchName: normalizedTaskSession.branchName,
+      workingDirectory: normalizedTaskSession.workingDirectory || project.repository.localPath,
       approvalsRequired: true,
       createdAt: existing?.createdAt ?? now(),
       updatedAt: now(),
@@ -2154,6 +2240,42 @@ export class WorkflowService {
       stoppedAt: existing?.stoppedAt,
       lastError: existing?.lastError,
     };
+  }
+
+  private normalizeTaskWorkingCopy(taskSession: TaskSession): TaskSession {
+    const project = this.requireProject(taskSession.projectId);
+    const repoPath = project.repository.localPath;
+    const worktreePath = taskSession.worktreePath?.trim();
+    const workingDirectory = taskSession.workingDirectory?.trim();
+    const worktreeExists = worktreePath ? fs.existsSync(worktreePath) : false;
+    const workingDirectoryExists = workingDirectory ? fs.existsSync(workingDirectory) : false;
+    const normalizeInstances = (taskId: string) => {
+      for (const instance of this.deps.store.listAgentInstances(taskId)) {
+        const instanceWorkingDirectory = instance.workingDirectory?.trim();
+        const instanceWorkingDirectoryExists = instanceWorkingDirectory ? fs.existsSync(instanceWorkingDirectory) : false;
+        if (instanceWorkingDirectoryExists) continue;
+        this.deps.store.upsertAgentInstance({
+          ...instance,
+          workingDirectory: repoPath,
+          updatedAt: now(),
+        });
+      }
+    };
+
+    if ((worktreePath && worktreeExists) || (workingDirectory && workingDirectoryExists)) {
+      normalizeInstances(taskSession.id);
+      return taskSession;
+    }
+
+    const normalized: TaskSession = {
+      ...taskSession,
+      workingDirectory: repoPath,
+      worktreePath: undefined,
+      updatedAt: now(),
+    };
+    this.deps.store.upsertTaskSession(normalized);
+    normalizeInstances(taskSession.id);
+    return normalized;
   }
 
   private assertTransition(from: TaskWorkflowState, to: TaskWorkflowState): void {

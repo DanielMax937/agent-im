@@ -10,6 +10,7 @@
  */
 
 import { spawn, type ChildProcess, type SpawnOptions } from 'node:child_process';
+import fs from 'node:fs';
 import { createInterface } from 'node:readline';
 
 import type { LLMProvider, StreamChatParams } from './lib/bridge/host';
@@ -166,6 +167,8 @@ export class CursorProvider implements LLMProvider {
           };
           try {
             const agentPath = resolveAgentPath(self.agentPath);
+            const resolvedCwd = params.workingDirectory || process.cwd();
+            const cwdExists = fs.existsSync(resolvedCwd);
             const args = [
               '--print',
               '--output-format', 'stream-json',
@@ -210,11 +213,27 @@ export class CursorProvider implements LLMProvider {
               delete env.OPENAI_API_KEY;
             }
 
-            const child = self.spawnFn(agentPath, args, {
-              env,
-              cwd: params.workingDirectory || process.cwd(),
-              stdio: ['pipe', 'pipe', 'pipe'],
-            });
+            console.error(
+              `[cursor-provider] Launching agent: executable=${agentPath} cwd=${resolvedCwd} cwdExists=${cwdExists} ` +
+              `sessionId=${params.sessionId ?? '-'} sdkSessionId=${params.sdkSessionId ?? '-'} model=${model ?? '-'}`
+            );
+
+            let child: ChildProcess;
+            try {
+              child = self.spawnFn(agentPath, args, {
+                env,
+                cwd: resolvedCwd,
+                stdio: ['pipe', 'pipe', 'pipe'],
+              });
+            } catch (spawnError) {
+              const error = spawnError instanceof Error ? spawnError : new Error(String(spawnError));
+              console.error(
+                `[cursor-provider] Spawn failed before process start: executable=${agentPath} cwd=${resolvedCwd} ` +
+                `cwdExists=${cwdExists} sessionId=${params.sessionId ?? '-'} sdkSessionId=${params.sdkSessionId ?? '-'} ` +
+                `code=${(error as NodeJS.ErrnoException).code ?? '-'} message=${error.message}`
+              );
+              throw error;
+            }
 
             let aborted = params.abortController?.signal.aborted === true;
             if (params.abortController) {
@@ -358,7 +377,17 @@ export class CursorProvider implements LLMProvider {
                   resolve();
                 }
               });
-              child.on('error', reject);
+              child.on('error', (childError) => {
+                const error = childError instanceof Error ? childError : new Error(String(childError));
+                console.error(
+                  `[cursor-provider] Child process error: executable=${agentPath} cwd=${resolvedCwd} ` +
+                  `cwdExists=${cwdExists} sessionId=${params.sessionId ?? '-'} sdkSessionId=${params.sdkSessionId ?? '-'} ` +
+                  `code=${(error as NodeJS.ErrnoException).code ?? '-'} errno=${(error as NodeJS.ErrnoException).errno ?? '-'} ` +
+                  `syscall=${(error as NodeJS.ErrnoException).syscall ?? '-'} path=${(error as NodeJS.ErrnoException).path ?? '-'} ` +
+                  `spawnargs=${JSON.stringify((error as NodeJS.ErrnoException).spawnargs ?? args)}`
+                );
+                reject(error);
+              });
             });
 
             controller.close();

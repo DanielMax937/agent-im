@@ -70,6 +70,8 @@ describe('Kanban prompts', () => {
     assert.match(prompt, /do not emit `KANBAN_ACTION:APPROVE_MERGE`/);
     assert.match(prompt, /`KANBAN_ACTION:REJECT_REVIEW`/);
     assert.match(prompt, /Treat workflow notes about PR URL, mergeability, draft state, checks, or merge status as authoritative/i);
+    assert.match(prompt, /the PR you must assess for `KANBAN_ACTION:APPROVE_MERGE` is the task review PR recorded on this task/i);
+    assert.match(prompt, /Do not substitute a later integration\/release PR/i);
   });
 
   it('developer role prompt requires an explicit final action when lane work is done', () => {
@@ -208,11 +210,18 @@ describe('Kanban prompts', () => {
     const sprint = baseSprint(project.id);
     const task = {
       ...baseTask('review', 'reviewer'),
+      pullRequestNumber: 42,
       pullRequestUrl: 'https://example.test/pr/42',
     };
     const prompt = buildRolePrompt({ role: 'reviewer', project, sprint, taskSession: task });
 
     assert.match(prompt, /always include the PR URL if it is available/i);
+    assert.match(prompt, /Active review PR for this lane:/);
+    assert.match(prompt, /Review PR URL: https:\/\/example\.test\/pr\/42/);
+    assert.match(prompt, /Review PR number: #42/);
+    assert.match(prompt, /Expected target branch for this review PR: `feature\/sprint-1`/);
+    assert.match(prompt, /Use this task review PR as the authoritative host PR for the current review decision\./);
+    assert.match(prompt, /Do not switch to a sprint->base release\/integration PR/i);
   });
 
   it('system check tells tester only testing-lane actions', () => {
