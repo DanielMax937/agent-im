@@ -1,3 +1,5 @@
+import { renderPrompt } from '../../prompts/loader';
+
 /**
  * Resolves the **user goal** line for `## Slave Execution Report`.
  *
@@ -16,8 +18,6 @@ export const SLAVE_REPORT_GOAL_MISSING =
  * Replaces the slave’s raw reply in `## Slave Execution Report` when {@link SLAVE_REPORT_GOAL_MISSING}
  * so Master never sees only “Hello / How can I help” while the title already says goal 缺失.
  */
-import { renderPrompt } from '../../prompts/loader';
-
 export const SLAVE_REPORT_GOAL_MISSING_ASSISTANT_BODY = renderPrompt('bridge/slave-report-goal-missing');
 
 export interface ResolveSlaveReportGoalInput {

@@ -102,6 +102,7 @@ export interface PlatformStoreApi {
   getTaskSessionByProjectIssueId(projectId: string, issueId: string): TaskSession | null;
   listSprints(projectId?: string): Sprint[];
   getSprint(sprintId: string): Sprint | null;
+  upsertSprint(sprint: Sprint): Sprint;
   listTaskSessions(projectId?: string): TaskSession[];
   getTaskSession(taskSessionId: string): TaskSession | null;
   listAgentInstances(taskSessionId?: string): AgentInstanceRecord[];
@@ -541,6 +542,34 @@ export function createPlatformApp(options: CreatePlatformAppOptions): PlatformAp
 
       if (request.method === 'GET' && pathname === '/api/sprints') {
         return jsonResponse(options.store.listSprints(searchParams.get('projectId') ?? undefined));
+      }
+
+      if (request.method === 'POST' && pathname === '/api/sprints') {
+        const body = await readRequestBody<{
+          projectId: string;
+          name: string;
+          branchName?: string;
+          baseBranch?: string;
+        }>(request);
+        if (!body.projectId || !body.name?.trim()) {
+          return jsonResponse({ error: 'projectId and name are required' }, 400);
+        }
+        const project = options.store.getProject(body.projectId);
+        if (!project) return notFoundResponse('Project', body.projectId);
+        const safeName = body.name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
+        const sprint: Sprint = {
+          id: crypto.randomUUID(),
+          projectId: body.projectId,
+          name: body.name,
+          branchName: body.branchName ?? `${project.repository.sprintBranchPrefix ?? 'feature/'}${safeName}`,
+          baseBranch: body.baseBranch ?? project.repository.baseBranch ?? 'main',
+          status: 'active',
+          taskIds: [],
+          startedAt: new Date().toISOString(),
+          createdAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString(),
+        };
+        return jsonResponse(options.store.upsertSprint(sprint));
       }
 
       const sprintParams = matchPath('/api/sprints/:sprintId', pathname);
