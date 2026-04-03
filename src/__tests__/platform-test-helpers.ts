@@ -62,7 +62,7 @@ export class FakeGitService {
     return sha;
   }
 
-  async getWorkingTreeStatus(): Promise<
+  async getWorkingTreeStatus(_repoPath?: string): Promise<
     Array<{ path: string; indexStatus: string; worktreeStatus: string; raw: string }>
   > {
     this.calls.push('getWorkingTreeStatus');

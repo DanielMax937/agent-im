@@ -370,14 +370,14 @@ describe('WorkflowService', () => {
       ],
     });
     const next = await workflowService.startTesting(taskSession.id);
-    assert.equal(next.workflowState, 'testing');
+    assert.equal(next.workflowState, 'pre_testing');
     assert.ok(next.historyComments && next.historyComments.length >= 1);
     const h = next.historyComments![next.historyComments!.length - 1]!;
     assert.equal(h.kind, 'transition');
     assert.ok(h.content.includes('Implemented the API endpoint'));
   });
 
-  it('starts feature testing from development and creates a tester instance', async () => {
+  it('starts pre-testing from development and creates a tester instance', async () => {
     const { workflowService, project, store, instanceManager } = createHarness();
     const sprint = createSprint(store, project.id);
     const taskSession = createTaskSession(store, project.id, sprint.id, {
@@ -385,7 +385,22 @@ describe('WorkflowService', () => {
     });
 
     const testingTask = await workflowService.startTesting(taskSession.id);
+    assert.equal(testingTask.workflowState, 'pre_testing');
+    assert.deepEqual(instanceManager.started, [`tester:${taskSession.id}`]);
+  });
+
+  it('starts feature testing from pre-testing and keeps tester ownership', async () => {
+    const { workflowService, project, store, instanceManager } = createHarness();
+    const sprint = createSprint(store, project.id);
+    const taskSession = createTaskSession(store, project.id, sprint.id, {
+      workflowState: 'pre_testing',
+      role: 'tester',
+      kanbanAgent: 'pre-tester',
+    });
+
+    const testingTask = await workflowService.startFeatureTesting(taskSession.id);
     assert.equal(testingTask.workflowState, 'testing');
+    assert.equal(testingTask.kanbanAgent, 'copilot-test');
     assert.deepEqual(instanceManager.started, [`tester:${taskSession.id}`]);
   });
 
@@ -1242,7 +1257,9 @@ describe('WorkflowService', () => {
     });
 
     const testingResult = await workflowService.startTesting(taskSession.id);
-    assert.equal(testingResult.workflowState, 'testing');
+    assert.equal(testingResult.workflowState, 'pre_testing');
+    const featureTestingResult = await workflowService.startFeatureTesting(taskSession.id);
+    assert.equal(featureTestingResult.workflowState, 'testing');
 
     const reviewResult = await workflowService.submitTaskForReview({
       taskSessionId: taskSession.id,

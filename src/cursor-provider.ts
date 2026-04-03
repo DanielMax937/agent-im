@@ -379,12 +379,13 @@ export class CursorProvider implements LLMProvider {
               });
               child.on('error', (childError) => {
                 const error = childError instanceof Error ? childError : new Error(String(childError));
+                const spawnArgs = (error as NodeJS.ErrnoException & { spawnargs?: unknown }).spawnargs;
                 console.error(
                   `[cursor-provider] Child process error: executable=${agentPath} cwd=${resolvedCwd} ` +
                   `cwdExists=${cwdExists} sessionId=${params.sessionId ?? '-'} sdkSessionId=${params.sdkSessionId ?? '-'} ` +
                   `code=${(error as NodeJS.ErrnoException).code ?? '-'} errno=${(error as NodeJS.ErrnoException).errno ?? '-'} ` +
                   `syscall=${(error as NodeJS.ErrnoException).syscall ?? '-'} path=${(error as NodeJS.ErrnoException).path ?? '-'} ` +
-                  `spawnargs=${JSON.stringify((error as NodeJS.ErrnoException).spawnargs ?? args)}`
+                  `spawnargs=${JSON.stringify(spawnArgs ?? args)}`
                 );
                 reject(error);
               });

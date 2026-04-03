@@ -16,6 +16,11 @@ export const DEFAULT_KANBAN_LANE_SKILL_LINES: Record<KanbanAgentKind, string[]> 
     'gof-patterns（设计模式精简：策略/工厂等，避免过度设计）',
     '减少无关代码与注释 — 最小可行改动',
   ],
+  'pre-tester': [
+    'verification-before-completion',
+    '只检查本 task 所需环境变量 / 凭据 / 服务前置条件，不修改代码',
+    '缺失前置条件时明确列出缺失项并要求人工接入',
+  ],
   'codex-senior': [
     'vercel-react-best-practices（React 规范）',
     'gof-patterns（设计模式精简）',
@@ -64,6 +69,13 @@ export function resolveKanbanAgent(
         runtime: 'codex',
         kanbanAgent: 'codex-senior',
         preferredSkills: DEFAULT_KANBAN_LANE_SKILL_LINES['codex-senior'],
+      };
+    case 'pre-tester':
+      return {
+        role: 'tester',
+        runtime: 'copilot',
+        kanbanAgent: 'pre-tester',
+        preferredSkills: DEFAULT_KANBAN_LANE_SKILL_LINES['pre-tester'],
       };
     case 'claude-review':
       return {

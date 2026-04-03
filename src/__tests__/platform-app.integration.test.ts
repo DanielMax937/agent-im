@@ -375,7 +375,12 @@ describe('Platform app integration', () => {
       const startFeatureTest = await fetchJson(server.baseUrl, `/api/workflows/tasks/${taskFail.id}/start-testing`, {
         method: 'POST',
       });
-      assert.equal((startFeatureTest.body as { workflowState: string }).workflowState, 'testing');
+      assert.equal((startFeatureTest.body as { workflowState: string }).workflowState, 'pre_testing');
+
+      const enterFeatureTest = await fetchJson(server.baseUrl, `/api/workflows/tasks/${taskFail.id}/start-feature-testing`, {
+        method: 'POST',
+      });
+      assert.equal((enterFeatureTest.body as { workflowState: string }).workflowState, 'testing');
 
       const failTesting = await fetchJson(server.baseUrl, `/api/workflows/tasks/${taskFail.id}/testing/fail`, {
         method: 'POST',
@@ -388,6 +393,9 @@ describe('Platform app integration', () => {
       assert.equal((failTesting.body as { workflowState: string }).workflowState, 'in_progress');
 
       await fetchJson(server.baseUrl, `/api/workflows/tasks/${taskHappy.id}/start-testing`, {
+        method: 'POST',
+      });
+      await fetchJson(server.baseUrl, `/api/workflows/tasks/${taskHappy.id}/start-feature-testing`, {
         method: 'POST',
       });
       const submitReview = await fetchJson(server.baseUrl, `/api/workflows/tasks/${taskHappy.id}/submit-review`, {

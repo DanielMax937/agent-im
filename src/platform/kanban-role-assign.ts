@@ -15,6 +15,9 @@ export function isTaskActiveForKindAssignee(t: TaskSession, kind: KanbanAgentKin
   if (kind === 'agent-dev' || kind === 'codex-senior') {
     return t.workflowState === 'in_progress' && t.kanbanAgent === kind;
   }
+  if (kind === 'pre-tester') {
+    return t.workflowState === 'pre_testing';
+  }
   if (kind === 'claude-review') {
     return t.workflowState === 'review';
   }

@@ -81,6 +81,7 @@ describe('Kanban prompts', () => {
     const prompt = buildRolePrompt({ role: 'developer', project, sprint, taskSession: task });
 
     assert.match(prompt, /must end with the correct `KANBAN_ACTION:\.\.\.` final line/);
+    assert.match(prompt, /add or update task-relevant unit tests/i);
     assert.match(prompt, /When review is rejected because the PR is not merge-ready, treat that as active development work/i);
     assert.match(prompt, /When reviewer or tester finds an issue, fix it/i);
   });
@@ -187,6 +188,7 @@ describe('Kanban prompts', () => {
   it('system check tells developer to emit START_TESTING when work is done', () => {
     const prompt = buildSystemCheckPrompt(baseTask('in_progress', 'developer'), 'developer');
     assert.match(prompt, /`KANBAN_ACTION:START_TESTING`/);
+    assert.match(prompt, /unit tests/i);
     assert.match(prompt, /do not send only a prose summary/);
     assert.match(prompt, /Do not use tester or reviewer actions from the developer lane/i);
     assert.doesNotMatch(prompt, /`KANBAN_ACTION:SUBMIT_REVIEW` \(tester\)/);
@@ -228,7 +230,35 @@ describe('Kanban prompts', () => {
     const prompt = buildSystemCheckPrompt(baseTask('testing', 'tester'), 'tester');
     assert.match(prompt, /`KANBAN_ACTION:SUBMIT_REVIEW`/);
     assert.match(prompt, /`KANBAN_ACTION:RETURN_TO_DEVELOPMENT`/);
+    assert.match(prompt, /Playwright E2E/i);
     assert.match(prompt, /Do not use developer or reviewer actions from the tester lane/i);
     assert.doesNotMatch(prompt, /`KANBAN_ACTION:START_TESTING` \(developer\)/);
+  });
+
+  it('pre-tester prompt requires env validation and manual hookup when prerequisites are missing', () => {
+    const project = baseProject();
+    const sprint = baseSprint(project.id);
+    const task = baseTask('pre_testing', 'tester');
+    const prompt = buildRolePrompt({ role: 'tester', project, sprint, taskSession: task });
+    const systemCheck = buildSystemCheckPrompt(task, 'tester');
+
+    assert.match(prompt, /verify that all environment variables, credentials, external services, and local prerequisites/i);
+    assert.match(prompt, /manual hookup/i);
+    assert.match(prompt, /`KANBAN_ACTION:START_FEATURE_TESTING`/);
+    assert.match(systemCheck, /`KANBAN_ACTION:START_FEATURE_TESTING`/);
+    assert.match(systemCheck, /do not emit a KANBAN action/i);
+  });
+
+  it('regression tester prompt requires full-app api and playwright coverage without modifying code', () => {
+    const project = baseProject();
+    const sprint = baseSprint(project.id);
+    const task = baseTask('regression_testing', 'tester');
+    const prompt = buildRolePrompt({ role: 'tester', project, sprint, taskSession: task });
+    const systemCheck = buildSystemCheckPrompt(task, 'tester');
+
+    assert.match(prompt, /Never modify code in this lane\. Test only\./i);
+    assert.match(prompt, /whole-application API tests plus Playwright E2E/i);
+    assert.match(systemCheck, /list the failing test cases/i);
+    assert.match(systemCheck, /do not emit a KANBAN action/i);
   });
 });

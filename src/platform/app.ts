@@ -41,6 +41,7 @@ import { roleForActiveWorkflowState } from './workflow-service';
 
 const KANBAN_ROLE_KINDS: KanbanAgentKind[] = [
   'agent-dev',
+  'pre-tester',
   'codex-senior',
   'claude-review',
   'copilot-test',
@@ -129,6 +130,7 @@ export interface WorkflowServiceApi {
     prBody: string;
   }): Promise<unknown>;
   startTesting(taskSessionId: string): Promise<TaskSession>;
+  startFeatureTesting(taskSessionId: string): Promise<TaskSession>;
   startRegressionTesting(taskSessionId: string): Promise<TaskSession>;
   proceedToPendingRelease(taskSessionId: string): Promise<TaskSession>;
   refreshRegressionIfMasterAdvanced(taskSessionId: string): Promise<TaskSession>;
@@ -377,6 +379,7 @@ export function createPlatformApp(options: CreatePlatformAppOptions): PlatformAp
           kinds: KANBAN_ROLE_KINDS,
           roleLabels: {
             'agent-dev': '开发（agent-dev）',
+            'pre-tester': '前置测试（pre-tester）',
             'codex-senior': '高级开发（codex-senior）',
             'claude-review': '评审（claude-review）',
             'copilot-test': '测试（copilot-test）',
@@ -738,6 +741,13 @@ export function createPlatformApp(options: CreatePlatformAppOptions): PlatformAp
       if (request.method === 'POST' && testingStartParams) {
         return jsonResponse(
           await options.workflowService.startTesting(testingStartParams.taskSessionId),
+        );
+      }
+
+      const featureTestingStartParams = matchPath('/api/workflows/tasks/:taskSessionId/start-feature-testing', pathname);
+      if (request.method === 'POST' && featureTestingStartParams) {
+        return jsonResponse(
+          await options.workflowService.startFeatureTesting(featureTestingStartParams.taskSessionId),
         );
       }
 

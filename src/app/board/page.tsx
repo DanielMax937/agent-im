@@ -14,11 +14,12 @@ import type {
   TaskWorkflowState,
 } from '../../platform/types';
 
-/** Order matches pipeline: 开发 → 功能测试 → PR 评审 → 合并后回归 → 合并主干 → 完成 */
+/** Order matches pipeline: 开发 → 前置测试 → 功能测试 → PR 评审 → 合并后回归 → 合并主干 → 完成 */
 const COLUMNS: { key: TaskWorkflowState; label: string }[] = [
   { key: 'todo', label: '待办' },
   { key: 'pending_start', label: '队列' },
   { key: 'in_progress', label: '开发中' },
+  { key: 'pre_testing', label: '前置测试' },
   { key: 'testing', label: '测试中' },
   { key: 'review', label: '评审中' },
   { key: 'regression_testing', label: '回归测试中' },
@@ -34,6 +35,7 @@ const ROLE_LABELS: Record<string, string> = {
 
 const KANBAN_AGENT_LABELS: Record<KanbanAgentKind, string> = {
   'agent-dev': 'agent-开发',
+  'pre-tester': 'pre-tester',
   'claude-review': 'claude-review',
   'copilot-test': 'copilot-测试',
   'codex-senior': 'codex-高级开发',
@@ -1258,8 +1260,8 @@ export default function BoardPage() {
         <p className="lead ui-muted">
           列：
           <code>
-            todo → 队列(pending_start) → in_progress → review → testing → regression_testing → pending_release →
-            closed
+            todo → 队列(pending_start) → in_progress → pre_testing → testing → review →
+            regression_testing → pending_release → closed
           </code>
           。从待办分配后先入队；服务端会按顺序扫描队列，依赖满足即可开始开发（可多卡并行），被依赖卡住的项仍留在队列直至上游就绪。
           <strong>点击卡片标题</strong>查看任务详情（分配快照、工作流记录、各角色发言）；待办卡片点「领取」分配任务。<strong>活跃列</strong>可「手动推进」（向当前 lane 入队用户消息）。自动推进失败时由 <code>system_check</code> 循环确认，上限{' '}
@@ -1290,7 +1292,7 @@ export default function BoardPage() {
           <h2 className="ui-h2">项目与任务计数</h2>
           <p className="ui-muted">
             待办 {kanbanStatus.tasksByState.todo} · 队列 {kanbanStatus.tasksByState.pending_start ?? 0} · 开发中{' '}
-            {kanbanStatus.tasksByState.in_progress} · 评审 {kanbanStatus.tasksByState.review} · 测试{' '}
+            {kanbanStatus.tasksByState.in_progress} · 前置测试 {kanbanStatus.tasksByState.pre_testing ?? 0} · 评审 {kanbanStatus.tasksByState.review} · 测试{' '}
             {kanbanStatus.tasksByState.testing} · 回归 {kanbanStatus.tasksByState.regression_testing} · 合并主干{' '}
             {kanbanStatus.tasksByState.pending_release} · 完成{' '}
             {kanbanStatus.tasksByState.closed}
@@ -1304,7 +1306,7 @@ export default function BoardPage() {
                     {row.owner ? <span className="ui-muted"> — 负责人 {row.owner}</span> : null}
                     <span className="ui-muted" style={{ display: 'block', marginTop: '0.25rem' }}>
                       待办 {row.tasksByState.todo} · 队列 {row.tasksByState.pending_start ?? 0} · 开发中{' '}
-                      {row.tasksByState.in_progress} · 评审 {row.tasksByState.review} · 测试 {row.tasksByState.testing} · 回归{' '}
+                      {row.tasksByState.in_progress} · 前置测试 {row.tasksByState.pre_testing ?? 0} · 评审 {row.tasksByState.review} · 测试 {row.tasksByState.testing} · 回归{' '}
                       {row.tasksByState.regression_testing} · 合并主干 {row.tasksByState.pending_release} · 完成{' '}
                       {row.tasksByState.closed}
                     </span>

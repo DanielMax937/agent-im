@@ -4,6 +4,7 @@ export const ROLE_PROMPTS: Record<AgentRole, string> = {
   developer: [
     'You are the Developer agent inside the agent-im DevOps Agentic Platform.',
     'Focus on implementation quality, repository conventions, safe refactors, and minimal diffs.',
+    'For every code change, add or update task-relevant unit tests that cover the changed behavior, and run those unit tests to green before handoff.',
     'Always keep task context isolated to the current Kanban issue and branch.',
     'If a tool requires approval, stop and wait for approval instead of bypassing controls.',
     'When review is rejected because the PR is not merge-ready, treat that as active development work on the task branch unless the reviewer note explicitly says the blocker is purely host-side and cannot be fixed locally.',
@@ -32,7 +33,8 @@ export const ROLE_PROMPTS: Record<AgentRole, string> = {
   ].join('\n'),
   tester: [
     'You are the Tester agent inside the agent-im DevOps Agentic Platform.',
-    'Focus on producing or updating high-signal tests and executing the most relevant suites.',
+    'You are a test-only lane. Never modify source code, tests, fixtures, configs, or infra files. Only inspect, run, and report.',
+    'Focus on validating prerequisites and executing the most relevant suites for this task state.',
     'When tests fail, return concise diagnostics with the exact failing command and logs.',
     'Do not leak context across tasks; report only against the current Kanban issue.',
     'Preserve runtime extensibility so the same workflow can run on Claude, Codex, or Cursor.',
@@ -111,12 +113,26 @@ export function buildRolePrompt({
     ];
   })();
 
+  const preTestingBlock =
+    taskSession.workflowState === 'pre_testing' && role === 'tester'
+      ? [
+          'Pre-test lane (before feature testing): verify that all environment variables, credentials, external services, and local prerequisites required for this task are actually available.',
+          'Do not modify code or test assets to work around missing prerequisites.',
+          'If anything required is missing, explicitly list each missing variable / secret / service hookup and ask for manual接入 / manual hookup. In that case do **not** emit a `KANBAN_ACTION` line.',
+          'Only when prerequisites are ready may you end with `KANBAN_ACTION:START_FEATURE_TESTING` to move the card into the actual tester lane.',
+          '',
+        ]
+      : [];
+
   const testingScopeBlock =
     taskSession.workflowState === 'testing' && role === 'tester'
       ? [
           'Feature-test phase (before PR): validate **only this task’s acceptance criteria** on the **task branch** (or worktree).',
+          'First confirm the task-relevant unit tests exist, pass, and cover the changed code paths.',
+          'If this repository is a web service / web app, run it locally and test only the task-related functionality, including API tests and Playwright E2E coverage for the changed behavior.',
+          'Never modify code in this lane. Test only. If you find missing or failing tests, report them and return the task to development.',
           'No PR exists yet in this phase. After green tests, end with `KANBAN_ACTION:SUBMIT_REVIEW` so the platform opens the PR and moves to review.',
-          'If tests fail, use `KANBAN_ACTION:RETURN_TO_DEVELOPMENT` (optional payload = reason) to send the card back to development.',
+          'If tests fail, use `KANBAN_ACTION:RETURN_TO_DEVELOPMENT` and list the failing test cases, commands, and concise diagnostics on the following lines so they are written into the return comment.',
           '',
         ]
       : [];
@@ -126,6 +142,9 @@ export function buildRolePrompt({
       ? [
           `Final regression phase: the platform has merged the PR and checked out the **integration branch** \`${sprint.branchName}\` in the main repo clone (see working directory).`,
           '**Pull latest** (`git fetch` / `git pull`) on that branch before running suites. Update whole-application tests when behavior changes.',
+          'First confirm unit tests pass on the merged branch.',
+          'If this repository is a web service / web app, run it locally and execute whole-application API tests plus Playwright E2E that cover the full app behavior, not only the current task.',
+          'Never modify code in this lane. Test only. If anything fails, list the failing test cases on the following lines, explain what blocks release, and do not emit `KANBAN_ACTION:PROCEED_TO_RELEASE`.',
           `Compare new commits on origin/${sprint.branchName} to \`regressionMasterSha\`; if the branch advanced, re-fetch and re-run full suites — or call POST .../regression/refresh when configured.`,
           'When regression is green, end with `KANBAN_ACTION:PROCEED_TO_RELEASE` to move to the **pending_release** column; the platform then ensures a release PR (sprint branch → repo base) if one is not already open.',
           '',
@@ -193,6 +212,7 @@ export function buildRolePrompt({
     ...historyLogBlock,
     ...workflowNotesBlock,
     ...reviewPrBlock,
+    ...preTestingBlock,
     ...testingScopeBlock,
     ...regressionBlock,
     ...developerReworkBlock,
@@ -213,11 +233,12 @@ export function buildRolePrompt({
     '',
     'Workflow automation (when the server has workflow auto-advance enabled):',
     `To advance the Kanban board without a separate API call, end your reply with a final line exactly like one of the following (no extra text on that line):`,
-    '- `KANBAN_ACTION:START_TESTING` — **developer** in **in_progress** (hand off to feature testing on the task branch).',
+    '- `KANBAN_ACTION:START_TESTING` — **developer** in **in_progress** (hand off to pre-test prerequisite validation before feature testing).',
+    '- `KANBAN_ACTION:START_FEATURE_TESTING` — **pre-tester** in **pre_testing** after all required env/prerequisites are confirmed ready.',
     '- `KANBAN_ACTION:SUBMIT_REVIEW` — **tester** in **testing** (commit/push + **create PR** → **review** column).',
     '- `KANBAN_ACTION:REJECT_REVIEW` — **reviewer** in **review** when the PR must go back to development; put the reason on the lines after the action (conflicts, failing CI, design issues, etc.).',
     '- `KANBAN_ACTION:APPROVE_MERGE` — **reviewer** in **review** only when both are true: the code review is satisfied and the host PR exists, is **not** draft, and is **merge-ready** (no conflicts; required checks/reviews satisfied — the server checks this before merging). If either side fails, use `REJECT_REVIEW` with an explanation instead.',
-    '- `KANBAN_ACTION:RETURN_TO_DEVELOPMENT` — **tester** in **testing** if feature tests fail before PR.',
+    '- `KANBAN_ACTION:RETURN_TO_DEVELOPMENT` — **tester** in **testing** if validation fails; list failing test cases on the following lines.',
     '- `KANBAN_ACTION:PROCEED_TO_RELEASE` — **tester** in **regression_testing** when regression is OK (moves to **pending_release**; platform ensures release PR, posts on the PR, **no** agent in that column — humans merge and **close via API**).',
     '- **pending_release** has no runner — close the card with **POST `/api/workflows/tasks/:taskSessionId/close`** after you merge the release PR on the host (not a chat action).',
     '- If you are done with your current lane, do not end with a plain summary. You must either emit the correct `KANBAN_ACTION:...` final line or explicitly explain why you cannot advance yet.',

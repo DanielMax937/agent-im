@@ -50,11 +50,12 @@ import type {
  */
 const DEPENDENCY_SATISFIED_STATES = new Set<TaskWorkflowState>(['pending_release', 'closed']);
 
-/** Feature test → PR review → merge → regression on merge target branch (see mergeAndStartRegressionTesting). */
+/** Dev → pre-test → feature test → PR review → merge → regression on merge target branch. */
 const ALLOWED_TRANSITIONS: Record<TaskWorkflowState, TaskWorkflowState[]> = {
   todo: ['pending_start'],
   pending_start: ['in_progress'],
-  in_progress: ['testing'],
+  in_progress: ['pre_testing'],
+  pre_testing: ['testing'],
   testing: ['review', 'in_progress'],
   review: ['in_progress', 'regression_testing'],
   regression_testing: ['pending_release'],
@@ -76,6 +77,8 @@ export function roleForActiveWorkflowState(state: TaskWorkflowState): AgentRole 
       return null;
     case 'in_progress':
       return 'developer';
+    case 'pre_testing':
+      return 'tester';
     case 'review':
       return 'reviewer';
     case 'testing':
@@ -608,6 +611,15 @@ export class WorkflowService {
       return;
     }
 
+    if (parsed.action === 'START_FEATURE_TESTING') {
+      if (workflowState !== 'pre_testing' || completedRole !== 'tester') {
+        logSkip('START_FEATURE_TESTING requires tester in pre_testing');
+        return;
+      }
+      await this.startFeatureTesting(taskSession.id, defer);
+      return;
+    }
+
     if (parsed.action === 'SUBMIT_REVIEW') {
       if (workflowState !== 'testing' || completedRole !== 'tester') {
         logSkip('SUBMIT_REVIEW requires tester in testing');
@@ -643,7 +655,7 @@ export class WorkflowService {
         logSkip('RETURN_TO_DEVELOPMENT requires tester in testing');
         return;
       }
-      await this.returnFromFeatureTestingToDevelopment(
+      await this.returnTestingToDevelopment(
         taskSession.id,
         parsed.payload?.trim() || 'Feature tests failed; returning to development.',
         defer,
@@ -1277,6 +1289,57 @@ export class WorkflowService {
 
   async startTesting(taskSessionId: string, deferStopInstanceId?: string): Promise<TaskSession> {
     const taskSession = this.requireTaskSession(taskSessionId);
+    this.assertTransition(taskSession.workflowState, 'pre_testing');
+    await this.stopInstancesForTask(taskSession.id, deferStopInstanceId);
+
+    const project = this.requireProject(taskSession.projectId);
+    const allTasks = this.projectTasks(project.id);
+    const { member, runtimeProfileIdHint } = resolveKanbanAssignment(project, 'pre-tester', taskSession, allTasks, {});
+    const testerProfile = pickRuntimeProfile(
+      project,
+      'pre-tester',
+      undefined,
+      runtimeProfileIdHint,
+      taskSession.runtimeProfileId,
+    );
+    const assignPatch = mergeKanbanAssignee(taskSession, 'pre-tester', member?.id);
+
+    await notifyWorkflowStateTransition({
+      task: taskSession,
+      from: 'in_progress',
+      to: 'pre_testing',
+      outgoingRole: 'developer',
+      actionLabel: '进入前置测试',
+    });
+
+    const updatedTaskSession = this.deps.store.upsertTaskSession({
+      ...taskSession,
+      workflowState: 'pre_testing',
+      preferredSkills: preferredSkillsForProjectLane(project, 'pre-tester', 0),
+      kanbanAgent: 'pre-tester',
+      handoffComment:
+        taskSession.handoffComment ??
+        'Pre-test check: verify required environment variables, credentials, local services, and task prerequisites. If anything is missing, list missing items and require manual hookup without editing code.',
+      runtimeProfileId: testerProfile,
+      ...assignPatch,
+      historyComments: [
+        ...(taskSession.historyComments ?? []),
+        buildTransitionHistoryComment(taskSession, 'in_progress', 'pre_testing', 'developer', '进入前置测试'),
+      ],
+    });
+
+    await this.deps.instanceManager.upsertAndStart(
+      this.buildAgentInstance(updatedTaskSession, 'tester'),
+    );
+    this.enqueueKickoffPrompt(this.requireTaskSession(updatedTaskSession.id));
+
+    await this.appendWorkflowComment(updatedTaskSession.id, 'Started pre-tester for prerequisite and environment validation.');
+
+    return updatedTaskSession;
+  }
+
+  async startFeatureTesting(taskSessionId: string, deferStopInstanceId?: string): Promise<TaskSession> {
+    const taskSession = this.requireTaskSession(taskSessionId);
     this.assertTransition(taskSession.workflowState, 'testing');
     await this.stopInstancesForTask(taskSession.id, deferStopInstanceId);
 
@@ -1294,9 +1357,9 @@ export class WorkflowService {
 
     await notifyWorkflowStateTransition({
       task: taskSession,
-      from: 'in_progress',
+      from: 'pre_testing',
       to: 'testing',
-      outgoingRole: 'developer',
+      outgoingRole: 'tester',
       actionLabel: '进入功能测试',
     });
 
@@ -1312,7 +1375,7 @@ export class WorkflowService {
       ...assignPatch,
       historyComments: [
         ...(taskSession.historyComments ?? []),
-        buildTransitionHistoryComment(taskSession, 'in_progress', 'testing', 'developer', '进入功能测试'),
+        buildTransitionHistoryComment(taskSession, 'pre_testing', 'testing', 'tester', '进入功能测试'),
       ],
     });
 
@@ -1582,7 +1645,7 @@ export class WorkflowService {
     return this.mergeApprovedPullRequestAndStartRegression(taskSessionId, deferStopInstanceId);
   }
 
-  private async returnFromFeatureTestingToDevelopment(
+  private async returnTestingToDevelopment(
     taskSessionId: string,
     comment: string,
     deferStopInstanceId?: string,
@@ -1607,10 +1670,10 @@ export class WorkflowService {
 
     await notifyWorkflowStateTransition({
       task: taskSession,
-      from: 'testing',
+      from: taskSession.workflowState,
       to: 'in_progress',
       outgoingRole: 'tester',
-      actionLabel: '功能测试未通过，退回开发',
+      actionLabel: taskSession.workflowState === 'regression_testing' ? '回归测试未通过，退回开发' : '功能测试未通过，退回开发',
     });
 
     const updated = this.deps.store.upsertTaskSession({
@@ -1625,13 +1688,22 @@ export class WorkflowService {
       updatedAt: now(),
       historyComments: [
         ...(taskSession.historyComments ?? []),
-        buildTransitionHistoryComment(taskSession, 'testing', 'in_progress', 'tester', '功能测试未通过，退回开发'),
+        buildTransitionHistoryComment(
+          taskSession,
+          taskSession.workflowState,
+          'in_progress',
+          'tester',
+          taskSession.workflowState === 'regression_testing' ? '回归测试未通过，退回开发' : '功能测试未通过，退回开发',
+        ),
       ],
     });
 
     await this.deps.instanceManager.upsertAndStart(this.buildAgentInstance(updated, 'developer'));
     this.enqueueKickoffPrompt(this.requireTaskSession(updated.id));
-    await this.appendWorkflowComment(updated.id, `Returned from feature testing to development: ${comment}`);
+    await this.appendWorkflowComment(
+      updated.id,
+      `${taskSession.workflowState === 'regression_testing' ? 'Returned from regression testing' : 'Returned from feature testing'} to development: ${comment}`,
+    );
   }
 
   /**
@@ -2057,6 +2129,7 @@ export class WorkflowService {
       todo: 0,
       pending_start: 0,
       in_progress: 0,
+      pre_testing: 0,
       review: 0,
       testing: 0,
       regression_testing: 0,

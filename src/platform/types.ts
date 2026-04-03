@@ -1,7 +1,7 @@
 export type AgentRuntime = 'claude' | 'codex' | 'cursor' | 'copilot';
 export type AgentRole = 'developer' | 'reviewer' | 'tester';
 /**
- * Kanban columns: 待办 | 队列 | 开发中 | 测试中 | 评审 | 回归测试中 | 合并主干 | 完成
+ * Kanban columns: 待办 | 队列 | 开发中 | 前置测试 | 测试中 | 评审 | 回归测试中 | 合并主干 | 完成
  * `pending_start`: assigned from todo, waiting in sprint FIFO until dependencies are satisfied
  * (`pending_release` or `closed`, or no deps).
  */
@@ -9,6 +9,7 @@ export type TaskWorkflowState =
   | 'todo'
   | 'pending_start'
   | 'in_progress'
+  | 'pre_testing'
   | 'review'
   | 'testing'
   | 'regression_testing'
@@ -19,11 +20,12 @@ export type TaskWorkflowState =
 /**
  * Human-facing agent lanes for assignment UI and routing.
  * - agent-dev: default developer (Claude)
+ * - pre-tester: prerequisite/env validation before feature testing
  * - claude-review: code review
  * - copilot-test: feature testing on task branch
  * - codex-senior: escalation developer after repeated review pushback
  */
-export type KanbanAgentKind = 'agent-dev' | 'claude-review' | 'copilot-test' | 'codex-senior';
+export type KanbanAgentKind = 'agent-dev' | 'pre-tester' | 'claude-review' | 'copilot-test' | 'codex-senior';
 
 /** One human or logical assignee in a Kanban lane; each has their own runner profile. */
 export interface KanbanRoleMember {

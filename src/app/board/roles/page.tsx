@@ -21,6 +21,7 @@ type KanbanRolesPayload = {
 
 const EMPTY_MAPPING: Record<KanbanAgentKind, string> = {
   'agent-dev': '',
+  'pre-tester': '',
   'codex-senior': '',
   'claude-review': '',
   'copilot-test': '',
@@ -29,6 +30,7 @@ const EMPTY_MAPPING: Record<KanbanAgentKind, string> = {
 function emptyMembers(): Record<KanbanAgentKind, KanbanRoleMember[]> {
   return {
     'agent-dev': [],
+    'pre-tester': [],
     'codex-senior': [],
     'claude-review': [],
     'copilot-test': [],
@@ -38,6 +40,7 @@ function emptyMembers(): Record<KanbanAgentKind, KanbanRoleMember[]> {
 function emptyLaneSkills(): Record<KanbanAgentKind, string[]> {
   return {
     'agent-dev': [],
+    'pre-tester': [],
     'codex-senior': [],
     'claude-review': [],
     'copilot-test': [],
