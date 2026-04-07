@@ -89,6 +89,16 @@ export class DiscordAdapter extends BaseChannelAdapter {
 
   private autoModeRedis: AutoModeRedisTransport | null = null;
 
+  /**
+   * Deferred slash-command interactions: first outbound chunk uses editReply,
+   * further chunks use followUp (see delivery-layer chunking).
+   */
+  private pendingSlashReplyByChatId = new Map<
+    string,
+    { interaction: any; phase: 'edit' | 'followup' }
+  >();
+  private slashCleanupTimers = new Map<string, ReturnType<typeof setTimeout>>();
+
   // ── Lifecycle ───────────────────────────────────────────────
 
   async start(): Promise<void> {
@@ -193,6 +203,13 @@ export class DiscordAdapter extends BaseChannelAdapter {
     this.botUserId = this.client.user?.id || null;
     this.running = true;
 
+    this.registerSlashCommands().catch((err: unknown) => {
+      console.warn(
+        '[discord-adapter] Slash command registration failed:',
+        err instanceof Error ? err.message : err,
+      );
+    });
+
     console.log('[discord-adapter] Started (botUserId:', this.botUserId || 'unknown', ')');
   }
 
@@ -234,6 +251,12 @@ export class DiscordAdapter extends BaseChannelAdapter {
     this.previewMessages.clear();
     this.previewDegraded.clear();
 
+    for (const t of this.slashCleanupTimers.values()) {
+      clearTimeout(t);
+    }
+    this.slashCleanupTimers.clear();
+    this.pendingSlashReplyByChatId.clear();
+
     console.log('[discord-adapter] Stopped');
   }
 
@@ -260,6 +283,152 @@ export class DiscordAdapter extends BaseChannelAdapter {
       waiter(msg);
     } else {
       this.queue.push(msg);
+    }
+  }
+
+  /**
+   * Register slash commands with Discord (mirrors Telegram setMyCommands list).
+   * Uses guild registration when `bridge_discord_slash_guild_id` is set (faster propagation);
+   * otherwise global commands (can take up to ~1h to appear everywhere).
+   */
+  private async registerSlashCommands(): Promise<void> {
+    if (!this.client?.application?.id) return;
+    const token = this.d('bridge_discord_bot_token');
+    if (!token) return;
+
+    const djs = await loadDiscordJs();
+    const { SlashCommandBuilder, REST, Routes } = djs;
+    const rest = new REST({ version: '10' }).setToken(token);
+    const clientId = this.client.application.id;
+
+    /* eslint-disable @typescript-eslint/no-explicit-any -- discord.js SlashCommandBuilder option chain */
+    const builders = [
+      new SlashCommandBuilder()
+        .setName('start')
+        .setDescription('Show welcome and command list'),
+      new SlashCommandBuilder()
+        .setName('new')
+        .setDescription('Start new session (optionally specify path)')
+        .addStringOption((o: any) =>
+          o.setName('path').setDescription('Working directory (absolute path, optional)').setRequired(false),
+        ),
+      new SlashCommandBuilder()
+        .setName('autostop')
+        .setDescription('Stop both master and slave tasks (auto mode)'),
+      new SlashCommandBuilder()
+        .setName('bind')
+        .setDescription('Bind to an existing session')
+        .addStringOption((o: any) => o.setName('session_id').setDescription('Session ID').setRequired(true)),
+      new SlashCommandBuilder()
+        .setName('cwd')
+        .setDescription('Change working directory')
+        .addStringOption((o: any) => o.setName('path').setDescription('Absolute path').setRequired(true)),
+      new SlashCommandBuilder()
+        .setName('mode')
+        .setDescription('Switch mode: plan / code / ask')
+        .addStringOption((o: any) =>
+          o
+            .setName('mode')
+            .setDescription('Mode')
+            .setRequired(true)
+            .addChoices(
+              { name: 'plan', value: 'plan' },
+              { name: 'code', value: 'code' },
+              { name: 'ask', value: 'ask' },
+            ),
+        ),
+      new SlashCommandBuilder()
+        .setName('runner')
+        .setDescription('List or switch LLM runner for this chat')
+        .addStringOption((o: any) =>
+          o.setName('profile').setDescription('Runner profile id, or default').setRequired(false),
+        ),
+      new SlashCommandBuilder().setName('status').setDescription('Show current session status'),
+      new SlashCommandBuilder().setName('sessions').setDescription('List recent sessions'),
+      new SlashCommandBuilder().setName('stop').setDescription('Stop the current task'),
+      new SlashCommandBuilder()
+        .setName('perm')
+        .setDescription('Respond to a permission request')
+        .addStringOption((o: any) =>
+          o
+            .setName('action')
+            .setDescription('Permission action')
+            .setRequired(true)
+            .addChoices(
+              { name: 'allow', value: 'allow' },
+              { name: 'allow_session', value: 'allow_session' },
+              { name: 'deny', value: 'deny' },
+            ),
+        )
+        .addStringOption((o: any) =>
+          o.setName('permission_id').setDescription('Permission ID').setRequired(true),
+        ),
+      new SlashCommandBuilder().setName('help').setDescription('Show available commands'),
+    ];
+    /* eslint-enable @typescript-eslint/no-explicit-any */
+
+    const body = builders.map((b: { toJSON: () => object }) => b.toJSON());
+    const guildId = this.d('bridge_discord_slash_guild_id')?.trim();
+    if (guildId) {
+      await rest.put(Routes.applicationGuildCommands(clientId, guildId), { body });
+    } else {
+      await rest.put(Routes.applicationCommands(clientId), { body });
+    }
+    console.log(
+      `[discord-adapter] Slash commands registered (${guildId ? `guild ${guildId}` : 'global'})`,
+    );
+  }
+
+  private scheduleSlashDeliveryCleanup(chatId: string): void {
+    const prev = this.slashCleanupTimers.get(chatId);
+    if (prev) clearTimeout(prev);
+    const t = setTimeout(() => {
+      this.pendingSlashReplyByChatId.delete(chatId);
+      this.slashCleanupTimers.delete(chatId);
+    }, 8000);
+    this.slashCleanupTimers.set(chatId, t);
+  }
+
+  /** Map Discord slash invocation to the same `/command …` text the bridge expects. */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  private buildSlashCommandText(interaction: any): string {
+    const name = interaction.commandName as string;
+    const opts = interaction.options;
+    switch (name) {
+      case 'new': {
+        const path = opts.getString('path')?.trim();
+        return path ? `/new ${path}` : '/new';
+      }
+      case 'bind': {
+        const sid = opts.getString('session_id', true);
+        return `/bind ${sid}`;
+      }
+      case 'cwd': {
+        const p = opts.getString('path', true);
+        return `/cwd ${p}`;
+      }
+      case 'mode': {
+        const m = opts.getString('mode', true);
+        return `/mode ${m}`;
+      }
+      case 'runner': {
+        const profile = opts.getString('profile')?.trim();
+        return profile ? `/runner ${profile}` : '/runner';
+      }
+      case 'perm': {
+        const action = opts.getString('action', true);
+        const permId = opts.getString('permission_id', true);
+        return `/perm ${action} ${permId}`;
+      }
+      case 'start':
+      case 'autostop':
+      case 'status':
+      case 'sessions':
+      case 'stop':
+      case 'help':
+        return `/${name}`;
+      default:
+        return '';
     }
   }
 
@@ -320,6 +489,33 @@ export class DiscordAdapter extends BaseChannelAdapter {
       return { ok: true, messageId: crypto.randomUUID() };
     }
 
+    const pending = this.pendingSlashReplyByChatId.get(message.address.chatId);
+    if (pending && this.client) {
+      try {
+        const payload = this.buildDiscordPayload(message);
+        const { interaction } = pending;
+        if (pending.phase === 'edit') {
+          await interaction.editReply(payload);
+          pending.phase = 'followup';
+        } else {
+          await interaction.followUp(payload);
+        }
+        this.scheduleSlashDeliveryCleanup(message.address.chatId);
+        return { ok: true, messageId: interaction.id };
+      } catch (err) {
+        try {
+          const msg = err instanceof Error ? err.message : 'Send failed';
+          if (pending.phase === 'edit') {
+            await pending.interaction.editReply({ content: `Failed to deliver: ${msg.slice(0, 500)}` });
+          }
+        } catch {
+          /* ignore */
+        }
+        this.pendingSlashReplyByChatId.delete(message.address.chatId);
+        return { ok: false, error: err instanceof Error ? err.message : 'Send failed' };
+      }
+    }
+
     if (!this.client) {
       return { ok: false, error: 'Discord client not initialized' };
     }
@@ -340,43 +536,42 @@ export class DiscordAdapter extends BaseChannelAdapter {
     return this.sendToChannel(channel, message);
   }
 
+  /** Shared payload for channel.send vs slash editReply/followUp. */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  private buildDiscordPayload(message: OutboundMessage): { content: string; components?: any[] } {
+    let text = message.text;
+    if (message.parseMode === 'HTML') {
+      text = this.htmlToDiscordMarkdown(text);
+    }
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const options: { content: string; components?: any[] } = {
+      content: text.slice(0, DISCORD_CHAR_LIMIT),
+    };
+    if (message.inlineButtons && message.inlineButtons.length > 0 && discordJs) {
+      const { ActionRowBuilder, ButtonBuilder, ButtonStyle } = discordJs;
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const rows: any[] = [];
+      for (const row of message.inlineButtons) {
+        const actionRow = new ActionRowBuilder();
+        for (const btn of row) {
+          actionRow.addComponents(
+            new ButtonBuilder()
+              .setCustomId(btn.callbackData)
+              .setLabel(btn.text)
+              .setStyle(ButtonStyle.Primary),
+          );
+        }
+        rows.push(actionRow);
+      }
+      options.components = rows;
+    }
+    return options;
+  }
+
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   private async sendToChannel(channel: any, message: OutboundMessage): Promise<SendResult> {
     try {
-      let text = message.text;
-
-      // Convert HTML to Discord markdown
-      if (message.parseMode === 'HTML') {
-        text = this.htmlToDiscordMarkdown(text);
-      }
-      // Markdown passes through natively
-
-      // Build message options
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const options: { content: string; components?: any[] } = {
-        content: text.slice(0, DISCORD_CHAR_LIMIT),
-      };
-
-      // Build inline buttons as Discord components
-      if (message.inlineButtons && message.inlineButtons.length > 0 && discordJs) {
-        const { ActionRowBuilder, ButtonBuilder, ButtonStyle } = discordJs;
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const rows: any[] = [];
-        for (const row of message.inlineButtons) {
-          const actionRow = new ActionRowBuilder();
-          for (const btn of row) {
-            actionRow.addComponents(
-              new ButtonBuilder()
-                .setCustomId(btn.callbackData)
-                .setLabel(btn.text)
-                .setStyle(ButtonStyle.Primary),
-            );
-          }
-          rows.push(actionRow);
-        }
-        options.components = rows;
-      }
-
+      const options = this.buildDiscordPayload(message);
       const sent = await channel.send(options);
       return { ok: true, messageId: sent.id };
     } catch (err) {
@@ -677,6 +872,11 @@ export class DiscordAdapter extends BaseChannelAdapter {
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   private async handleInteraction(interaction: any): Promise<void> {
+    if (interaction.isChatInputCommand?.()) {
+      await this.handleSlashCommand(interaction);
+      return;
+    }
+
     if (!interaction.isButton()) return;
 
     try {
@@ -717,6 +917,79 @@ export class DiscordAdapter extends BaseChannelAdapter {
       callbackData,
       callbackMessageId: interaction.message?.id,
     };
+
+    this.enqueue(inbound);
+  }
+
+  /**
+   * Discord slash commands → same `/cmd` text as Telegram; bridge-manager handleCommand handles the rest.
+   */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  private async handleSlashCommand(interaction: any): Promise<void> {
+    const chatId = interaction.channelId;
+    const userId = interaction.user.id;
+    const displayName = interaction.user.username || interaction.user.id;
+
+    if (!this.isAuthorized(userId, chatId)) {
+      await interaction.reply({ content: 'Not authorized.', ephemeral: true }).catch(() => {});
+      return;
+    }
+
+    if (interaction.guild) {
+      const allowedGuilds = (this.d('bridge_discord_allowed_guilds') || '')
+        .split(',')
+        .map((s: string) => s.trim())
+        .filter(Boolean);
+      if (allowedGuilds.length > 0 && !allowedGuilds.includes(interaction.guild.id)) {
+        await interaction.reply({ content: 'Not authorized.', ephemeral: true }).catch(() => {});
+        return;
+      }
+      const policy = this.d('bridge_discord_group_policy') || 'open';
+      if (policy === 'disabled') {
+        await interaction.reply({ content: 'Not authorized.', ephemeral: true }).catch(() => {});
+        return;
+      }
+      // require_mention applies to plain messages; slash invocation is explicit — do not block here
+    }
+
+    const text = this.buildSlashCommandText(interaction);
+    if (!text) {
+      await interaction.reply({ content: 'Unknown command.', ephemeral: true }).catch(() => {});
+      return;
+    }
+
+    try {
+      await interaction.deferReply();
+    } catch {
+      return;
+    }
+
+    this.pendingSlashReplyByChatId.set(chatId, { interaction, phase: 'edit' });
+    this.scheduleSlashDeliveryCleanup(chatId);
+
+    const inbound: InboundMessage = {
+      messageId: interaction.id,
+      address: {
+        channelType: this.channelType,
+        chatId,
+        userId,
+        displayName,
+      },
+      text,
+      timestamp: Date.now(),
+    };
+
+    try {
+      getBridgeContext().store.insertAuditLog({
+        channelType: this.channelType,
+        chatId,
+        direction: 'inbound',
+        messageId: interaction.id,
+        summary: `[slash] ${text.slice(0, 200)}`,
+      });
+    } catch {
+      /* best effort */
+    }
 
     this.enqueue(inbound);
   }

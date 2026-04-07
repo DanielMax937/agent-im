@@ -237,11 +237,22 @@ export default function BoardPage() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  /** Avoid stale async writes when filter / sprint / detail target changes quickly. */
+  const filterProjectIdRef = useRef(filterProjectId);
+  filterProjectIdRef.current = filterProjectId;
+  const effectiveProjectIdRef = useRef('');
+  const taskDetailLoadGenRef = useRef(0);
+  const loadGenRef = useRef(0);
+  const assignModalTaskIdRef = useRef<string | null>(null);
+  const bulkAssignProjectIdRef = useRef<string | null>(null);
+
   /** 表单未选项目时退回列表第一项；需求讨论等不必先在表单里点选项目 */
   const effectiveProjectId = useMemo(
     () => (createProjectId.trim() ? createProjectId : projects[0]?.id ?? ''),
     [createProjectId, projects],
   );
+  effectiveProjectIdRef.current = effectiveProjectId;
+  assignModalTaskIdRef.current = assignModalTask?.id ?? null;
 
   const modalTodoAssignOptions = useMemo(() => {
     if (!laneMembersByKind) return [];
@@ -274,6 +285,7 @@ export default function BoardPage() {
   ]);
 
   const load = useCallback(async () => {
+    const gen = ++loadGenRef.current;
     setLoading(true);
     setError(null);
     try {
@@ -281,27 +293,36 @@ export default function BoardPage() {
         ? `/api/tasks?projectId=${encodeURIComponent(filterProjectId)}`
         : '/api/tasks';
       const [taskRes, projRes] = await Promise.all([fetch(taskUrl), fetch('/api/projects')]);
+      if (gen !== loadGenRef.current) return;
       if (!taskRes.ok) throw new Error(await taskRes.text());
       if (!projRes.ok) throw new Error(await projRes.text());
       const taskBody = (await taskRes.json()) as TaskSession[];
       const projBody = (await projRes.json()) as Project[];
+      if (gen !== loadGenRef.current) return;
       setTasks(Array.isArray(taskBody) ? taskBody : []);
       setProjects(Array.isArray(projBody) ? projBody : []);
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      if (gen === loadGenRef.current) {
+        setError(e instanceof Error ? e.message : String(e));
+      }
     } finally {
-      setLoading(false);
+      if (gen === loadGenRef.current) {
+        setLoading(false);
+      }
     }
   }, [filterProjectId]);
 
   const silentRefreshTasks = useCallback(async () => {
     try {
+      const snapshot = filterProjectId;
       const taskUrl = filterProjectId
         ? `/api/tasks?projectId=${encodeURIComponent(filterProjectId)}`
         : '/api/tasks';
       const taskRes = await fetch(taskUrl, { cache: 'no-store' });
+      if (filterProjectIdRef.current !== snapshot) return;
       if (!taskRes.ok) return;
       const taskBody = (await taskRes.json()) as TaskSession[];
+      if (filterProjectIdRef.current !== snapshot) return;
       setTasks(Array.isArray(taskBody) ? taskBody : []);
     } catch {
       /* ignore transient poll errors */
@@ -317,12 +338,16 @@ export default function BoardPage() {
     try {
       const res = await fetch(`/api/sprints?projectId=${encodeURIComponent(pid)}`);
       if (!res.ok) throw new Error(await res.text());
+      if (effectiveProjectIdRef.current !== pid) return;
       const body = (await res.json()) as Sprint[];
       const list = Array.isArray(body) ? body : [];
+      if (effectiveProjectIdRef.current !== pid) return;
       setSprints(list);
       setSprintId((prev) => (list.some((s) => s.id === prev) ? prev : list[0]?.id ?? ''));
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      if (effectiveProjectIdRef.current === pid) {
+        setError(e instanceof Error ? e.message : String(e));
+      }
     }
   }, []);
 
@@ -346,8 +371,10 @@ export default function BoardPage() {
     }
     try {
       const res = await fetch(`/api/tasks?projectId=${encodeURIComponent(projectId)}`, { cache: 'no-store' });
+      if (effectiveProjectIdRef.current !== projectId) return;
       if (!res.ok) return;
       const body = (await res.json()) as TaskSession[];
+      if (effectiveProjectIdRef.current !== projectId) return;
       setDependencyPickerTasks(Array.isArray(body) ? body : []);
     } catch {
       /* ignore transient errors */
@@ -480,6 +507,8 @@ export default function BoardPage() {
     if (pids.size !== 1) return null;
     return [...pids][0]!;
   }, [todoColumnTasks, bulkSelectedTaskIds]);
+
+  bulkAssignProjectIdRef.current = bulkAssignProjectIdForRoles;
 
   const bulkModalTodoAssignOptions = useMemo(() => {
     if (!bulkLaneMembersByKind) return [];
@@ -847,6 +876,7 @@ export default function BoardPage() {
   }
 
   async function openTaskDetail(task: TaskSession) {
+    const gen = ++taskDetailLoadGenRef.current;
     setTaskDetailLoading(true);
     setTaskDetailModal(null);
     setTaskDetailSprint(null);
@@ -861,22 +891,30 @@ export default function BoardPage() {
         fetch(`/api/projects/${encodeURIComponent(task.projectId)}/kanban-roles`, { cache: 'no-store' }),
         fetch(`/api/sprints/${encodeURIComponent(task.sprintId)}`, { cache: 'no-store' }),
       ]);
+      if (gen !== taskDetailLoadGenRef.current) return;
       if (!taskRes.ok) throw new Error(await taskRes.text());
       const full = (await taskRes.json()) as TaskSession;
+      if (gen !== taskDetailLoadGenRef.current) return;
       if (rolesRes.ok) {
         const data = (await rolesRes.json()) as { members?: Partial<Record<KanbanAgentKind, KanbanRoleMember[]>> };
         setTaskDetailMembers(data.members ?? {});
       } else {
         setTaskDetailMembers({});
       }
+      if (gen !== taskDetailLoadGenRef.current) return;
       if (sprintRes.ok) {
         setTaskDetailSprint((await sprintRes.json()) as Sprint);
       }
+      if (gen !== taskDetailLoadGenRef.current) return;
       setTaskDetailModal(full);
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      if (gen === taskDetailLoadGenRef.current) {
+        setError(e instanceof Error ? e.message : String(e));
+      }
     } finally {
-      setTaskDetailLoading(false);
+      if (gen === taskDetailLoadGenRef.current) {
+        setTaskDetailLoading(false);
+      }
     }
   }
 
@@ -933,6 +971,7 @@ export default function BoardPage() {
     }
     let cancelled = false;
     void (async () => {
+      const expectedTaskId = task.id;
       try {
         const res = await fetch(`/api/projects/${encodeURIComponent(task.projectId)}/kanban-roles`, {
           cache: 'no-store',
@@ -942,15 +981,13 @@ export default function BoardPage() {
           members?: Partial<Record<KanbanAgentKind, KanbanRoleMember[]>>;
           mapping?: Partial<Record<KanbanAgentKind, string>>;
         };
-        if (!cancelled) {
-          setLaneMembersByKind(data.members ?? {});
-          setAssignModalKanbanMapping(data.mapping ?? {});
-        }
+        if (cancelled || assignModalTaskIdRef.current !== expectedTaskId) return;
+        setLaneMembersByKind(data.members ?? {});
+        setAssignModalKanbanMapping(data.mapping ?? {});
       } catch {
-        if (!cancelled) {
-          setLaneMembersByKind({});
-          setAssignModalKanbanMapping({});
-        }
+        if (cancelled || assignModalTaskIdRef.current !== expectedTaskId) return;
+        setLaneMembersByKind({});
+        setAssignModalKanbanMapping({});
       }
     })();
     return () => {
@@ -966,6 +1003,7 @@ export default function BoardPage() {
     }
     let cancelled = false;
     void (async () => {
+      const expectedPid = bulkAssignProjectIdForRoles;
       try {
         const res = await fetch(
           `/api/projects/${encodeURIComponent(bulkAssignProjectIdForRoles)}/kanban-roles`,
@@ -976,15 +1014,13 @@ export default function BoardPage() {
           members?: Partial<Record<KanbanAgentKind, KanbanRoleMember[]>>;
           mapping?: Partial<Record<KanbanAgentKind, string>>;
         };
-        if (!cancelled) {
-          setBulkLaneMembersByKind(data.members ?? {});
-          setBulkAssignKanbanMapping(data.mapping ?? {});
-        }
+        if (cancelled || bulkAssignProjectIdRef.current !== expectedPid) return;
+        setBulkLaneMembersByKind(data.members ?? {});
+        setBulkAssignKanbanMapping(data.mapping ?? {});
       } catch {
-        if (!cancelled) {
-          setBulkLaneMembersByKind({});
-          setBulkAssignKanbanMapping({});
-        }
+        if (cancelled || bulkAssignProjectIdRef.current !== expectedPid) return;
+        setBulkLaneMembersByKind({});
+        setBulkAssignKanbanMapping({});
       }
     })();
     return () => {

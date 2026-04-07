@@ -33,6 +33,48 @@ describe('consumeAgentStream', () => {
     assert.equal(r.hasError, false);
   });
 
+  it('merges result payload result and stop_reason into errorMessage when is_error', async () => {
+    const stream = new ReadableStream<string>({
+      start(controller) {
+        controller.enqueue(
+          sseEvent('result', {
+            session_id: 's1',
+            is_error: true,
+            result: 'Upstream failure text',
+            stop_reason: 'max_tokens',
+          }),
+        );
+        controller.close();
+      },
+    });
+
+    const r = await consumeAgentStream(stream);
+    assert.equal(r.hasError, true);
+    assert.match(r.errorMessage, /Upstream failure text/);
+    assert.match(r.errorMessage, /stop_reason: max_tokens/);
+  });
+
+  it('appends result detail after a prior error SSE', async () => {
+    const stream = new ReadableStream<string>({
+      start(controller) {
+        controller.enqueue(sseEvent('error', 'Transport hint'));
+        controller.enqueue(
+          sseEvent('result', {
+            session_id: 's1',
+            is_error: true,
+            result: 'SDK result body',
+          }),
+        );
+        controller.close();
+      },
+    });
+
+    const r = await consumeAgentStream(stream);
+    assert.equal(r.hasError, true);
+    assert.match(r.errorMessage, /Transport hint/);
+    assert.match(r.errorMessage, /SDK result body/);
+  });
+
   it('appends raw stream chunks when rawStreamChunks is provided', async () => {
     const stream = new ReadableStream<string>({
       start(controller) {
