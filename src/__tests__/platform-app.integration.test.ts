@@ -169,7 +169,8 @@ describe('Platform app integration', () => {
       const getRes = await fetchJson(server.baseUrl, `/api/projects/${encodeURIComponent(project.id)}/kanban-roles`);
       assert.equal(getRes.status, 200);
       const runners = (getRes.body as { runners: { id: string }[] }).runners;
-      assert.ok(Array.isArray(runners) && runners.some((r) => r.id === 'default'));
+      assert.ok(Array.isArray(runners) && runners.length > 0);
+      const pickRunnerId = runners[0]!.id;
       const defaults = (getRes.body as { defaultLaneSkills?: Record<string, string[]> }).defaultLaneSkills;
       assert.ok(defaults && Array.isArray(defaults['agent-dev']) && defaults['agent-dev'].length > 0);
 
@@ -178,8 +179,8 @@ describe('Platform app integration', () => {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           kanbanRoleRunners: {
-            'agent-dev': 'default',
-            'claude-review': 'default',
+            'agent-dev': pickRunnerId,
+            'claude-review': pickRunnerId,
             'copilot-test': '',
             'codex-senior': '',
           },
@@ -187,8 +188,8 @@ describe('Platform app integration', () => {
       });
       assert.equal(putRes.status, 200);
       const p = store.getProject(project.id);
-      assert.equal(p?.kanbanRoleRunners?.['agent-dev'], 'default');
-      assert.equal(p?.kanbanRoleRunners?.['claude-review'], 'default');
+      assert.equal(p?.kanbanRoleRunners?.['agent-dev'], pickRunnerId);
+      assert.equal(p?.kanbanRoleRunners?.['claude-review'], pickRunnerId);
 
       const putSkills = await fetchJson(server.baseUrl, `/api/projects/${encodeURIComponent(project.id)}/kanban-roles`, {
         method: 'PUT',

@@ -1,5 +1,5 @@
 import type { Config, RunnerConfig } from '../config';
-import { normalizeRunners } from '../config';
+import { normalizeRunnersWithProcessEnvOverride } from '../config';
 import type { LLMProvider } from '../lib/bridge/host';
 import { getKanbanLogger } from './kanban-logger';
 import type { Project } from './types';
@@ -7,7 +7,7 @@ import { consumeAgentStream, type StreamConsumeResult } from './stream-consumer'
 
 /** Runner used for batch spec LLM: project’s codex-senior mapping, else first Codex runner. */
 export function pickRunnerForCodexSenior(project: Project, config: Config): RunnerConfig | undefined {
-  const runners = normalizeRunners(config);
+  const runners = normalizeRunnersWithProcessEnvOverride(config);
   const id = project.kanbanRoleRunners?.['codex-senior']?.trim();
   if (id) {
     const r = runners.find((x) => x.id === id);

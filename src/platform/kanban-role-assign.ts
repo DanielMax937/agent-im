@@ -1,4 +1,4 @@
-import type { KanbanAgentKind, KanbanRoleMember, Project, TaskSession } from './types';
+import type { AgentRole, KanbanAgentKind, KanbanRoleMember, Project, TaskSession } from './types';
 
 /** Members for a lane: explicit roster, else legacy single `kanbanRoleRunners[kind]` as one default member. */
 export function membersForKind(project: Project, kind: KanbanAgentKind): KanbanRoleMember[] {
@@ -110,4 +110,18 @@ export function mergeKanbanAssignee(
       [kind]: memberId,
     },
   };
+}
+
+/** Single-lane default runner id from `kanbanRoleRunners` (same as board「单 lane 默认 runner」). */
+export function laneDefaultRunnerProfileId(project: Project, kind: KanbanAgentKind): string | undefined {
+  const v = project.kanbanRoleRunners?.[kind]?.trim();
+  return v || undefined;
+}
+
+/** Lane kind for resolving defaults when `taskSession.kanbanAgent` is unset. */
+export function kanbanLaneKindForInstance(taskSession: TaskSession, role: AgentRole): KanbanAgentKind {
+  if (taskSession.kanbanAgent) return taskSession.kanbanAgent;
+  if (role === 'reviewer') return 'claude-review';
+  if (role === 'tester') return 'copilot-test';
+  return 'agent-dev';
 }

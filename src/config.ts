@@ -116,6 +116,21 @@ export function getConfigPath(): string {
   return path.join(getCtiHome(), "config.env");
 }
 
+/** Default bot directory under {@link getCtiBaseDir} for the Kanban web app (ignores `.active_bridge`). */
+export const KANBAN_PLATFORM_DEFAULT_BOT_NAME = "kanban";
+
+/**
+ * Kanban board / workflow / runner APIs always read `config.env` from this directory (not overridable by `CTI_HOME` / `CTI_BASE` / `CTI_BOT_NAME`).
+ */
+export function getKanbanPlatformCtiHome(): string {
+  return path.join(os.homedir(), ".claude-to-im", KANBAN_PLATFORM_DEFAULT_BOT_NAME);
+}
+
+/** `loadConfig` from {@link getKanbanPlatformCtiHome} — use for all Kanban platform server paths. */
+export function loadKanbanPlatformConfig(): Config {
+  return loadConfig(getKanbanPlatformCtiHome());
+}
+
 export function getSlaveEnvPath(ctiHomeOverride?: string): string {
   const home = ctiHomeOverride?.trim() ? path.resolve(ctiHomeOverride.trim()) : getCtiHome();
   return path.join(home, "config.slave.env");
@@ -762,15 +777,18 @@ function parseEnvFile(content: string): Map<string, string> {
  * Loads `$CTI_HOME/config.env` entries into `process.env` so modules that
  * only read `process.env` (e.g. agent-adapter `CTI_AGENT_1_*`) see the file.
  */
-export function syncConfigFileToProcessEnv(): void {
+export function syncConfigFileToProcessEnv(ctiHomeOverride?: string): void {
   try {
-    const content = fs.readFileSync(getConfigPath(), "utf-8");
+    const configPath = ctiHomeOverride?.trim()
+      ? path.join(path.resolve(ctiHomeOverride.trim()), "config.env")
+      : getConfigPath();
+    const content = fs.readFileSync(configPath, "utf-8");
     const env = parseEnvFile(content);
     for (const [key, value] of env) {
       if (value !== undefined) process.env[key] = value;
     }
     try {
-      process.env.CTI_RUNTIME = resolveEffectiveRuntime(loadConfig());
+      process.env.CTI_RUNTIME = resolveEffectiveRuntime(loadConfig(ctiHomeOverride));
     } catch {
       /* ignore */
     }
@@ -814,6 +832,33 @@ function parseRunnerJsonArray(raw: string | undefined): RunnerConfig[] | undefin
   } catch {
     return undefined;
   }
+}
+
+/**
+ * Effective runner list for Kanban / platform APIs.
+ *
+ * - {@link normalizeRunners} prefers `imBot.runners` and **drops** top-level `CTI_RUNNERS` (`config.runners`)
+ *   when the bot has its own list — but Kanban may still reference ids that exist only in file-level
+ *   `CTI_RUNNERS`, which previously produced orphan rows with `runtime: "unknown"`. We union in those
+ *   missing ids here (imBot / primary wins on duplicate id).
+ * - Then merges `process.env.CTI_RUNNERS` (e.g. Next.js `.env.local`) so dev env can add or override.
+ */
+export function normalizeRunnersWithProcessEnvOverride(config: Config): RunnerConfig[] {
+  const primary = normalizeRunners(config);
+  const byId = new Map(primary.map((r) => [r.id, r]));
+  if (config.runners?.length) {
+    for (const r of config.runners) {
+      if (!byId.has(r.id)) byId.set(r.id, r);
+    }
+  }
+  const merged = [...byId.values()];
+  const envExtra = parseRunnerJsonArray(process.env.CTI_RUNNERS);
+  if (!envExtra?.length) return merged;
+  const byId2 = new Map(merged.map((r) => [r.id, r]));
+  for (const r of envExtra) {
+    byId2.set(r.id, r);
+  }
+  return [...byId2.values()];
 }
 
 export function findImInstanceSpec(
@@ -924,7 +969,9 @@ export function resolveRuntimeForPlatformInstance(
   instance: { runtime: string; runtimeProfileId?: string },
 ): RuntimeKind {
   if (instance.runtimeProfileId) {
-    const p = normalizeRunners(config).find((x) => x.id === instance.runtimeProfileId);
+    const p = normalizeRunnersWithProcessEnvOverride(config).find(
+      (x) => x.id === instance.runtimeProfileId,
+    );
     if (p) return normalizeRuntimeKind(p.runtime);
   }
   return normalizeRuntimeKind(instance.runtime);

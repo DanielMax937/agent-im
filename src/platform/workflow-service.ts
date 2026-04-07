@@ -5,7 +5,11 @@ import os from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
 
-import { loadConfig, normalizeRunners, resolveRuntimeForPlatformInstance } from '../config';
+import {
+  loadKanbanPlatformConfig,
+  normalizeRunnersWithProcessEnvOverride,
+  resolveRuntimeForPlatformInstance,
+} from '../config';
 import { PendingPermissions } from '../permission-gateway';
 import { resolveProvider } from '../runtime-provider';
 import {
@@ -164,14 +168,14 @@ function pickRuntimeProfile(
 function runnerSuffixForWorkflowLog(
   task: Pick<TaskSession, 'runtime' | 'runtimeProfileId'>,
 ): string {
-  const cfg = loadConfig();
+  const cfg = loadKanbanPlatformConfig();
   const effective = resolveRuntimeForPlatformInstance(cfg, {
     runtime: task.runtime,
     runtimeProfileId: task.runtimeProfileId,
   });
   const pid = task.runtimeProfileId?.trim();
   if (!pid) return String(effective);
-  const runner = normalizeRunners(cfg).find((r) => r.id === pid);
+  const runner = normalizeRunnersWithProcessEnvOverride(cfg).find((r) => r.id === pid);
   const label = runner?.label?.trim();
   const showLabel = label && label !== pid;
   return `${effective} · runner ${pid}${showLabel ? ` (${label})` : ''}`;
@@ -2599,7 +2603,7 @@ export class WorkflowService {
     if (sprint.projectId !== project.id) {
       throw new Error('Sprint does not belong to the selected project');
     }
-    const config = loadConfig();
+    const config = loadKanbanPlatformConfig();
     const runner = pickRunnerForCodexSenior(project, config);
     if (!runner) {
       throw new Error(
@@ -2671,7 +2675,7 @@ export class WorkflowService {
   async streamBoardBrainstormChat(input: BoardBrainstormChatInput): Promise<ReadableStream<string>> {
     const project = this.requireProject(input.projectId);
     this.assertProjectLocalRepositoryPath(project);
-    const config = loadConfig();
+    const config = loadKanbanPlatformConfig();
     const runner = pickRunnerForCodexSenior(project, config);
     if (!runner) {
       throw new Error(

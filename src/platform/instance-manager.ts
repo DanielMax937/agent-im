@@ -2,7 +2,12 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 
 import type { LLMProvider, PermissionResolution } from '../lib/bridge/host';
-import { loadConfig, normalizeRunners, resolveRuntimeForPlatformInstance } from '../config';
+import { kanbanLaneKindForInstance, laneDefaultRunnerProfileId } from './kanban-role-assign';
+import {
+  loadKanbanPlatformConfig,
+  normalizeRunnersWithProcessEnvOverride,
+  resolveRuntimeForPlatformInstance,
+} from '../config';
 import { PendingPermissions } from '../permission-gateway';
 import { resolveProvider } from '../runtime-provider';
 import {
@@ -229,14 +234,17 @@ class TaskAgentRunner implements ManagedRunner {
     const maxTimeoutAttempts = 1 + kanbanStreamTimeoutRetries();
     const maxRuntimeAttempts = 1 + kanbanRuntimeErrorRetries();
     let result!: StreamConsumeResult;
+    /** After stream `is_error`, retry once using the lane「单 lane 默认 runner」if it differs from the instance runner. */
+    let fallbackProvider: LLMProvider | null = null;
 
     this.updateInstance({ generating: true });
     try {
       runtimeLoop: for (let runtimeAttempt = 1; runtimeAttempt <= maxRuntimeAttempts; runtimeAttempt++) {
+        const streamProvider = fallbackProvider ?? this.provider!;
         let timeoutAttempt = 0;
         inner: while (true) {
           timeoutAttempt += 1;
-          const stream = this.provider!.streamChat({
+          const stream = streamProvider.streamChat({
             prompt,
             sessionId: currentTaskSession.sessionId,
             sdkSessionId: currentTaskSession.providerSessionId,
@@ -385,6 +393,51 @@ class TaskAgentRunner implements ManagedRunner {
         }
 
         const errMsg = result.errorMessage.trim() ? result.errorMessage : 'Unknown runtime error';
+
+        if (!result.timedOut && !fallbackProvider) {
+          const laneKind = kanbanLaneKindForInstance(currentTaskSession, instance.role);
+          const defaultPid = laneDefaultRunnerProfileId(project, laneKind);
+          const curPid = instance.runtimeProfileId?.trim() ?? '';
+          if (defaultPid && defaultPid !== curPid) {
+            const cfg = loadKanbanPlatformConfig();
+            const eff = resolveRuntimeForPlatformInstance(cfg, {
+              runtime: currentTaskSession.runtime,
+              runtimeProfileId: defaultPid,
+            });
+            const fbInstance: AgentInstanceRecord = {
+              ...instance,
+              runtimeProfileId: defaultPid,
+              runtime: eff,
+            };
+            fallbackProvider = await this.providerFactory(fbInstance, this.pendingPermissions);
+            getKanbanLogger().info(
+              {
+                issueId: currentTaskSession.issueId,
+                taskSessionId: currentTaskSession.id,
+                instanceId: instance.id,
+                role: instance.role,
+                laneKind,
+                previousRunner: curPid || '(none)',
+                laneDefaultRunner: defaultPid,
+                turnId,
+              },
+              'Kanban: stream is_error — retrying with lane default runner from board mapping',
+            );
+            notifyKanbanSideChannel(
+              currentTaskSession.issueId,
+              [
+                `Agent returned is_error; retrying with lane default runner "${defaultPid}" (was "${curPid || 'none'}").`,
+                errMsg,
+              ].join(' '),
+            );
+            this.store.updateKanbanAgentTurnStreamError(
+              turnId,
+              `Switching to lane default runner "${defaultPid}" after agent error: ${errMsg}`,
+            );
+            continue runtimeLoop;
+          }
+        }
+
         if (runtimeAttempt < maxRuntimeAttempts) {
           getKanbanLogger().warn(
             {
@@ -532,10 +585,10 @@ export class InstanceManager {
     this.providerFactory =
       deps.providerFactory ??
       ((instance, pendingPermissions) => {
-        const config = loadConfig();
+        const config = loadKanbanPlatformConfig();
         const eff = resolveRuntimeForPlatformInstance(config, instance);
         const runner = instance.runtimeProfileId
-          ? normalizeRunners(config).find((r) => r.id === instance.runtimeProfileId)
+          ? normalizeRunnersWithProcessEnvOverride(config).find((r) => r.id === instance.runtimeProfileId)
           : undefined;
         return resolveProvider({
           config,

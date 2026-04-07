@@ -1,7 +1,8 @@
 import { ProxyAgent, setGlobalDispatcher } from 'undici';
 
 import {
-  loadConfig,
+  loadKanbanPlatformConfig,
+  getKanbanPlatformCtiHome,
   configToSettings,
   syncConfigFileToProcessEnv,
   normalizeRunners,
@@ -32,8 +33,9 @@ export interface PlatformContainer {
 const GLOBAL_KEY = '__agent_im_next_platform_container__';
 
 async function createPlatformContainer(): Promise<PlatformContainer> {
-  const config = loadConfig();
-  syncConfigFileToProcessEnv();
+  const kanbanHome = getKanbanPlatformCtiHome();
+  const config = loadKanbanPlatformConfig();
+  syncConfigFileToProcessEnv(kanbanHome);
   const logger = setupLogger();
 
   if (config.proxy) {
@@ -51,9 +53,9 @@ async function createPlatformContainer(): Promise<PlatformContainer> {
     llm: defaultLlm,
     resolveLlmForBinding,
     getRunnerConfigsForChannelType: (channelType) =>
-      normalizeRunnersForChannelType(loadConfig(), channelType),
+      normalizeRunnersForChannelType(loadKanbanPlatformConfig(), channelType),
     getDefaultRunnerIdForChannelType: (channelType) =>
-      defaultRunnerIdForChannelType(loadConfig(), channelType),
+      defaultRunnerIdForChannelType(loadKanbanPlatformConfig(), channelType),
     imRunners: bridgeRunners.map((p) => ({
       id: p.id,
       runtime: p.runtime,

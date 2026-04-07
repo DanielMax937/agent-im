@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 
-import { getCtiHome } from '../config';
+import { getKanbanPlatformCtiHome } from '../config';
 import { scheduleConversationEntryTelegram } from './kanban-notify';
 import { allocateNextIssueId, resolveIssueIdPrefix } from './issue-id';
 import { assertValidLocalRepositoryPath } from './repository-path';
@@ -30,7 +30,7 @@ import type {
 export function platformDataDir(): string {
   const raw = process.env.CTI_KANBAN_PLATFORM_DIR?.trim();
   if (raw === 'cti-home' || raw === 'legacy') {
-    return path.join(getCtiHome(), 'data', 'platform');
+    return path.join(getKanbanPlatformCtiHome(), 'data', 'platform');
   }
   if (raw) {
     return path.isAbsolute(raw) ? raw : path.join(process.cwd(), raw);

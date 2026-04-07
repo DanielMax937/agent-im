@@ -6,6 +6,13 @@ import type { KanbanAgentKind, KanbanRoleMember, Project } from '../../../platfo
 
 type RunnerOption = { id: string; label: string; runtime: string };
 
+/** One line for &lt;select&gt; options; never shows the literal "unknown". */
+function formatRunnerSelectLabel(r: RunnerOption): string {
+  const raw = (r.runtime ?? '').trim();
+  const rt = raw.toLowerCase() === 'unknown' ? '' : raw;
+  return rt ? `${r.label} — ${rt} (${r.id})` : `${r.label} (${r.id})`;
+}
+
 type SkillCatalogOption = { id: string; label: string; source: string };
 
 type KanbanRolesPayload = {
@@ -234,7 +241,7 @@ export default function BoardRolesPage() {
 
   const runnerHint = useMemo(() => {
     if (runners.length === 0) {
-      return '当前未加载到任何 runner。请在 ~/.claude-to-im/…/config.env 中配置 CTI_RUNNERS（JSON 数组）或单 bot 的 runners，并重启 Next.js。';
+      return '当前未加载到任何 runner。请在 ~/.claude-to-im/kanban/config.env 中配置 runner 列表（JSON）或 imBot.runners，并重启 Next.js。';
     }
     return null;
   }, [runners.length]);
@@ -315,6 +322,10 @@ export default function BoardRolesPage() {
         <p className="lead ui-muted">
           每个 Kanban  lane 可配置<strong>多个人员</strong>，每人绑定一个 runner。自动分配时：若该任务历史上该 lane 已有负责人则继续派给 TA；否则派给当前负载（该 lane 在制任务数）最少的人。优先级：接口显式{' '}
           <code>runtimeProfileId</code> &gt; 人员绑定 &gt; 下方「单 lane 默认 runner」&gt; 任务会话已有值。
+        </p>
+        <p className="ui-muted ui-small" style={{ marginTop: '0.6rem', maxWidth: '52rem' }}>
+          下方 Runner 下拉列表固定读取 <code>~/.claude-to-im/kanban/config.env</code>（与 <code>CTI_HOME</code>、
+          <code>CTI_BOT_NAME</code>、Telegram 桥 <code>.active_bridge</code> 无关）。
         </p>
         <nav className="ui-nav">
           <a href="/">首页</a>
@@ -405,7 +416,7 @@ export default function BoardRolesPage() {
                           <option value="">选择 runner</option>
                           {runners.map((r) => (
                             <option key={r.id} value={r.id}>
-                              {r.label} — {r.runtime} ({r.id})
+                              {formatRunnerSelectLabel(r)}
                             </option>
                           ))}
                         </select>
@@ -473,7 +484,7 @@ export default function BoardRolesPage() {
                   <option value="">（默认，不绑定 runner）</option>
                   {runners.map((r) => (
                     <option key={r.id} value={r.id}>
-                      {r.label} — {r.runtime} ({r.id})
+                      {formatRunnerSelectLabel(r)}
                     </option>
                   ))}
                 </select>

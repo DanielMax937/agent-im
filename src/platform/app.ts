@@ -19,7 +19,8 @@ import {
   getSlaveEnvPath,
   listBridgeSlugs,
   loadConfig,
-  normalizeRunners,
+  loadKanbanPlatformConfig,
+  normalizeRunnersWithProcessEnvOverride,
 } from '../config';
 import { readMonitorMessages, readRunnerStatusForMonitor } from '../lib/monitor-messages';
 import { getLogger } from '../logger';
@@ -47,7 +48,14 @@ const KANBAN_ROLE_KINDS: KanbanAgentKind[] = [
   'copilot-test',
 ];
 
-/** Runner ids referenced by saved kanban mapping/members but missing from current CTI_RUNNERS (e.g. after config shrink). */
+/** Runner list JSON for Kanban / platform: never emit the literal `unknown` (legacy placeholder). */
+function runnerRuntimeForJson(runtime: string | undefined): string {
+  const t = (runtime ?? '').trim().toLowerCase();
+  if (t === 'unknown') return '';
+  return (runtime ?? '').trim();
+}
+
+/** Runner ids referenced by saved kanban mapping/members but missing from the effective runner list (e.g. after config shrink). */
 function collectKanbanReferencedRunnerIds(project: Project): Set<string> {
   const ids = new Set<string>();
   const mapping = project.kanbanRoleRunners;
@@ -80,8 +88,8 @@ function mergeRunnersWithProjectReferences(
     if (!byId.has(id)) {
       byId.set(id, {
         id,
-        label: `${id}（未在 CTI_RUNNERS 中）`,
-        runtime: 'unknown',
+        label: `${id}（未在当前 runner 配置中）`,
+        runtime: '',
       });
     }
   }
@@ -393,11 +401,11 @@ export function createPlatformApp(options: CreatePlatformAppOptions): PlatformAp
       }
 
       if (request.method === 'GET' && pathname === '/api/platform/runners') {
-        const cfg = loadConfig();
-        const runners = normalizeRunners(cfg).map((r) => ({
+        const cfg = loadKanbanPlatformConfig();
+        const runners = normalizeRunnersWithProcessEnvOverride(cfg).map((r) => ({
           id: r.id,
           label: r.label ?? r.id,
-          runtime: r.runtime,
+          runtime: runnerRuntimeForJson(r.runtime),
         }));
         return jsonResponse({ runners });
       }
@@ -424,13 +432,16 @@ export function createPlatformApp(options: CreatePlatformAppOptions): PlatformAp
       if (request.method === 'GET' && kanbanRolesParams) {
         const project = options.store.getProject(kanbanRolesParams.projectId);
         if (!project) return notFoundResponse('Project', kanbanRolesParams.projectId);
-        const cfg = loadConfig();
-        const cfgRunners = normalizeRunners(cfg).map((r) => ({
+        const cfg = loadKanbanPlatformConfig();
+        const cfgRunners = normalizeRunnersWithProcessEnvOverride(cfg).map((r) => ({
           id: r.id,
           label: r.label ?? r.id,
-          runtime: r.runtime,
+          runtime: runnerRuntimeForJson(r.runtime),
         }));
-        const runners = mergeRunnersWithProjectReferences(cfgRunners, project);
+        const runners = mergeRunnersWithProjectReferences(cfgRunners, project).map((r) => ({
+          ...r,
+          runtime: runnerRuntimeForJson(r.runtime),
+        }));
         return jsonResponse({
           projectId: project.id,
           kinds: KANBAN_ROLE_KINDS,
@@ -469,8 +480,8 @@ export function createPlatformApp(options: CreatePlatformAppOptions): PlatformAp
             400,
           );
         }
-        const cfg = loadConfig();
-        const validIds = new Set(normalizeRunners(cfg).map((r) => r.id));
+        const cfg = loadKanbanPlatformConfig();
+        const validIds = new Set(normalizeRunnersWithProcessEnvOverride(cfg).map((r) => r.id));
         const next: Project = { ...project };
 
         if (body.kanbanRoleMembers !== undefined) {
@@ -1063,7 +1074,7 @@ export function createPlatformApp(options: CreatePlatformAppOptions): PlatformAp
         if (bridgeActionParams.action === 'start') {
           // Preflight: if auto mode is enabled, config.slave.env must exist
           try {
-            const cfg = loadConfig();
+            const cfg = loadConfig(bridgeHome);
             if (cfg.imBot?.autoMode) {
               const slaveEnvPath = getSlaveEnvPath(bridgeHome);
               if (!fs.existsSync(slaveEnvPath)) {
