@@ -12,3 +12,6 @@ logs/
 
 # Kanban platform SQLite + migrated JSON (default: ./data/platform/)
 data/platform/
+next-env.d.ts
+exports/
+docs/test-results/

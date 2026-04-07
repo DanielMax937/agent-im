@@ -178,6 +178,23 @@ export interface ConversationResult {
 }
 
 /**
+ * Bindings and sessions keep a persisted working directory. After the repo is moved,
+ * that path may no longer exist while `bridge_default_work_dir` (from config) is updated.
+ * Prefer an existing path so providers receive a valid `--workspace` / cwd.
+ */
+function resolveEffectiveWorkingDirectory(
+  binding: ChannelBinding,
+  sessionWorkingDir: string | undefined,
+  store: { getSetting: (key: string) => string | null },
+): string | undefined {
+  const primary = binding.workingDirectory || sessionWorkingDir || '';
+  if (primary && fs.existsSync(primary)) return primary;
+  const fb = store.getSetting('bridge_default_work_dir')?.trim() || '';
+  if (fb && fs.existsSync(fb)) return fb;
+  return primary || fb || undefined;
+}
+
+/**
  * Process an inbound message: send to Claude, consume the response stream,
  * save to DB, and return the result.
  */
@@ -226,12 +243,17 @@ export async function processMessage(
   try {
     // Resolve session early — needed for workingDirectory and provider resolution
     const session = store.getSession(sessionId);
+    const effectiveWorkDir = resolveEffectiveWorkingDirectory(
+      binding,
+      session?.working_directory,
+      store,
+    );
 
     // Save user message — persist file attachments to disk using the same
     // <!--files:JSON--> format as the desktop chat route, so the UI can render them.
     let savedContent = text;
     if (files && files.length > 0) {
-      const workDir = binding.workingDirectory || session?.working_directory || '';
+      const workDir = effectiveWorkDir || '';
       if (workDir) {
         try {
           const uploadDir = path.join(workDir, '.codepilot-uploads');
@@ -350,7 +372,7 @@ export async function processMessage(
         sdkSessionId: binding.sdkSessionId || undefined,
         model: effectiveModel,
         systemPrompt,
-        workingDirectory: binding.workingDirectory || session?.working_directory || undefined,
+        workingDirectory: effectiveWorkDir,
         abortController,
         permissionMode,
         provider: resolvedProvider,

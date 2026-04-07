@@ -24,6 +24,22 @@ export interface ConsumeAgentStreamOptions {
   rawStreamChunks?: string[];
 }
 
+/** Build a human-readable line from Claude/SDK `result` payload when `is_error` is set without a separate `error` SSE. */
+function formatResultPayloadError(payload: {
+  result?: unknown;
+  stop_reason?: string;
+}): string {
+  const parts: string[] = [];
+  if (payload.result !== undefined && payload.result !== null && payload.result !== '') {
+    const r = payload.result;
+    parts.push(typeof r === 'string' ? r : JSON.stringify(r));
+  }
+  if (payload.stop_reason?.trim()) {
+    parts.push(`stop_reason: ${payload.stop_reason.trim()}`);
+  }
+  return parts.join('\n').trim();
+}
+
 async function runConsume(
   reader: ReadableStreamDefaultReader<string>,
   options: ConsumeAgentStreamOptions,
@@ -76,12 +92,23 @@ async function runConsume(
       if (event.type !== 'status' && event.type !== 'result') continue;
 
       try {
-        const payload = JSON.parse(event.data) as { session_id?: string; is_error?: boolean };
+        const payload = JSON.parse(event.data) as {
+          session_id?: string;
+          is_error?: boolean;
+          result?: unknown;
+          stop_reason?: string;
+        };
         if (payload.session_id) {
           providerSessionId = payload.session_id;
         }
         if (payload.is_error) {
           hasError = true;
+          const detail = formatResultPayloadError(payload);
+          if (detail) {
+            errorMessage = errorMessage.trim()
+              ? `${errorMessage.trim()}\n${detail}`
+              : detail;
+          }
         }
       } catch {
         continue;

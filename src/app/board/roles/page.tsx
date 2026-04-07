@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
 import type { KanbanAgentKind, KanbanRoleMember, Project } from '../../../platform/types';
 
@@ -142,18 +142,15 @@ export default function BoardRolesPage() {
   const [error, setError] = useState<string | null>(null);
   const [savedAt, setSavedAt] = useState<string | null>(null);
 
+  /** Latest selected project — used to ignore stale kanban-roles responses after switching projects. */
+  const projectIdRef = useRef(projectId);
+  projectIdRef.current = projectId;
+
   const loadProjects = useCallback(async () => {
     const res = await fetch('/api/projects', { cache: 'no-store' });
     if (!res.ok) throw new Error(await res.text());
     const body = (await res.json()) as Project[];
     setProjects(Array.isArray(body) ? body : []);
-  }, []);
-
-  const loadRunnersGlobal = useCallback(async () => {
-    const res = await fetch('/api/platform/runners', { cache: 'no-store' });
-    if (!res.ok) throw new Error(await res.text());
-    const body = (await res.json()) as { runners?: RunnerOption[] };
-    setRunners(Array.isArray(body.runners) ? body.runners : []);
   }, []);
 
   const loadSkillCatalog = useCallback(async () => {
@@ -168,6 +165,9 @@ export default function BoardRolesPage() {
     const res = await fetch(`/api/projects/${encodeURIComponent(pid)}/kanban-roles`, { cache: 'no-store' });
     if (!res.ok) throw new Error(await res.text());
     const data = (await res.json()) as KanbanRolesPayload;
+    if (pid !== projectIdRef.current) {
+      return;
+    }
     setKinds(data.kinds?.length ? data.kinds : []);
     setRoleLabels(data.roleLabels ?? {});
     const next = { ...EMPTY_MAPPING };
@@ -190,19 +190,22 @@ export default function BoardRolesPage() {
       nextLs[k] = Array.isArray(list) ? [...list] : [];
     }
     setLaneSkills(nextLs);
+    if (Array.isArray(data.runners)) {
+      setRunners(data.runners);
+    }
   }, []);
 
   const bootstrap = useCallback(async () => {
     setLoading(true);
     setError(null);
     try {
-      await Promise.all([loadProjects(), loadRunnersGlobal(), loadSkillCatalog()]);
+      await Promise.all([loadProjects(), loadSkillCatalog()]);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
       setLoading(false);
     }
-  }, [loadProjects, loadRunnersGlobal, loadSkillCatalog]);
+  }, [loadProjects, loadSkillCatalog]);
 
   useEffect(() => {
     void bootstrap();
@@ -351,7 +354,7 @@ export default function BoardRolesPage() {
       </section>
 
       {projectId && kinds.length > 0 ? (
-        <section className="ui-panel" style={{ marginBottom: '1.5rem' }}>
+        <section key={projectId} className="ui-panel" style={{ marginBottom: '1.5rem' }}>
           <h2 className="ui-h2">人员与 Runner（多选）</h2>
           <p className="ui-muted ui-small" style={{ marginBottom: '1rem' }}>
             若某 lane 人员列表为空，则仍可使用下方「单 lane 默认 runner」或运行时默认。展示名可留空，将使用 id。
@@ -367,7 +370,7 @@ export default function BoardRolesPage() {
                 <div className="ui-projects-form" style={{ gap: '0.5rem' }}>
                   {(members[kind] ?? []).map((row, index) => (
                     <div
-                      key={`${row.id}-${index}`}
+                      key={`${projectId}-${kind}-${row.id}-${index}`}
                       style={{
                         display: 'grid',
                         gridTemplateColumns: '1fr 1fr minmax(120px, 1fr) auto',
@@ -434,7 +437,7 @@ export default function BoardRolesPage() {
           ) : null}
           {kinds.map((kind) => (
             <LaneSkillPicker
-              key={`lane-skills-${kind}`}
+              key={`${projectId}-lane-skills-${kind}`}
               laneLabel={roleLabels[kind] ?? kind}
               catalog={skillCatalog}
               selectedIds={laneSkills[kind] ?? []}
@@ -455,7 +458,7 @@ export default function BoardRolesPage() {
           </p>
           <div className="ui-projects-form">
             {kinds.map((kind) => (
-              <label key={`map-${kind}`}>
+              <label key={`${projectId}-map-${kind}`}>
                 {roleLabels[kind] ?? kind}
                 <select
                   className="ui-input"

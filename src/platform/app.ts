@@ -47,6 +47,47 @@ const KANBAN_ROLE_KINDS: KanbanAgentKind[] = [
   'copilot-test',
 ];
 
+/** Runner ids referenced by saved kanban mapping/members but missing from current CTI_RUNNERS (e.g. after config shrink). */
+function collectKanbanReferencedRunnerIds(project: Project): Set<string> {
+  const ids = new Set<string>();
+  const mapping = project.kanbanRoleRunners;
+  if (mapping) {
+    for (const k of KANBAN_ROLE_KINDS) {
+      const v = mapping[k]?.trim();
+      if (v) ids.add(v);
+    }
+  }
+  const members = project.kanbanRoleMembers;
+  if (members) {
+    for (const k of KANBAN_ROLE_KINDS) {
+      const list = members[k];
+      if (!Array.isArray(list)) continue;
+      for (const m of list) {
+        const pid = m.runnerProfileId?.trim();
+        if (pid) ids.add(pid);
+      }
+    }
+  }
+  return ids;
+}
+
+function mergeRunnersWithProjectReferences(
+  cfgRunners: { id: string; label: string; runtime: string }[],
+  project: Project,
+): { id: string; label: string; runtime: string }[] {
+  const byId = new Map(cfgRunners.map((r) => [r.id, r]));
+  for (const id of collectKanbanReferencedRunnerIds(project)) {
+    if (!byId.has(id)) {
+      byId.set(id, {
+        id,
+        label: `${id}（未在 CTI_RUNNERS 中）`,
+        runtime: 'unknown',
+      });
+    }
+  }
+  return [...byId.values()].sort((a, b) => a.id.localeCompare(b.id));
+}
+
 function parseKanbanRoleRunnersInput(raw: unknown): Partial<Record<KanbanAgentKind, string>> | null {
   if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) return null;
   const out: Partial<Record<KanbanAgentKind, string>> = {};
@@ -384,11 +425,12 @@ export function createPlatformApp(options: CreatePlatformAppOptions): PlatformAp
         const project = options.store.getProject(kanbanRolesParams.projectId);
         if (!project) return notFoundResponse('Project', kanbanRolesParams.projectId);
         const cfg = loadConfig();
-        const runners = normalizeRunners(cfg).map((r) => ({
+        const cfgRunners = normalizeRunners(cfg).map((r) => ({
           id: r.id,
           label: r.label ?? r.id,
           runtime: r.runtime,
         }));
+        const runners = mergeRunnersWithProjectReferences(cfgRunners, project);
         return jsonResponse({
           projectId: project.id,
           kinds: KANBAN_ROLE_KINDS,
