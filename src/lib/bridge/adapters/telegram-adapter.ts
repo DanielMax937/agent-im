@@ -66,6 +66,15 @@ const TELEGRAM_API = 'https://api.telegram.org';
 /** Max number of recent update_ids to keep for idempotency dedup on restart. */
 const DEDUP_SET_MAX = 1000;
 
+/**
+ * Extract the Socratic question from master's response text.
+ * Returns the question text if found, or null if not present.
+ */
+function parseSocraticQuestion(responseText: string): string | null {
+  const match = responseText.match(/^QUESTION_FOR_SLAVE:\s*(.+)$/m);
+  return match ? match[1].trim() : null;
+}
+
 /** Derive a short token-specific hash for per-bot offset isolation. */
 function tokenShortHash(botToken: string): string {
   return crypto.createHash('sha256').update(botToken).digest('hex').slice(0, 8);
@@ -524,6 +533,17 @@ export class TelegramAdapter extends BaseChannelAdapter {
     const body = text.startsWith(prefix) ? text.slice(prefix.length) : text;
     await this.autoModeRedis.deliverClaudeReply(body).catch(() => {});
 
+    // If slave is answering a Socratic clarifying question, push directly to master
+    // without wrapping in an execution report (clarification is not a completed task).
+    if (body.startsWith('## Slave Clarification Answer')) {
+      const chatId = this.hybridMirrorChatId || this.imGet('telegram_chat_id') || undefined;
+      await this.autoModeRedis.pushMasterInput(body, 'default', chatId).catch(() => {});
+      console.log(
+        `[telegram-adapter] Slave clarification answer forwarded to master. len=${body.length}`,
+      );
+      return;
+    }
+
     // Session summary may embed stale text from pre-fix reports; goal resolution sanitizes that.
     // `last_user` is written when Telegram forwards to the slave path, before the slave run — always read here for one canonical string.
     const summary = await this.autoModeRedis.getSessionSummary().catch(() => null);
@@ -577,8 +597,17 @@ export class TelegramAdapter extends BaseChannelAdapter {
     if (!this.autoModeRedis) return;
     writeRunnerStatus({ masterBusy: false, masterSince: undefined });
 
+    // Check if this is a Socratic turn (user request initiation or clarification answer)
+    const isSocraticTurn =
+      payload.userPrompt.startsWith('## SOCRATIC CLARIFICATION MODE') ||
+      payload.userPrompt.startsWith('## Slave Clarification Answer (Socratic Mode)');
+
+    if (isSocraticTurn) {
+      await this.afterSocraticMasterTurn(payload);
+      return;
+    }
+
     // afterAutoModeMasterTurn runs after (1) slave execution report evaluation, or (2) verification walkthrough.
-    // User messages from Telegram bypass master LLM (forwarded to slave in handleMasterRedisMessage).
 
     const prevSummary = await this.autoModeRedis.getSessionSummary().catch(() => null);
     const isVerificationRound = payload.userPrompt.startsWith(MASTER_VERIFICATION_WALKTHROUGH_PREFIX);
@@ -783,6 +812,79 @@ export class TelegramAdapter extends BaseChannelAdapter {
       parse_mode: 'HTML',
       disable_web_page_preview: true,
     }).catch(() => {});
+  }
+
+  /**
+   * Handle master's Socratic response: either forward a question to slave or approve execution.
+   */
+  private async afterSocraticMasterTurn(payload: {
+    responseText: string;
+    outboundChatId?: string;
+  }): Promise<void> {
+    const rt = this.autoModeRedis;
+    if (!rt) return;
+
+    const socraticQuestion = parseSocraticQuestion(payload.responseText);
+    const isClarificationComplete = payload.responseText.includes('CLARIFICATION_COMPLETE');
+
+    if (socraticQuestion !== null) {
+      // Master has a clarifying question → send to slave
+      const userRequest = await rt.getLastUserRequest().catch(() => null) ?? '';
+      const handoff = renderPrompt('bridge/socratic-question-to-slave', {
+        userRequest,
+        question: socraticQuestion,
+      });
+
+      await rt.setSlaveBusy(600).catch(() => {});
+      writeRunnerStatus({ slaveBusy: true, slaveSince: Date.now() });
+      await rt.pushSlaveHandoff(handoff, payload.outboundChatId).catch(() => {});
+      await rt.incrMasterTurns().catch(() => {});
+
+      console.log(
+        `[telegram-adapter] Socratic mode: master question forwarded to slave: ${socraticQuestion.slice(0, 100)}`,
+      );
+    } else if (isClarificationComplete) {
+      // Clarification is complete → send full task handoff to slave for execution
+      const userRequest = await rt.getLastUserRequest().catch(() => null) ?? '';
+      const prevSummary = await rt.getSessionSummary().catch(() => null);
+
+      // Extract the requirements brief that follows CLARIFICATION_COMPLETE
+      const requirementsBrief = payload.responseText.split('CLARIFICATION_COMPLETE')[1]?.trim() ?? '';
+
+      // Update session summary to include the requirements brief
+      if (requirementsBrief) {
+        const clarifiedSummary = `User goal: ${userRequest.slice(0, 300)}\nClarification brief: ${requirementsBrief.slice(0, 400)}`;
+        const newSummary = prevSummary
+          ? `${prevSummary}\n---\n${clarifiedSummary}`
+          : clarifiedSummary;
+        const trimmed = newSummary.length > 2000
+          ? '...' + newSummary.slice(newSummary.length - 1997)
+          : newSummary;
+        await rt.setSessionSummary(trimmed).catch(() => {});
+      }
+
+      // Build task description combining original request with requirements brief
+      const taskDescription = requirementsBrief
+        ? `${userRequest}\n\n**Requirements Brief (from clarification):**\n${requirementsBrief}`
+        : userRequest;
+
+      await rt.setSlaveBusy(600).catch(() => {});
+      writeRunnerStatus({ slaveBusy: true, slaveSince: Date.now() });
+
+      const handoff = renderPrompt('bridge/handoff-user-task', {
+        userRequest: taskDescription,
+      });
+      await rt.pushSlaveHandoff(handoff, payload.outboundChatId).catch(() => {});
+      await rt.incrMasterTurns().catch(() => {});
+
+      console.log(`[telegram-adapter] Socratic clarification complete, task sent to slave for execution`);
+    } else {
+      // Master response has no expected tags — log a warning
+      console.warn(
+        `[telegram-adapter] Socratic mode: master response has no QUESTION_FOR_SLAVE or CLARIFICATION_COMPLETE tag. ` +
+          `responseLen=${payload.responseText.length}, preview=${JSON.stringify(payload.responseText.slice(0, 150))}`,
+      );
+    }
   }
 
   override async recordAutoModeSlaveTurnCompleted(): Promise<void> {
@@ -1029,7 +1131,8 @@ export class TelegramAdapter extends BaseChannelAdapter {
 
   /**
    * Master message routing:
-   * - User messages from Telegram → forward directly to slave (no LLM)
+   * - User messages from Telegram → Socratic clarification (master LLM asks slave questions)
+   * - Slave clarification answers → feed back to master LLM for next question or execution approval
    * - Slave execution reports → enqueue for LLM evaluation
    * - Verification walkthrough → enqueue for second master turn (tools + VERIFICATION_OUTCOME)
    */
@@ -1038,6 +1141,7 @@ export class TelegramAdapter extends BaseChannelAdapter {
     if (!rt) return;
     const isSlaveReport = msg.text.startsWith('## Slave Execution Report');
     const isVerificationWalkthrough = msg.text.startsWith(MASTER_VERIFICATION_WALKTHROUGH_PREFIX);
+    const isClarificationAnswer = msg.text.startsWith('## Slave Clarification Answer');
 
     if (isSlaveReport || isVerificationWalkthrough) {
       console.log(
@@ -1051,45 +1155,105 @@ export class TelegramAdapter extends BaseChannelAdapter {
         slaveSince: undefined,
       });
       this.enqueue(msg);
+    } else if (isClarificationAnswer) {
+      // Slave answered a Socratic question → send to master LLM for next question or execution approval
+      await this.handleSocraticClarificationAnswer(msg, rt);
     } else {
-      // User message from Telegram → forward directly to slave, no LLM call
+      // User message from Telegram → Socratic clarification mode (master asks slave questions first)
       const chatId = msg.outboundChatId || this.hybridMirrorChatId || this.imGet('telegram_chat_id') || undefined;
-      this.resetAutoModeTaskSessions(msg, chatId);
-
-      // Each Telegram user message starts a brand-new auto-mode task.
-      // Replace the rolling summary instead of appending older task context.
-      // Truncate the `User goal` block first, then append Kanban (g) supplement — otherwise a
-      // 2000-char tail cut could strip the supplement (see kanban-redis-supplement).
-      const base = `User goal: ${msg.text.slice(0, 500)}`;
-      const trimmedBase = truncateRollingSessionSummary(base);
-      const withG = appendKanbanRequirementGIfMissing(trimmedBase);
-      const finalSummary = truncateSessionSummaryAfterGIfNeeded(withG);
-      await rt.setSessionSummary(finalSummary).catch(() => {});
-      await rt.setLastUserRequest(msg.text.trim()).catch(() => {});
-      await rt.setReverifyPending(false).catch(() => {});
-      await rt.resetReviewLoops().catch(() => {});
-
-      // Set slave busy
-      await rt.setSlaveBusy(600).catch(() => {});
-      writeRunnerStatus({
-        masterBusy: false,
-        masterSince: undefined,
-        slaveBusy: true,
-        slaveSince: Date.now(),
-      });
-
-      // Build slave handoff with user's original text
-      const handoff = renderPrompt('bridge/handoff-user-task', {
-        userRequest: msg.text,
-      });
-      await rt.pushSlaveHandoff(handoff, chatId).catch(() => {});
-      await rt.incrMasterTurns().catch(() => {});
-
-      // Record to monitor
-      appendMasterMessage(`[forwarded to slave] ${msg.text.slice(0, 200)}`, rt.bridgeSlug);
-
-      console.log(`[telegram-adapter] Auto mode: user message forwarded directly to slave (no master LLM)`);
+      await this.initiateSocraticMode(msg, rt, chatId);
     }
+  }
+
+  /** Start a new Socratic clarification cycle for a fresh user request. */
+  private async initiateSocraticMode(
+    msg: InboundMessage,
+    rt: AutoModeRedisTransport,
+    chatId?: string,
+  ): Promise<void> {
+    this.resetAutoModeTaskSessions(msg, chatId);
+
+    // Each Telegram user message starts a brand-new auto-mode task.
+    // Replace the rolling summary instead of appending older task context.
+    const base = `User goal: ${msg.text.slice(0, 500)}`;
+    const trimmedBase = truncateRollingSessionSummary(base);
+    const withG = appendKanbanRequirementGIfMissing(trimmedBase);
+    const finalSummary = truncateSessionSummaryAfterGIfNeeded(withG);
+    await rt.setSessionSummary(finalSummary).catch(() => {});
+    await rt.setLastUserRequest(msg.text.trim()).catch(() => {});
+    await rt.setReverifyPending(false).catch(() => {});
+    await rt.resetReviewLoops().catch(() => {});
+
+    // Master is now busy doing Socratic questioning
+    writeRunnerStatus({
+      masterBusy: true,
+      masterSince: Date.now(),
+      slaveBusy: false,
+      slaveSince: undefined,
+    });
+
+    // Build Socratic initiation message for master LLM
+    const masterInitMsg = renderPrompt('bridge/socratic-initiate', {
+      userRequest: msg.text,
+    });
+
+    // Push directly to conversation queue (not back to Redis) so master LLM processes it
+    const masterMsg: InboundMessage = {
+      ...msg,
+      text: masterInitMsg,
+      deliverySource: 'master',
+      outboundChatId: chatId,
+    };
+    const waiter = this.waiters.shift();
+    if (waiter) {
+      waiter(masterMsg);
+    } else {
+      this.queue.push(masterMsg);
+    }
+
+    appendMasterMessage(`[socratic initiation] ${msg.text.slice(0, 200)}`, rt.bridgeSlug);
+    console.log(`[telegram-adapter] Socratic mode: user message sent to master LLM for clarification`);
+  }
+
+  /** Feed a slave clarification answer back to master LLM for the next Socratic turn. */
+  private async handleSocraticClarificationAnswer(
+    msg: InboundMessage,
+    rt: AutoModeRedisTransport,
+  ): Promise<void> {
+    const chatId = msg.outboundChatId || this.hybridMirrorChatId || this.imGet('telegram_chat_id') || undefined;
+    const userRequest = await rt.getLastUserRequest().catch(() => null) ?? '';
+    const summary = await rt.getSessionSummary().catch(() => null) ?? '';
+
+    // Master is busy processing the clarification answer
+    writeRunnerStatus({
+      masterBusy: true,
+      masterSince: Date.now(),
+      slaveBusy: false,
+      slaveSince: undefined,
+    });
+
+    // Build message for master LLM to continue Socratic questioning
+    const masterMsg = renderPrompt('bridge/socratic-clarification-answer', {
+      sessionContext: summary,
+      userRequest,
+      slaveAnswer: msg.text,
+    });
+
+    const enrichedMsg: InboundMessage = {
+      ...msg,
+      text: masterMsg,
+      deliverySource: 'master',
+      outboundChatId: chatId,
+    };
+    // Push directly to conversation queue (not back to Redis)
+    const waiter = this.waiters.shift();
+    if (waiter) {
+      waiter(enrichedMsg);
+    } else {
+      this.queue.push(enrichedMsg);
+    }
+
+    console.log(`[telegram-adapter] Socratic mode: clarification answer sent to master LLM`);
   }
 
   private resetAutoModeTaskSessions(msg: InboundMessage, outboundChatId?: string): void {
@@ -1120,10 +1284,12 @@ export class TelegramAdapter extends BaseChannelAdapter {
   }
 
   private async notifyTelegramMasterRedisFetch(msg: InboundMessage): Promise<void> {
-    // Don't show internal slave execution reports, verification prompts, or follow-up instructions to the user
+    // Don't show internal slave execution reports, verification prompts, follow-up instructions,
+    // or slave clarification answers (already delivered directly to user via the slave channel)
     if (msg.text.startsWith('## Slave Execution Report') ||
         msg.text.startsWith(MASTER_VERIFICATION_WALKTHROUGH_PREFIX) ||
-        msg.text.startsWith('## Follow-up Instructions from Master')) return;
+        msg.text.startsWith('## Follow-up Instructions from Master') ||
+        msg.text.startsWith('## Slave Clarification Answer')) return;
     const chatId = msg.outboundChatId || this.hybridMirrorChatId || this.imGet('telegram_chat_id');
     const token = this.botToken;
     if (!token || !chatId) return;

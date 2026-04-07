@@ -220,12 +220,20 @@ test('Telegram auto-mode user message starts fresh master/slave sessions and rep
 
   const nextMasterBinding = router.resolve(masterAddress);
   const nextSlaveBinding = router.resolve(slaveAddress);
+  // Sessions must be reset for the new task
   assert.notEqual(nextMasterBinding.codepilotSessionId, originalMasterSession);
   assert.notEqual(nextSlaveBinding.codepilotSessionId, originalSlaveSession);
   assert.equal(nextMasterBinding.sdkSessionId, '');
   assert.equal(nextSlaveBinding.sdkSessionId, '');
+  // Summary must be written with the user goal
   assert.equal(summaryWrites.length, 1);
   assert.match(summaryWrites[0]!, /^User goal: Fix the deploy script/);
   assert.doesNotMatch(summaryWrites[0]!, /previous task/i);
-  assert.equal(handoffs.length, 1);
+  // In Socratic mode, user messages go to master LLM for clarification — NOT directly to slave
+  assert.equal(handoffs.length, 0, 'Socratic mode: user message should not be forwarded directly to slave');
+  // The message should be queued for master LLM processing
+  const queue = (adapter as any).queue as InboundMessage[];
+  assert.equal(queue.length, 1, 'Socratic mode: message should be in master LLM queue');
+  assert.equal(queue[0]!.deliverySource, 'master');
+  assert.match(queue[0]!.text, /SOCRATIC CLARIFICATION MODE/);
 });
