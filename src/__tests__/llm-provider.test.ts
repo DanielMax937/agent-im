@@ -8,6 +8,7 @@ import {
   parseCliMajorVersion,
   handleMessage,
   buildSubprocessEnvForRuntime,
+  buildClaudeRunnerEnvSnapshotForLog,
 } from '../llm-provider';
 import type { StreamState } from '../llm-provider';
 import { sseEvent } from '../sse-utils';
@@ -149,6 +150,38 @@ describe('isNonClaudeModel', () => {
   it('returns false for undefined/empty', () => {
     assert.equal(isNonClaudeModel(undefined), false);
     assert.equal(isNonClaudeModel(''), false);
+  });
+});
+
+// ── buildClaudeRunnerEnvSnapshotForLog ──
+
+describe('buildClaudeRunnerEnvSnapshotForLog', () => {
+  it('includes ANTHROPIC_* masked and leaves ANTHROPIC_BASE_URL unmasked', () => {
+    const snap = buildClaudeRunnerEnvSnapshotForLog({
+      ANTHROPIC_API_KEY: 'sk-ant-api03-longsecret',
+      ANTHROPIC_BASE_URL: 'https://api.anthropic.com',
+      ANTHROPIC_AUTH_TOKEN: 'tok',
+    });
+    assert.equal(snap.ANTHROPIC_BASE_URL, 'https://api.anthropic.com');
+    assert.match(snap.ANTHROPIC_API_KEY, /^\*+cret$/);
+    assert.equal(snap.ANTHROPIC_AUTH_TOKEN, '****');
+  });
+
+  it('includes CTI_CLAUDE_CODE_EXECUTABLE path and CTI_*CLAUDE* keys', () => {
+    const snap = buildClaudeRunnerEnvSnapshotForLog({
+      CTI_CLAUDE_CODE_EXECUTABLE: '/opt/bin/claude',
+      CTI_FOO_CLAUDE_BAR: 'secret',
+    });
+    assert.equal(snap.CTI_CLAUDE_CODE_EXECUTABLE, '/opt/bin/claude');
+    assert.match(snap.CTI_FOO_CLAUDE_BAR, /^\*+cret$/);
+  });
+
+  it('includes proxy vars masked', () => {
+    const snap = buildClaudeRunnerEnvSnapshotForLog({
+      HTTPS_PROXY: 'http://user:pass@proxy:8080',
+    });
+    assert.ok(snap.HTTPS_PROXY!.endsWith('8080'));
+    assert.ok(snap.HTTPS_PROXY!.startsWith('*'));
   });
 });
 

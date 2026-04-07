@@ -175,6 +175,66 @@ export function mergeRunnerSubprocessEnv(
   return { ...base, ...extra };
 }
 
+// ── Claude runner env logging (masked) ──
+
+/** Env keys always considered when logging the Claude subprocess env. */
+const CLAUDE_RUNNER_LOG_EXACT_KEYS = [
+  'CTI_CLAUDE_CODE_EXECUTABLE',
+  'CTI_ENV_ISOLATION',
+  'CTI_RUNTIME',
+  'HTTP_PROXY',
+  'HTTPS_PROXY',
+  'ALL_PROXY',
+  'NO_PROXY',
+  'NODE_EXTRA_CA_CERTS',
+] as const;
+
+function maskEnvScalar(value: string): string {
+  if (value.length <= 4) return '****';
+  return '*'.repeat(value.length - 4) + value.slice(-4);
+}
+
+function maskEnvValueForClaudeLog(key: string, value: string): string {
+  if (
+    key === 'CTI_ENV_ISOLATION' ||
+    key === 'CTI_RUNTIME' ||
+    key === 'CTI_CLAUDE_CODE_EXECUTABLE' ||
+    key === 'ANTHROPIC_BASE_URL' ||
+    key === 'NODE_EXTRA_CA_CERTS'
+  ) {
+    return value;
+  }
+  return maskEnvScalar(value);
+}
+
+function shouldIncludeKeyInClaudeRunnerLog(key: string): boolean {
+  if ((CLAUDE_RUNNER_LOG_EXACT_KEYS as readonly string[]).includes(key)) return true;
+  if (key.startsWith('ANTHROPIC_')) return true;
+  if (key.startsWith('CTI_') && /CLAUDE/i.test(key)) return true;
+  return false;
+}
+
+/**
+ * Snapshot of Claude-relevant env entries passed to the SDK subprocess (secrets masked).
+ * @internal Exported for tests.
+ */
+export function buildClaudeRunnerEnvSnapshotForLog(env: NodeJS.ProcessEnv): Record<string, string> {
+  const out: Record<string, string> = {};
+  const keys = new Set<string>();
+  for (const k of Object.keys(env)) {
+    if (shouldIncludeKeyInClaudeRunnerLog(k)) keys.add(k);
+  }
+  for (const k of CLAUDE_RUNNER_LOG_EXACT_KEYS) {
+    if (env[k] !== undefined) keys.add(k);
+  }
+  for (const k of Array.from(keys).sort()) {
+    const v = env[k];
+    if (v === undefined) continue;
+    out[k] = maskEnvValueForClaudeLog(k, v);
+  }
+  return out;
+}
+
 /** Codex SDK `env` option is `Record<string, string>` (no undefined values). */
 export function coerceProcessEnvToStringRecord(env: NodeJS.ProcessEnv): Record<string, string> {
   const out: Record<string, string> = {};
@@ -397,6 +457,16 @@ export class SDKLLMProvider implements LLMProvider {
                 useLogin,
               }),
               subprocessEnv ? { subprocessEnv } : undefined,
+            );
+
+            llmProviderLog.info(
+              {
+                useLogin,
+                cliPath: cliPath || undefined,
+                cwd: params.workingDirectory,
+                claudeSubprocessEnv: buildClaudeRunnerEnvSnapshotForLog(cleanEnv),
+              },
+              'Claude runner: subprocess env (masked; passed to Claude Code SDK)',
             );
 
             // Cross-runtime migration safety: drop non-Claude model names

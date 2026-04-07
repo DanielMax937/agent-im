@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import pino, { multistream, type Logger } from 'pino';
 
-import { getCtiHome } from './config';
+import { getCtiHome, getKanbanPlatformCtiHome } from './config';
 import { bridgeAppLogBasenameForDate } from './lib/bridge/bridge-log-file';
 
 const MASK_PATTERNS: RegExp[] = [
@@ -59,8 +59,16 @@ function maskValue(value: unknown): unknown {
   );
 }
 
+function logDirectory(): string {
+  // Next.js API / server: Kanban logs go with fixed platform home (see getKanbanPlatformCtiHome).
+  if (process.env.NEXT_RUNTIME === 'nodejs') {
+    return path.join(getKanbanPlatformCtiHome(), 'logs');
+  }
+  return path.join(getCtiHome(), 'logs');
+}
+
 function createLogger(): Logger {
-  const logDir = path.join(getCtiHome(), 'logs');
+  const logDir = logDirectory();
   const basename = logFileBasename ?? bridgeAppLogBasenameForDate();
   const logPath = path.join(logDir, basename);
   fs.mkdirSync(logDir, { recursive: true });
