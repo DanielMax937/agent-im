@@ -38,6 +38,10 @@ import type {
 import { defaultSkillLinesForLane } from './kanban-agents';
 import { listSkillCatalogEntries } from './skill-catalog';
 import { parseBoardBrainstormChatInput } from './board-brainstorm';
+import {
+  answerKanbanTelegramCallbackQuery,
+  parseKanbanPermCallbackData,
+} from './kanban-notify';
 import { ensureActiveSprintNameUniqueForProject, roleForActiveWorkflowState } from './workflow-service';
 
 const KANBAN_ROLE_KINDS: KanbanAgentKind[] = [
@@ -398,6 +402,63 @@ export function createPlatformApp(options: CreatePlatformAppOptions): PlatformAp
 
       if (request.method === 'GET' && pathname === '/api/structure') {
         return jsonResponse(DIRECTORY_STRUCTURE_PLAN);
+      }
+
+      /**
+       * Telegram Bot API webhook for Kanban notify bot inline buttons (`kperm:*` callbacks).
+       * Set with: `curl -F "url=https://YOUR_HOST/api/telegram/kanban-webhook" … setWebhook`
+       * Optional: `CTI_KANBAN_TELEGRAM_WEBHOOK_SECRET` → Telegram sends `X-Telegram-Bot-Api-Secret-Token`.
+       */
+      if (request.method === 'POST' && pathname === '/api/telegram/kanban-webhook') {
+        const secret = process.env.CTI_KANBAN_TELEGRAM_WEBHOOK_SECRET?.trim();
+        if (secret) {
+          const hdr = request.headers.get('x-telegram-bot-api-secret-token');
+          if (hdr !== secret) {
+            return jsonResponse({ ok: false, error: 'unauthorized' }, 401);
+          }
+        }
+        const body = await readRequestBody<{
+          callback_query?: {
+            id: string;
+            data?: string;
+            message?: { chat?: { id?: number } };
+          };
+        }>(request);
+        const cq = body.callback_query;
+        if (!cq?.id || typeof cq.data !== 'string') {
+          return jsonResponse({ ok: true });
+        }
+        const parsed = parseKanbanPermCallbackData(cq.data);
+        if (!parsed) {
+          return jsonResponse({ ok: true });
+        }
+        const expectedChat = process.env.CTI_KANBAN_TELEGRAM_CHAT_ID?.trim();
+        if (expectedChat) {
+          const chatId = cq.message?.chat?.id;
+          if (chatId !== undefined && String(chatId) !== expectedChat) {
+            void answerKanbanTelegramCallbackQuery(cq.id, {
+              text: '无权在此对话操作',
+              showAlert: true,
+            });
+            return jsonResponse({ ok: true });
+          }
+        }
+        const resolved = options.workflowService.resolveApproval(parsed.approvalId, {
+          behavior: parsed.behavior,
+          message:
+            parsed.behavior === 'allow'
+              ? 'approved from Telegram'
+              : 'denied from Telegram',
+        });
+        void answerKanbanTelegramCallbackQuery(cq.id, {
+          text: resolved
+            ? parsed.behavior === 'allow'
+              ? '已同意'
+              : '已拒绝'
+            : '处理失败（可能已过期或已处理）',
+          showAlert: !resolved,
+        });
+        return jsonResponse({ ok: true });
       }
 
       if (request.method === 'GET' && pathname === '/api/platform/runners') {

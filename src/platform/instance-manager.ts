@@ -16,7 +16,7 @@ import {
 } from './kanban-agent-turn';
 import { getKanbanLogger } from './kanban-logger';
 import { JsonPlatformStore } from './json-platform-store';
-import { notifyKanbanTelegram } from './kanban-notify';
+import { notifyKanbanTelegram, notifyKanbanTelegramToolApproval } from './kanban-notify';
 import { buildRolePrompt } from './prompts';
 import { consumeAgentStream, type StreamConsumeResult } from './stream-consumer';
 import type {
@@ -269,15 +269,31 @@ class TaskAgentRunner implements ManagedRunner {
                   createdAt: new Date().toISOString(),
                 });
 
-                notifyKanbanSideChannel(
-                  currentTaskSession.issueId,
-                  [
-                    `Approval required for ${permission.toolName}.`,
-                    `Approval ID: ${permission.permissionRequestId}`,
-                    `Tool input: ${permission.toolInput}`,
-                    `Approve via POST ${this.getApprovalUrl(permission.permissionRequestId)}`,
-                  ].join('\n'),
+                const kanbanLane = kanbanLaneKindForInstance(currentTaskSession, instance.role);
+                getKanbanLogger().info(
+                  {
+                    event: 'kanban_tool_approval_required',
+                    issueId: currentTaskSession.issueId,
+                    taskSessionId: currentTaskSession.id,
+                    instanceId: instance.id,
+                    role: instance.role,
+                    kanbanLane,
+                    runtime: instance.runtime,
+                    runtimeProfileId: instance.runtimeProfileId ?? null,
+                    laneDefaultRunnerProfileId: laneDefaultRunnerProfileId(project, kanbanLane) ?? null,
+                    toolName: permission.toolName,
+                    approvalId: permission.permissionRequestId,
+                    turnId,
+                  },
+                  'Kanban tool approval required (pending allow/deny)',
                 );
+
+                void notifyKanbanTelegramToolApproval({
+                  issueId: currentTaskSession.issueId,
+                  permissionRequestId: permission.permissionRequestId,
+                  toolName: permission.toolName,
+                  toolInput: permission.toolInput,
+                });
               },
             });
           } catch (e) {
@@ -522,10 +538,6 @@ class TaskAgentRunner implements ManagedRunner {
     return true;
   }
 
-  private getApprovalUrl(permissionRequestId: string): string {
-    return `/api/approvals/${permissionRequestId}`;
-  }
-
   private requireInstance(): AgentInstanceRecord {
     const instance = this.store.getAgentInstance(this.instanceId);
     if (!instance) {
@@ -682,6 +694,24 @@ export class InstanceManager {
       permissionRequestId,
       resolution.behavior === 'allow' ? 'approved' : 'denied',
       resolution.message,
+    );
+    const task = this.deps.store.getTaskSession(approval.taskSessionId);
+    const inst = this.deps.store.getAgentInstance(approval.instanceId);
+    const kanbanLane =
+      task && inst ? kanbanLaneKindForInstance(task, inst.role) : undefined;
+    getKanbanLogger().info(
+      {
+        event: 'kanban_tool_approval_resolved',
+        approvalId: permissionRequestId,
+        issueId: task?.issueId,
+        taskSessionId: approval.taskSessionId,
+        instanceId: approval.instanceId,
+        kanbanLane,
+        runtime: inst?.runtime,
+        runtimeProfileId: inst?.runtimeProfileId ?? null,
+        behavior: resolution.behavior,
+      },
+      'Kanban tool approval resolved',
     );
     return true;
   }

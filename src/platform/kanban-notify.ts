@@ -1,8 +1,51 @@
 import type { Dispatcher } from 'undici';
 import { fetch, ProxyAgent } from 'undici';
 
+import { callTelegramApi, escapeHtml } from '../lib/bridge/adapters/telegram-utils';
 import { getKanbanLogger } from './kanban-logger';
 import type { TaskConversationEntry } from './types';
+
+/** Prefix for inline keyboard callback_data (must stay ≤64 bytes with approval id). */
+export const KANBAN_PERM_CALLBACK_PREFIX = 'kperm:';
+
+export function parseKanbanPermCallbackData(data: string): { behavior: 'allow' | 'deny'; approvalId: string } | null {
+  const m = /^kperm:(allow|deny):(.+)$/.exec(data.trim());
+  if (!m) return null;
+  return { behavior: m[1] as 'allow' | 'deny', approvalId: m[2] };
+}
+
+/**
+ * When `true`, tool approvals use HTML + inline buttons (requires HTTPS webhook → `/api/telegram/kanban-webhook`).
+ * Default **off** — plain text + POST URL only (no callback handling needed).
+ */
+export function isKanbanTelegramApprovalButtonsEnabled(): boolean {
+  const v = process.env.CTI_KANBAN_TELEGRAM_APPROVAL_BUTTONS?.trim();
+  if (!v) return false;
+  return v === '1' || v.toLowerCase() === 'true';
+}
+
+/** Format tool input for Telegram HTML (never [object Object]). */
+export function formatKanbanToolInputForTelegram(toolInput: unknown): string {
+  if (toolInput === null || toolInput === undefined) return '';
+  if (typeof toolInput === 'string') return toolInput;
+  try {
+    const s = JSON.stringify(toolInput, null, 2);
+    return s.length > 1200 ? `${s.slice(0, 1200)}…` : s;
+  } catch {
+    return String(toolInput);
+  }
+}
+
+function buildKanbanPermCallbackData(action: 'allow' | 'deny', approvalId: string): string {
+  const data = `${KANBAN_PERM_CALLBACK_PREFIX}${action}:${approvalId}`;
+  if (data.length > 64) {
+    getKanbanLogger().warn(
+      { len: data.length, approvalIdPrefix: approvalId.slice(0, 16) },
+      'Kanban Telegram callback_data exceeds 64 bytes; button may fail',
+    );
+  }
+  return data;
+}
 
 let memoProxyUrl: string | undefined;
 let memoProxyAgent: ProxyAgent | undefined;
@@ -38,7 +81,7 @@ export async function notifyKanbanTelegram(message: string): Promise<void> {
   if (!token || !chatId) return;
 
   const url = `https://api.telegram.org/bot${token}/sendMessage`;
-  const body: Record<string, string | number | boolean> = {
+  const body: Record<string, unknown> = {
     chat_id: chatId,
     text: normalizeTelegramOutboundText(message).slice(0, 4000),
     disable_web_page_preview: true,
@@ -62,6 +105,100 @@ export async function notifyKanbanTelegram(message: string): Promise<void> {
       'Kanban Telegram sendMessage failed',
     );
   }
+}
+
+/**
+ * Tool permission notice: plain text by default; HTML + inline buttons when
+ * `CTI_KANBAN_TELEGRAM_APPROVAL_BUTTONS=1` (requires public HTTPS webhook).
+ */
+export async function notifyKanbanTelegramToolApproval(params: {
+  issueId: string;
+  permissionRequestId: string;
+  toolName: string;
+  toolInput: unknown;
+}): Promise<void> {
+  const { issueId, permissionRequestId, toolName, toolInput } = params;
+
+  if (!isKanbanTelegramApprovalButtonsEnabled()) {
+    const inputStr = formatKanbanToolInputForTelegram(toolInput);
+    const lines = [
+      `Approval required for ${toolName}.`,
+      `Approval ID: ${permissionRequestId}`,
+      ...(inputStr ? [`Tool input:\n${inputStr}`] : []),
+      `Approve via POST /api/approvals/${permissionRequestId}`,
+    ];
+    await notifyKanbanTelegram(`[Kanban][${issueId}] ${lines.join('\n')}`);
+    return;
+  }
+
+  const token = process.env.CTI_KANBAN_TELEGRAM_BOT_TOKEN?.trim();
+  const chatId = process.env.CTI_KANBAN_TELEGRAM_CHAT_ID?.trim();
+  if (!token || !chatId) return;
+
+  const inputBlock = formatKanbanToolInputForTelegram(toolInput);
+  const pre = inputBlock
+    ? `<pre>${escapeHtml(inputBlock)}</pre>`
+    : '<i>(no input)</i>';
+
+  const text = [
+    `<b>[Kanban][${escapeHtml(issueId)}] 需要工具授权</b>`,
+    '',
+    `工具: <code>${escapeHtml(toolName)}</code>`,
+    `ID: <code>${escapeHtml(permissionRequestId)}</code>`,
+    '',
+    pre,
+    '',
+    '点击下方按钮同意或拒绝（也可 POST /api/approvals/&lt;id&gt;）。',
+  ].join('\n');
+
+  const thread = process.env.CTI_KANBAN_TELEGRAM_MESSAGE_THREAD_ID?.trim();
+  const payload: Record<string, unknown> = {
+    chat_id: chatId,
+    text: text.slice(0, 4000),
+    parse_mode: 'HTML',
+    disable_web_page_preview: true,
+    reply_markup: {
+      inline_keyboard: [
+        [
+          { text: '✅ 同意', callback_data: buildKanbanPermCallbackData('allow', permissionRequestId) },
+          { text: '❌ 拒绝', callback_data: buildKanbanPermCallbackData('deny', permissionRequestId) },
+        ],
+      ],
+    },
+  };
+  if (thread && /^\d+$/.test(thread)) {
+    payload.message_thread_id = Number(thread);
+  }
+
+  const dispatcher = kanbanTelegramDispatcher();
+  const url = `https://api.telegram.org/bot${token}/sendMessage`;
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(payload),
+    ...(dispatcher ? { dispatcher } : {}),
+  });
+  if (!res.ok) {
+    const t = await res.text();
+    getKanbanLogger().warn(
+      { httpStatus: res.status, bodyPreview: t.slice(0, 800) },
+      'Kanban Telegram tool approval sendMessage failed',
+    );
+  }
+}
+
+/** Ack a callback query so Telegram removes the loading spinner. */
+export async function answerKanbanTelegramCallbackQuery(
+  callbackQueryId: string,
+  opts: { text?: string; showAlert?: boolean },
+): Promise<void> {
+  const token = process.env.CTI_KANBAN_TELEGRAM_BOT_TOKEN?.trim();
+  if (!token) return;
+  await callTelegramApi(token, 'answerCallbackQuery', {
+    callback_query_id: callbackQueryId,
+    ...(opts.text ? { text: opts.text.slice(0, 200) } : {}),
+    ...(opts.showAlert ? { show_alert: true } : {}),
+  });
 }
 
 /**
