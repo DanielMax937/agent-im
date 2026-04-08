@@ -188,10 +188,38 @@ function resolveEffectiveWorkingDirectory(
   store: { getSetting: (key: string) => string | null },
 ): string | undefined {
   const primary = binding.workingDirectory || sessionWorkingDir || '';
-  if (primary && fs.existsSync(primary)) return primary;
+  if (primary && fs.existsSync(primary)) {
+    return primary;
+  }
   const fb = store.getSetting('bridge_default_work_dir')?.trim() || '';
-  if (fb && fs.existsSync(fb)) return fb;
-  return primary || fb || undefined;
+  if (fb && fs.existsSync(fb)) {
+    getLogger().info(
+      {
+        event: 'effective_cwd_fallback',
+        bindingId: binding.id,
+        channelType: binding.channelType,
+        primaryPath: primary || null,
+        chosenPath: fb,
+      },
+      '[conversation-engine] effective cwd: primary missing or not on disk; using bridge_default_work_dir',
+    );
+    return fb;
+  }
+  const out = primary || fb || undefined;
+  if (primary && !fs.existsSync(primary)) {
+    getLogger().info(
+      {
+        event: 'effective_cwd_stale',
+        bindingId: binding.id,
+        channelType: binding.channelType,
+        primaryPath: primary,
+        bridgeDefault: fb || null,
+        chosenPath: out ?? null,
+      },
+      '[conversation-engine] effective cwd: primary path does not exist and no valid bridge_default_work_dir',
+    );
+  }
+  return out;
 }
 
 /**

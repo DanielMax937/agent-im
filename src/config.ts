@@ -1036,6 +1036,15 @@ function stripFlatFieldsMirroredFromRemovedImBot(prev: Config, next: Config): vo
   }
 }
 
+/** File `config.env` value, overridden by `process.env.CTI_AUTO_APPROVE` when set (e.g. CI / e2e). */
+function resolveAutoApproveFromEnvMaps(fileEnv: Map<string, string>): boolean {
+  const fromFile = fileEnv.get("CTI_AUTO_APPROVE") === "true";
+  const oa = process.env.CTI_AUTO_APPROVE?.trim();
+  if (oa === "true" || oa === "1") return true;
+  if (oa === "false" || oa === "0") return false;
+  return fromFile;
+}
+
 export function loadConfig(ctiHomeOverride?: string): Config {
   const configPath = ctiHomeOverride?.trim()
     ? path.join(path.resolve(ctiHomeOverride.trim()), "config.env")
@@ -1107,7 +1116,7 @@ export function loadConfig(ctiHomeOverride?: string): Config {
     autoLogStreamChunks: env.has("CTI_AUTO_LOG_STREAM_CHUNKS")
       ? env.get("CTI_AUTO_LOG_STREAM_CHUNKS")?.trim() !== "0"
       : true,
-    autoApprove: env.get("CTI_AUTO_APPROVE") === "true",
+    autoApprove: resolveAutoApproveFromEnvMaps(env),
     agentEnvSlots: parseAgentSlotsFromEnv(env),
     runners,
     defaultRunnerId,

@@ -1,5 +1,34 @@
 import type { AgentRole, KanbanAgentKind, KanbanRoleMember, Project, TaskSession } from './types';
 
+/**
+ * Lanes that require a non-empty `kanbanRoleRunners[kind]` before assign (parity with board + PUT /kanban-roles).
+ * Matches `KANBAN_ROLE_KINDS` in app.ts (excludes self-host-runner).
+ */
+export const KANBAN_AGENT_LANES_REQUIRING_DEFAULT_RUNNER: readonly KanbanAgentKind[] = [
+  'agent-dev',
+  'pre-tester',
+  'codex-senior',
+  'claude-review',
+  'copilot-test',
+] as const;
+
+/**
+ * Assign (from todo or legacy developer assign) requires every agent lane to have a default runner id,
+ * even when the roster lists members with per-person runners.
+ */
+export function assertProjectDefaultRunnersForAssign(project: Project): void {
+  const missing: KanbanAgentKind[] = [];
+  for (const kind of KANBAN_AGENT_LANES_REQUIRING_DEFAULT_RUNNER) {
+    if (!project.kanbanRoleRunners?.[kind]?.trim()) {
+      missing.push(kind);
+    }
+  }
+  if (missing.length === 0) return;
+  throw new Error(
+    `Assign requires default runner (kanbanRoleRunners) for all agent lanes; missing: ${missing.join(', ')}`,
+  );
+}
+
 /** Members for a lane: explicit roster, else legacy single `kanbanRoleRunners[kind]` as one default member. */
 export function membersForKind(project: Project, kind: KanbanAgentKind): KanbanRoleMember[] {
   const roster = project.kanbanRoleMembers?.[kind];

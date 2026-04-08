@@ -71,6 +71,43 @@ describe('WorkflowService', () => {
     assert.deepEqual(gitService.calls, ['createSprintBranch']);
   });
 
+  it('rejects startSprint when an active sprint with the same display name already exists', async () => {
+    const { workflowService, project, store, gitService } = createHarness();
+    await workflowService.startSprint({ projectId: project.id, sprintName: 'Sprint Dup' });
+    await assert.rejects(
+      () => workflowService.startSprint({ projectId: project.id, sprintName: 'Sprint Dup' }),
+      /Sprint already exists/,
+    );
+    assert.equal(gitService.calls.filter((c) => c === 'createSprintBranch').length, 1);
+    assert.equal(store.listSprints(project.id).length, 1);
+  });
+
+  it('rejects assign when any agent lane lacks default runner (kanbanRoleRunners)', async () => {
+    const { workflowService, project, store } = createHarness();
+    const sprint = createSprint(store, project.id);
+    store.upsertProject({
+      ...project,
+      kanbanRoleRunners: { 'agent-dev': 'test-runner' },
+    });
+    const created = await workflowService.createTask({
+      projectId: project.id,
+      sprintId: sprint.id,
+      issueId: 'ISSUE-ASSIGN-GATE',
+      title: 'gate',
+    });
+    await assert.rejects(
+      () =>
+        workflowService.assignTask({
+          projectId: project.id,
+          sprintId: sprint.id,
+          issueId: 'ISSUE-ASSIGN-GATE',
+          taskSessionId: created.id,
+          kanbanAgent: 'agent-dev',
+        }),
+      /missing: pre-tester/,
+    );
+  });
+
   it('assigns a task to a developer agent and creates the task branch', async () => {
     const { workflowService, project, store, instanceManager, gitService } = createHarness();
     const sprint = createSprint(store, project.id);
@@ -436,6 +473,40 @@ describe('WorkflowService', () => {
     assert.equal(returnedTask.workflowState, 'in_progress');
     assert.equal(store.peekTaskQueue(returnedTask.messageQueueKey).length, 1);
     assert.deepEqual(instanceManager.restarted, ['developer-instance-1']);
+  });
+
+  it('returns regression_testing failures to the developer queue (F2)', async () => {
+    const { workflowService, project, store, instanceManager } = createHarness();
+    const sprint = createSprint(store, project.id);
+    const taskSession = createTaskSession(store, project.id, sprint.id, {
+      workflowState: 'regression_testing',
+      messageQueueKey: 'task:ISSUE-202:inbox',
+    });
+    store.upsertAgentInstance({
+      id: 'developer-instance-reg',
+      projectId: project.id,
+      sprintId: sprint.id,
+      taskId: taskSession.taskId,
+      taskSessionId: taskSession.id,
+      runtime: 'codex',
+      role: 'developer',
+      status: 'running',
+      branchName: taskSession.branchName,
+      workingDirectory: '/tmp/agent-im',
+      approvalsRequired: true,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    });
+
+    const returnedTask = await workflowService.handleTestFailure({
+      taskSessionId: taskSession.id,
+      summary: 'Regression suite failed',
+      log: 'Exit code 1',
+    });
+
+    assert.equal(returnedTask.workflowState, 'in_progress');
+    assert.equal(store.peekTaskQueue(returnedTask.messageQueueKey).length, 1);
+    assert.deepEqual(instanceManager.restarted, ['developer-instance-reg']);
   });
 
   it('proceedToPendingRelease then closeTask ensures release PR to base and stops instances', async () => {
@@ -1354,6 +1425,34 @@ describe('WorkflowService', () => {
     await assert.rejects(
       () => workflowService.processCiCallback(taskSession.id, 'success'),
       /self-host-runner/,
+    );
+  });
+
+  it('processCiCallback rejects when task is already past regression (e.g. pending_release) — EX7', async () => {
+    const { workflowService, store } = createHarness();
+    const project = createProject(store, { isPrivate: true });
+    const sprint = createSprint(store, project.id);
+    const taskSession = createTaskSession(store, project.id, sprint.id, {
+      workflowState: 'pending_release',
+      kanbanAgent: 'self-host-runner',
+    });
+
+    await assert.rejects(
+      () => workflowService.processCiCallback(taskSession.id, 'success'),
+      /regression_testing/,
+    );
+  });
+
+  it('blockTask rejects closed tasks', async () => {
+    const { workflowService, project, store } = createHarness();
+    const sprint = createSprint(store, project.id);
+    const taskSession = createTaskSession(store, project.id, sprint.id, {
+      workflowState: 'closed',
+    });
+
+    await assert.rejects(
+      () => workflowService.blockTask(taskSession.id, 'try block'),
+      /Cannot block a task in state "closed"/,
     );
   });
 });

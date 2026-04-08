@@ -43,9 +43,12 @@ import {
   isInstanceImEnabled,
   resolveRunnerForChannelBinding,
   parseImBaseAndInstanceId,
+  resolveAutoSlaveRunnerId,
   type ImBaseChannel,
 } from './im-instance-settings';
 import { isHybridAutoModeEnabled, readAutoModeSettings } from './redis-local-transport';
+import { loadConfig, normalizeRunnersForChannelType, resolveAutoRedisBridgeSlug } from '../../config';
+import { startSlaveProcess, stopSlaveProcess } from './slave-process';
 const GLOBAL_KEY = '__bridge_manager__';
 
 function effectiveInboundAddress(msg: InboundMessage): ChannelAddress {
@@ -67,6 +70,114 @@ function effectiveReplyToMessageId(msg: InboundMessage): string | undefined {
     return undefined;
   }
   return msg.messageId;
+}
+
+/** Match {@link redis-local-transport} queue encoding for outbound chat segments. */
+function encodeAutoChatSegment(chatId: string): string {
+  return encodeURIComponent(chatId);
+}
+
+/**
+ * Hybrid Telegram Auto: `/cwd` updates the IM chat binding; Redis master/slave turns use
+ * synthetic `auto:*` addresses. Mirror the working directory there and restart the slave
+ * child so `CTI_DEFAULT_WORKDIR` matches.
+ */
+async function syncHybridAutoModeSyntheticWorkingDirectory(
+  adapter: BaseChannelAdapter,
+  msg: InboundMessage,
+  workingDirectory: string,
+): Promise<void> {
+  const { store } = getBridgeContext();
+  const parsed = parseImBaseAndInstanceId(adapter.channelType);
+  if (!parsed) return;
+  if (!isHybridAutoModeEnabled(store, parsed.base, parsed.instanceId)) return;
+
+  const mirrorChat = effectiveInboundChatId(msg);
+  if (mirrorChat.startsWith('auto:')) {
+    getLogger().info(
+      {
+        event: 'cwd_hybrid_skip_sync',
+        reason: 'synthetic_chat_id',
+        chatId: mirrorChat,
+      },
+      '[bridge] /cwd hybrid sync skipped (no real IM chat id)',
+    );
+    return;
+  }
+
+  const cfg = loadConfig();
+  const bridgeSlug = resolveAutoRedisBridgeSlug(cfg);
+  const channelType = adapter.channelType;
+  const masterRows = normalizeRunnersForChannelType(cfg, channelType);
+  const masterIds = masterRows.map((r) => r.id);
+  const masterRid = masterIds[0] ?? 'default';
+  const defaultRunner = getBridgeContext().getDefaultRunnerIdForChannelType?.(channelType);
+  const slaveRunnerId = resolveAutoSlaveRunnerId(
+    store,
+    channelType,
+    defaultRunner,
+    cfg.imBot?.autoSlaveRunner?.id,
+  );
+
+  const masterChatIdScoped = `auto:master:${bridgeSlug}:${channelType}:${encodeAutoChatSegment(mirrorChat)}:${masterRid}`;
+  const slaveChatIdScoped = `auto:${bridgeSlug}:${channelType}:${encodeAutoChatSegment(mirrorChat)}:${slaveRunnerId}`;
+  /** Same Redis transport when queue payload has no `outboundChatId` (see pollOnce / pollOnceMaster). */
+  const masterChatIdShort = `auto:master:${bridgeSlug}:${channelType}:${masterRid}`;
+  const slaveChatIdShort = `auto:${bridgeSlug}:${channelType}:${slaveRunnerId}`;
+
+  const touch = (chatId: string, userId: string, displayName: string) => {
+    const b = router.resolve({ channelType, chatId, userId, displayName });
+    router.updateBinding(b.id, { workingDirectory });
+  };
+
+  touch(
+    masterChatIdScoped,
+    `automaster-${bridgeSlug}-${channelType}-${masterRid}`,
+    'Auto master',
+  );
+  touch(
+    slaveChatIdScoped,
+    `autoslave-${bridgeSlug}-${channelType}-${slaveRunnerId}`,
+    'Auto slave',
+  );
+  touch(
+    masterChatIdShort,
+    `automaster-${bridgeSlug}-${channelType}-${masterRid}`,
+    'Auto master (short)',
+  );
+  touch(
+    slaveChatIdShort,
+    `autoslave-${bridgeSlug}-${channelType}-${slaveRunnerId}`,
+    'Auto slave (short)',
+  );
+
+  getLogger().info(
+    {
+      event: 'cwd_hybrid_synced',
+      mirrorChat,
+      masterChatIdScoped,
+      slaveChatIdScoped,
+      masterChatIdShort,
+      slaveChatIdShort,
+      workingDirectory,
+      instanceId: parsed.instanceId,
+    },
+    '[bridge] /cwd hybrid: synced auto master/slave bindings (scoped + short); restarting slave process',
+  );
+
+  try {
+    await stopSlaveProcess(parsed.instanceId);
+    startSlaveProcess(parsed.instanceId, { CTI_DEFAULT_WORKDIR: workingDirectory });
+  } catch (err) {
+    getLogger().warn(
+      {
+        event: 'slave_restart_after_cwd_failed',
+        err: err instanceof Error ? err.message : String(err),
+        instanceId: parsed.instanceId,
+      },
+      '[bridge] /cwd hybrid: slave restart failed (bindings were updated)',
+    );
+  }
 }
 
 function applyHybridDeliveryPrefix(adapter: BaseChannelAdapter, msg: InboundMessage, text: string): string {
@@ -1022,11 +1133,32 @@ async function handleCommand(
       }
       const validatedPath = validateWorkingDirectory(args);
       if (!validatedPath) {
+        getLogger().info(
+          {
+            event: 'cwd_rejected',
+            channel: adapter.channelType,
+            chatId: msg.address.chatId,
+            reason: 'validation_failed',
+          },
+          '[bridge] /cwd rejected: validateWorkingDirectory failed',
+        );
         response = 'Invalid path. Must be an absolute path without traversal sequences or special characters.';
         break;
       }
-      const binding = router.resolve(msg.address);
+      const cmdAddr = effectiveInboundAddress(msg);
+      const binding = router.resolve(cmdAddr);
       router.updateBinding(binding.id, { workingDirectory: validatedPath });
+      getLogger().info(
+        {
+          event: 'cwd_set',
+          channel: adapter.channelType,
+          chatId: cmdAddr.chatId,
+          bindingId: binding.id,
+          path: validatedPath,
+        },
+        '[bridge] /cwd: updated IM channel binding working directory',
+      );
+      await syncHybridAutoModeSyntheticWorkingDirectory(adapter, msg, validatedPath);
       response = `Working directory set to <code>${escapeHtml(validatedPath)}</code>`;
       break;
     }

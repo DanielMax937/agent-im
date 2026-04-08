@@ -27,7 +27,11 @@ import { parseKanbanAction } from './kanban-workflow-parser';
 import { buildSystemCheckPrompt, kanbanConfirmationMaxLoops } from './kanban-confirmation';
 import { notifyKanbanTelegram } from './kanban-notify';
 import { buildTransitionHistoryComment, notifyWorkflowStateTransition } from './kanban-transition-notify';
-import { mergeKanbanAssignee, resolveKanbanAssignment } from './kanban-role-assign';
+import {
+  assertProjectDefaultRunnersForAssign,
+  mergeKanbanAssignee,
+  resolveKanbanAssignment,
+} from './kanban-role-assign';
 import { createApprovalQueueKey, createTaskQueueKey, JsonPlatformStore } from './json-platform-store';
 import { GitService } from './git-service';
 import { assertValidLocalRepositoryPath } from './repository-path';
@@ -79,6 +83,20 @@ const ALLOWED_TRANSITIONS: Record<TaskWorkflowState, TaskWorkflowState[]> = {
   ],
   closed: [],
 };
+
+/** Rejects when a **display** name matches another active sprint in the same project (trimmed equality). */
+export function ensureActiveSprintNameUniqueForProject(
+  store: Pick<JsonPlatformStore, 'listSprints'>,
+  projectId: string,
+  displayName: string,
+): void {
+  const n = displayName.trim();
+  for (const s of store.listSprints(projectId)) {
+    if (s.status === 'active' && s.name.trim() === n) {
+      throw new Error('Sprint already exists');
+    }
+  }
+}
 
 function useKanbanWorktree(): boolean {
   return process.env.CTI_KANBAN_USE_WORKTREE !== '0';
@@ -741,6 +759,7 @@ export class WorkflowService {
 
   async startSprint(input: StartSprintInput): Promise<Sprint> {
     const project = this.requireProject(input.projectId);
+    ensureActiveSprintNameUniqueForProject(this.deps.store, project.id, input.sprintName);
     this.assertProjectLocalRepositoryPath(project);
     const sprintBranchName = `${project.repository.sprintBranchPrefix}${slugify(input.sprintName)}`;
     await this.deps.gitService.createSprintBranch({
@@ -870,6 +889,7 @@ export class WorkflowService {
     }
 
     const project = this.requireProject(input.projectId);
+    assertProjectDefaultRunnersForAssign(project);
     this.assertProjectLocalRepositoryPath(project);
     const sprint = this.requireSprint(input.sprintId);
     const role = input.role ?? 'developer';
@@ -993,6 +1013,7 @@ export class WorkflowService {
     }
 
     const project = this.requireProject(taskSession.projectId);
+    assertProjectDefaultRunnersForAssign(project);
     this.assertProjectLocalRepositoryPath(project);
     const sprint = this.requireSprint(taskSession.sprintId);
     const kind: KanbanAgentKind = input.kanbanAgent ?? 'agent-dev';

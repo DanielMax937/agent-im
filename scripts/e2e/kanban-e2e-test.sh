@@ -12,9 +12,8 @@
 #   ./scripts/e2e/kanban-e2e-test.sh http://127.0.0.1:3300 coverage
 #
 # Environment:
-#   BASE_URL         default: http://127.0.0.1:3300
+#   BASE_URL         default: http://127.0.0.1:3000
 #   E2E_PROJECT_ID   default: todolist
-#   E2E_SKIP_AI      set to 1 to skip AI-runner-driven states (pre_testing/testing/review/regression)
 #   E2E_TIMEOUT      poll timeout in seconds, default: 300
 
 set -euo pipefail
@@ -22,26 +21,23 @@ set -euo pipefail
 BASE="${1:-${BASE_URL:-http://127.0.0.1:3000}}"
 FILTER="${2:-}"
 PROJECT_ID="${E2E_PROJECT_ID:-todolist}"
-SKIP_AI="${E2E_SKIP_AI:-1}"
 POLL_TIMEOUT="${E2E_TIMEOUT:-300}"
 
 PASS=0
 FAIL=0
-SKIP=0
 FAILURES=()
 
 # ─── Colours ──────────────────────────────────────────────────────────────────
 GREEN='\033[0;32m'; RED='\033[0;31m'; YELLOW='\033[0;33m'; NC='\033[0m'
 pass() { echo -e "${GREEN}✅ PASS${NC}  $*"; PASS=$((PASS+1)); }
 fail() { echo -e "${RED}❌ FAIL${NC}  $*"; FAIL=$((FAIL+1)); FAILURES+=("$*"); }
-skip() { echo -e "${YELLOW}⏭  SKIP${NC}  $*"; SKIP=$((SKIP+1)); }
 info() { echo -e "   ℹ  $*"; }
 section() { echo -e "\n${YELLOW}══ $* ══${NC}"; }
 
 # ─── Helpers ──────────────────────────────────────────────────────────────────
 CURL_OPTS=(--noproxy "*")
 api_get()  { curl -sf  "${CURL_OPTS[@]}" "$BASE$1"; }
-api_post() { curl -sS  "${CURL_OPTS[@]}" -X POST   "$BASE$1" -H "Content-Type: application/json" -d "$2"; }
+api_post() { curl -sS --max-time 120 "${CURL_OPTS[@]}" -X POST   "$BASE$1" -H "Content-Type: application/json" -d "$2"; }
 api_put()  { curl -sS  "${CURL_OPTS[@]}" -X PUT    "$BASE$1" -H "Content-Type: application/json" -d "$2"; }
 api_del()  { curl -sS  "${CURL_OPTS[@]}" -X DELETE "$BASE$1"; }
 
@@ -104,6 +100,20 @@ poll_state() {
 
 unique_id() { echo "TC-$1-$(date +%s%N | tail -c 8)"; }
 
+# Bare origin so `git fetch origin` in createTaskBranch succeeds (local-only test repo).
+ensure_e2e_git_remote() {
+  local repo="$1"
+  [ -d "$repo/.git" ] || return 0
+  if git -C "$repo" remote get-url origin &>/dev/null; then
+    return 0
+  fi
+  local bare="/tmp/${PROJECT_ID}-e2e-origin.git"
+  rm -rf "$bare"
+  git clone --bare "$repo" "$bare" >/dev/null 2>&1 || true
+  git -C "$repo" remote add origin "$bare" 2>/dev/null || git -C "$repo" remote set-url origin "$bare"
+  git -C "$repo" push -u origin HEAD:main 2>/dev/null || git -C "$repo" push -u origin main 2>/dev/null || true
+}
+
 # ─── Step 1: Server health ─────────────────────────────────────────────────────
 section "P0: Server Health"
 if api_get "/health" > /dev/null 2>&1; then
@@ -111,7 +121,10 @@ if api_get "/health" > /dev/null 2>&1; then
 else
   echo -e "${YELLOW}Server not running — attempting npm run dev in background...${NC}"
   GIT_EXE="${CTI_GIT_EXECUTABLE:-$(command -v git 2>/dev/null || echo "git")}"
-  (cd "$(dirname "$0")/../.." && CTI_GIT_EXECUTABLE="$GIT_EXE" npm run dev > /tmp/agent-im-e2e.log 2>&1) &
+  E2E_PLATFORM_DIR="${E2E_PLATFORM_DIR:-$(mktemp -d)}"
+  export E2E_PLATFORM_DIR
+  info "Isolated platform store: $E2E_PLATFORM_DIR"
+  (cd "$(dirname "$0")/../.." && CTI_KANBAN_PLATFORM_DIR="$E2E_PLATFORM_DIR" CTI_KANBAN_USE_WORKTREE=0 CTI_GIT_EXECUTABLE="$GIT_EXE" npm run dev > /tmp/agent-im-e2e.log 2>&1) &
   NPM_PID=$!
   # Poll up to 30s for the server to become ready
   STARTED=0
@@ -142,6 +155,7 @@ if [ ! -d "$E2E_REPO_PATH/.git" ]; then
   git -C "$E2E_REPO_PATH" commit --allow-empty -m "init" > /dev/null 2>&1
   pass "Local git repo initialised"
 fi
+ensure_e2e_git_remote "$E2E_REPO_PATH"
 
 # Create project if it doesn't exist
 if ! api_get "/api/projects/$PROJECT_ID" > /dev/null 2>&1; then
@@ -168,23 +182,24 @@ fi
 
 # Get or create sprint
 SPRINT_RESP=$(api_get "/api/sprints?projectId=$PROJECT_ID" 2>/dev/null || echo "[]")
+# Prefer an active sprint whose integration branch is `main` (required for local git materialization).
 SPRINT_ID=$(echo "$SPRINT_RESP" | python3 -c "
 import sys, json
-sprints = json.load(sys.stdin) if isinstance(json.loads(sys.stdin.read() if False else ''), list) else []
-" 2>/dev/null || true)
-
-SPRINT_ID=$(echo "$SPRINT_RESP" | python3 -c "
-import sys,json
 data = json.load(sys.stdin)
-if isinstance(data, list):
-    active = [s for s in data if s.get('status') == 'active']
-    print(active[0]['id'] if active else (data[0]['id'] if data else ''))
+if not isinstance(data, list):
+    sys.exit(0)
+active = [s for s in data if s.get('status') == 'active']
+pool = active or data
+for s in pool:
+    if s.get('branchName') == 'main':
+        print(s['id'])
+        break
 " 2>/dev/null || echo "")
 
 if [ -z "$SPRINT_ID" ]; then
   info "No sprint found, creating one..."
   SPRINT_RESP=$(api_post "/api/sprints" \
-    "{\"projectId\":\"$PROJECT_ID\",\"name\":\"e2e-$(date +%Y%m%d-%H%M%S)\"}" 2>/dev/null || echo '{}')
+    "{\"projectId\":\"$PROJECT_ID\",\"name\":\"e2e-$(date +%Y%m%d-%H%M%S)\",\"branchName\":\"main\",\"baseBranch\":\"main\"}" 2>/dev/null || echo '{}')
   SPRINT_ID=$(json_field "$SPRINT_RESP" "id")
   if [ -n "$SPRINT_ID" ] && [ "$SPRINT_ID" != "None" ] && [ "$SPRINT_ID" != "null" ]; then
     pass "Sprint created: $SPRINT_ID"
@@ -195,6 +210,31 @@ if [ -z "$SPRINT_ID" ]; then
 else
   pass "Using sprint: $SPRINT_ID"
 fi
+
+# Align with API/board: assign requires non-empty default runner for every agent lane (PUT validates ids).
+E2E_RUNNER_RESOLVED="${E2E_RUNNER_ID:-}"
+if [ -z "$E2E_RUNNER_RESOLVED" ]; then
+  E2E_RUNNER_RESOLVED=$(api_get "/api/platform/runners" | python3 -c "import sys,json; d=json.load(sys.stdin); rs=d.get('runners') or []; print(rs[0]['id'] if rs else '')" 2>/dev/null || echo "")
+fi
+if [ -z "$E2E_RUNNER_RESOLVED" ]; then
+  fail "需要至少一个平台 runner（GET /api/platform/runners）或设置环境变量 E2E_RUNNER_ID"
+  exit 1
+fi
+E2E_KANBAN_BODY=$(RID="$E2E_RUNNER_RESOLVED" python3 <<'PY'
+import json, os
+rid = os.environ["RID"]
+kinds = ["agent-dev", "pre-tester", "codex-senior", "claude-review", "copilot-test"]
+print(json.dumps({"kanbanRoleRunners": {k: rid for k in kinds}}))
+PY
+)
+E2E_KR_HTTP=$(curl -sS -o /tmp/e2e-kanban-roles.body -w "%{http_code}" "${CURL_OPTS[@]}" -X PUT \
+  -H "Content-Type: application/json" --data-binary "$E2E_KANBAN_BODY" \
+  "$BASE/api/projects/$PROJECT_ID/kanban-roles" || echo "000")
+if [ "$E2E_KR_HTTP" -lt 200 ] || [ "$E2E_KR_HTTP" -ge 300 ]; then
+  fail "PUT /api/projects/$PROJECT_ID/kanban-roles failed (HTTP $E2E_KR_HTTP). Set E2E_RUNNER_ID. Response: $(head -c 240 /tmp/e2e-kanban-roles.body 2>/dev/null)"
+  exit 1
+fi
+pass "Kanban: default runners set for all agent lanes (runner=$E2E_RUNNER_RESOLVED)"
 
 # Helper: create task
 create_task() {
@@ -207,12 +247,28 @@ create_task() {
 if [[ -z "$FILTER" || "$FILTER" == "sprint" ]]; then
 section "1. Sprint (SP1–SP3)"
 
-# SP1: Sprint already created above ✓
+# SP1: startSprint via workflow API (creates integration branch; requires working git + origin)
+SP1_NAME="e2e-sp1-$(date +%s)"
+SP1_RESP=$(api_post "/api/workflows/sprints/start" \
+  "{\"projectId\":\"$PROJECT_ID\",\"sprintName\":\"$SP1_NAME\"}" 2>/dev/null || echo '{"error":"start failed"}')
+if echo "$SP1_RESP" | python3 -c "import sys,json; d=json.load(sys.stdin); exit(0 if d.get('branchName','').startswith('feature/') else 1)" 2>/dev/null; then
+  pass "SP1: POST /api/workflows/sprints/start created sprint branch"
+else
+  fail "SP1: startSprint failed: ${SP1_RESP:0:200}"
+fi
 
 # SP3: Missing required field (no name)
 SP3_RESP=$(api_post "/api/sprints" \
   "{\"projectId\":\"$PROJECT_ID\"}" 2>/dev/null || echo '{"error":"missing name"}')
 assert_error "$SP3_RESP" "SP3: missing sprint name returns error"
+
+# SP3 (duplicate name): second POST with same display name as an active sprint
+SP3_DUP_NAME="e2e-dup-$(date +%s)"
+SP3_A=$(api_post "/api/sprints" \
+  "{\"projectId\":\"$PROJECT_ID\",\"name\":\"$SP3_DUP_NAME\",\"branchName\":\"main\",\"baseBranch\":\"main\"}" 2>/dev/null || echo '{}')
+SP3_B=$(api_post "/api/sprints" \
+  "{\"projectId\":\"$PROJECT_ID\",\"name\":\"$SP3_DUP_NAME\",\"branchName\":\"main\",\"baseBranch\":\"main\"}" 2>/dev/null || echo '{}')
+assert_error "$SP3_B" "SP3: duplicate sprint name rejected"
 fi
 
 # ─── Section T: Create Tasks ───────────────────────────────────────────────────
@@ -262,16 +318,22 @@ else
   info "CV1: coverage=$CV_VAL (may have been set by previous runs)"
 fi
 
-# CV2: Update with higher value
-CV2_RESP=$(api_post "/api/projects/$PROJECT_ID/coverage" '{"coverage":78,"context":"e2e-test"}')
-assert_field "$CV2_RESP" "updated" "True" "CV2: update to 78%"
+# CV2: Update with strictly higher value than current stored coverage
+CV2_TARGET=$(echo "$CV_RESP" | python3 -c "
+import sys, json
+d = json.load(sys.stdin)
+c = float(d.get('coverage') or 0)
+print(c + 1.0 if c >= 77.0 else 78.0)
+" 2>/dev/null || echo 78)
+CV2_RESP=$(api_post "/api/projects/$PROJECT_ID/coverage" "{\"coverage\":$CV2_TARGET,\"context\":\"e2e-test\"}")
+assert_field "$CV2_RESP" "updated" "True" "CV2: update to higher coverage ($CV2_TARGET%)"
 
 # CV3: Update with lower value — not updated
 CV3_RESP=$(api_post "/api/projects/$PROJECT_ID/coverage" '{"coverage":50}')
 assert_field "$CV3_RESP" "updated" "False" "CV3: lower value not updated"
 
-# CV4: Equal value — not updated
-CV4_RESP=$(api_post "/api/projects/$PROJECT_ID/coverage" '{"coverage":78}')
+# CV4: Equal value — not updated (match last stored high watermark)
+CV4_RESP=$(api_post "/api/projects/$PROJECT_ID/coverage" "{\"coverage\":$CV2_TARGET}")
 assert_field "$CV4_RESP" "updated" "False" "CV4: equal value not updated"
 
 # CV5: History
@@ -298,7 +360,7 @@ fi
 if [[ -z "$FILTER" || "$FILTER" == "block" ]]; then
 section "12. 阻塞 blocked (B1–B4)"
 
-# Create a fresh task to block
+# Block is only allowed from active lanes (e.g. in_progress). Assign from todo → queue → in_progress first.
 B_ID=$(unique_id "B1")
 B_RESP=$(create_task "$B_ID" "[B1] 阻塞测试任务")
 B_TASK_ID=$(json_field "$B_RESP" "id")
@@ -306,36 +368,42 @@ B_TASK_ID=$(json_field "$B_RESP" "id")
 if [ -z "$B_TASK_ID" ] || [ "$B_TASK_ID" = "None" ]; then
   fail "B: could not create task for block tests"
 else
-  # B1: Block
+  info "Assigning block-test task to dev (expect in_progress)..."
+  api_post "/api/workflows/tasks/assign" \
+    "{\"projectId\":\"$PROJECT_ID\",\"sprintId\":\"$SPRINT_ID\",
+      \"issueId\":\"$B_ID\",\"taskSessionId\":\"$B_TASK_ID\",
+      \"kanbanAgent\":\"agent-dev\"}" > /dev/null
+
+  if ! poll_state "$B_TASK_ID" "in_progress" "B: materialize developer assignment"; then
+    info "B: last state=$(get_state "$B_TASK_ID")"
+  fi
+
+  # B1: Block (from in_progress)
   B1_RESP=$(api_post "/api/workflows/tasks/$B_TASK_ID/block" '{"reason":"等待第三方 API"}' 2>/dev/null || echo '{"error":"?"}')
   if echo "$B1_RESP" | python3 -c "import sys,json; d=json.load(sys.stdin); exit(0 if d.get('workflowState')=='blocked' else 1)" 2>/dev/null; then
     pass "B1: task blocked"
   else
-    # Could be error if task in todo state — some implementations only allow blocking active tasks
-    info "B1: block response: ${B1_RESP:0:150}"
-    if echo "$B1_RESP" | grep -q "error"; then
-      skip "B1: block from todo state (may not be supported — expected behavior)"
-    else
-      fail "B1: unexpected response"
-    fi
+    fail "B1: expected workflowState=blocked, got: ${B1_RESP:0:200}"
   fi
 
-  # B2: Unblock (if blocked)
-  CURRENT_STATE=$(get_state "$B_TASK_ID")
-  if [ "$CURRENT_STATE" = "blocked" ]; then
-    B2_RESP=$(api_post "/api/workflows/tasks/$B_TASK_ID/unblock" '{}')
-    if echo "$B2_RESP" | python3 -c "import sys,json; d=json.load(sys.stdin); exit(0 if d.get('workflowState')!='blocked' else 1)" 2>/dev/null; then
-      pass "B2: task unblocked, state=$(get_state "$B_TASK_ID")"
-    else
-      fail "B2: unblock failed: ${B2_RESP:0:100}"
-    fi
+  # B2: Unblock
+  B2_RESP=$(api_post "/api/workflows/tasks/$B_TASK_ID/unblock" '{}' 2>/dev/null || echo '{"error":"?"}')
+  if echo "$B2_RESP" | python3 -c "import sys,json; d=json.load(sys.stdin); exit(0 if d.get('workflowState')!='blocked' else 1)" 2>/dev/null; then
+    pass "B2: task unblocked, state=$(get_state "$B_TASK_ID")"
   else
-    skip "B2: task not in blocked state (current=$CURRENT_STATE)"
+    fail "B2: unblock failed: ${B2_RESP:0:120}"
   fi
 
-  # B3: Empty reason → error
-  B3_RESP=$(api_post "/api/workflows/tasks/$B_TASK_ID/block" '{}' 2>/dev/null || echo '{"error":"missing reason"}')
-  assert_error "$B3_RESP" "B3: block without reason"
+  # B3: Cannot block a task still in todo (separate card; avoids a 2nd block on the same runner)
+  B3_ID=$(unique_id "B3")
+  B3_RESP=$(create_task "$B3_ID" "[B3] todo 上禁止阻塞")
+  B3_TASK_ID=$(json_field "$B3_RESP" "id")
+  if [ -z "$B3_TASK_ID" ] || [ "$B3_TASK_ID" = "None" ]; then
+    fail "B3: could not create todo task"
+  else
+    B3_BLOCK=$(api_post "/api/workflows/tasks/$B3_TASK_ID/block" '{"reason":"x"}' 2>/dev/null || echo '{"error":"?"}')
+    assert_error "$B3_BLOCK" "B3: block from todo state"
+  fi
 fi
 fi
 
@@ -401,37 +469,26 @@ else
 fi
 fi
 
-# ─── Section AI: AI-runner-driven flows (optional) ────────────────────────────
-if [ "$SKIP_AI" != "1" ] && [[ -z "$FILTER" || "$FILTER" == "ai" || "$FILTER" == "happy" ]]; then
-section "16. 完整快乐路径 (AI runner required)"
+# ─── Section HP: Dev queue smoke (repeatable without live AI agents) ─────────
+if [[ -z "$FILTER" || "$FILTER" == "ai" || "$FILTER" == "happy" ]]; then
+section "16. 开发队列启动 (HP)"
 
 HP_ID=$(unique_id "HP")
-HP_RESP=$(create_task "$HP_ID" "[HP] 完整快乐路径测试")
+HP_RESP=$(create_task "$HP_ID" "[HP] 开发队列烟雾")
 HP_TASK_ID=$(json_field "$HP_RESP" "id")
 
-if [ -n "$HP_TASK_ID" ] && [ "$HP_TASK_ID" != "None" ]; then
-  # Assign to dev
+if [ -z "$HP_TASK_ID" ] || [ "$HP_TASK_ID" = "None" ]; then
+  fail "HP: could not create task"
+else
   api_post "/api/workflows/tasks/assign" \
     "{\"projectId\":\"$PROJECT_ID\",\"sprintId\":\"$SPRINT_ID\",
       \"issueId\":\"$HP_ID\",\"taskSessionId\":\"$HP_TASK_ID\",
       \"kanbanAgent\":\"agent-dev\"}" > /dev/null
 
-  # Poll through all states (allow up to 10 min per state)
-  poll_state "$HP_TASK_ID" "in_progress|pending_start" "HP: assigned to dev"
-  poll_state "$HP_TASK_ID" "review" "HP: reached review"
-  poll_state "$HP_TASK_ID" "regression_testing" "HP: reached regression"
-  poll_state "$HP_TASK_ID" "pending_release" "HP: reached pending_release"
-
-  # Close async
-  api_post "/api/workflows/tasks/$HP_TASK_ID/close-async" '{}' > /dev/null
-  poll_state "$HP_TASK_ID" "closed" "HP: closed"
-else
-  fail "HP: could not create happy-path task"
-fi
-else
-  if [ "$SKIP_AI" = "1" ]; then
-    skip "AI runner tests skipped (set E2E_SKIP_AI=0 to enable)"
+  if ! poll_state "$HP_TASK_ID" "in_progress" "HP: assigned to dev (in_progress)"; then
+    info "HP: last state=$(get_state "$HP_TASK_ID")"
   fi
+fi
 fi
 
 # ─── Final Report ──────────────────────────────────────────────────────────────
@@ -441,7 +498,6 @@ echo "  Kanban E2E Test Results"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo -e "  ${GREEN}PASS${NC}: $PASS"
 echo -e "  ${RED}FAIL${NC}: $FAIL"
-echo -e "  ${YELLOW}SKIP${NC}: $SKIP"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 
 if [ "${#FAILURES[@]}" -gt 0 ]; then

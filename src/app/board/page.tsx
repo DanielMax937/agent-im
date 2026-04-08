@@ -66,16 +66,19 @@ function inferKanbanAgentForTodoAuto(task: TaskSession): KanbanAgentKind {
   return 'agent-dev';
 }
 
-/** True when the lane has「单 lane 默认 runner」or at least one roster member（与 `membersForKind` / `runnerProfileForLane` 一致）。 */
-function laneHasRunnerConfig(
-  kind: KanbanAgentKind,
-  mapping: Partial<Record<KanbanAgentKind, string>>,
-  members: Partial<Record<KanbanAgentKind, KanbanRoleMember[]>>,
-): boolean {
-  const rid = mapping[kind]?.trim();
-  if (rid) return true;
-  const roster = members[kind];
-  return Array.isArray(roster) && roster.length > 0;
+/** Agent lanes that must have a non-empty default runner before assign (API `assertProjectDefaultRunnersForAssign`). */
+const KANBAN_AGENT_LANES_REQUIRING_DEFAULT: KanbanAgentKind[] = [
+  'agent-dev',
+  'pre-tester',
+  'codex-senior',
+  'claude-review',
+  'copilot-test',
+];
+
+/** Every agent lane needs `kanbanRoleRunners[kind]` set, even if the roster lists members. */
+function projectHasAllAgentLaneDefaultRunners(mapping: Partial<Record<KanbanAgentKind, string>> | null): boolean {
+  if (!mapping) return false;
+  return KANBAN_AGENT_LANES_REQUIRING_DEFAULT.every((k) => Boolean(mapping[k]?.trim()));
 }
 
 const ROLE_SOURCE_LABELS: Record<'developer' | 'reviewer' | 'tester', string> = {
@@ -271,10 +274,9 @@ export default function BoardPage() {
       if (!modalAssigneeOptionValue.trim()) return false;
       const parsed = parseTodoAssigneeOptionValue(modalAssigneeOptionValue.trim());
       if (!parsed) return false;
-      return laneHasRunnerConfig(parsed.kind, assignModalKanbanMapping, laneMembersByKind);
+      return projectHasAllAgentLaneDefaultRunners(assignModalKanbanMapping);
     }
-    const lane = inferKanbanAgentForTodoAuto(assignModalTask);
-    return laneHasRunnerConfig(lane, assignModalKanbanMapping, laneMembersByKind);
+    return projectHasAllAgentLaneDefaultRunners(assignModalKanbanMapping);
   }, [
     assignModalTask,
     assignModalKanbanMapping,
@@ -533,13 +535,9 @@ export default function BoardPage() {
       if (!bulkAssigneeOptionValue.trim()) return false;
       const parsed = parseTodoAssigneeOptionValue(bulkAssigneeOptionValue.trim());
       if (!parsed) return false;
-      return laneHasRunnerConfig(parsed.kind, bulkAssignKanbanMapping, bulkLaneMembersByKind);
+      return projectHasAllAgentLaneDefaultRunners(bulkAssignKanbanMapping);
     }
-    for (const task of bulkTodoAssignSelectedTasks) {
-      const lane = inferKanbanAgentForTodoAuto(task);
-      if (!laneHasRunnerConfig(lane, bulkAssignKanbanMapping, bulkLaneMembersByKind)) return false;
-    }
-    return true;
+    return projectHasAllAgentLaneDefaultRunners(bulkAssignKanbanMapping);
   }, [
     bulkLaneMembersByKind,
     bulkAssignKanbanMapping,
@@ -1053,22 +1051,12 @@ export default function BoardPage() {
         setError('请选择一个负责人');
         return;
       }
-      if (!laneHasRunnerConfig(parsed.kind, bulkAssignKanbanMapping, bulkLaneMembersByKind)) {
-        setError(
-          `无法分配：请先在「角色与 Runner」为 ${KANBAN_AGENT_LABELS[parsed.kind]} 配置「单 lane 默认 runner」或至少一名人员。`,
-        );
-        return;
-      }
-    } else {
-      for (const task of selected) {
-        const lane = inferKanbanAgentForTodoAuto(task);
-        if (!laneHasRunnerConfig(lane, bulkAssignKanbanMapping, bulkLaneMembersByKind)) {
-          setError(
-            `无法分配：请先在「角色与 Runner」为 ${KANBAN_AGENT_LABELS[lane]} 配置「单 lane 默认 runner」或至少一名人员（当前任务 ${task.issueId} 将走该 lane）。`,
-          );
-          return;
-        }
-      }
+    }
+    if (!projectHasAllAgentLaneDefaultRunners(bulkAssignKanbanMapping)) {
+      setError(
+        '无法分配：请先在「角色与 Runner」为所有 agent lane（开发、前置测试、高级开发、评审、测试）配置「单 lane 默认 runner」。',
+      );
+      return;
     }
     setBusy(true);
     setError(null);
@@ -1133,9 +1121,9 @@ export default function BoardPage() {
       }
       laneForRunner = parsed.kind;
     }
-    if (!laneHasRunnerConfig(laneForRunner, assignModalKanbanMapping, laneMembersByKind)) {
+    if (!projectHasAllAgentLaneDefaultRunners(assignModalKanbanMapping)) {
       setError(
-        `无法分配：请先在「角色与 Runner」为 ${KANBAN_AGENT_LABELS[laneForRunner]} 配置「单 lane 默认 runner」或至少一名人员。`,
+        '无法分配：请先在「角色与 Runner」为所有 agent lane（开发、前置测试、高级开发、评审、测试）配置「单 lane 默认 runner」。',
       );
       return;
     }

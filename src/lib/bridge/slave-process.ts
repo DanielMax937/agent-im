@@ -58,8 +58,11 @@ function isAlive(child: ChildProcess | undefined): child is ChildProcess {
  * The slave inherits the current process env with overrides from
  * `config.slave.env`.  The Telegram bot token is stripped so the slave
  * enters Redis-only auto mode.
+ *
+ * Optional `envOverrides` are merged after slave env (e.g. `CTI_DEFAULT_WORKDIR`
+ * after `/cwd` in hybrid Auto mode).
  */
-export function startSlaveProcess(instanceId: string): void {
+export function startSlaveProcess(instanceId: string, envOverrides?: Record<string, string>): void {
   registerSlaveShutdownHooks();
 
   // Already running?
@@ -87,6 +90,9 @@ export function startSlaveProcess(instanceId: string): void {
   // Build child env: inherit current process env, merge slave env, strip bot token
   const childEnv: Record<string, string | undefined> = { ...process.env };
   Object.assign(childEnv, slaveEnv);
+  if (envOverrides) {
+    Object.assign(childEnv, envOverrides);
+  }
   childEnv.CTI_HOME = getCtiHome();
   // Strip Telegram bot token so slave enters Redis-only auto mode
   delete childEnv.CTI_TELEGRAM_BOT_TOKEN;
@@ -130,7 +136,8 @@ export function startSlaveProcess(instanceId: string): void {
     }
   });
 
-  console.log(`[slave-process] Started slave for ${instanceId} (PID ${child.pid})`);
+  const wdLog = childEnv.CTI_DEFAULT_WORKDIR ? ` CTI_DEFAULT_WORKDIR=${childEnv.CTI_DEFAULT_WORKDIR}` : '';
+  console.log(`[slave-process] Started slave for ${instanceId} (PID ${child.pid})${wdLog}`);
 }
 
 /**

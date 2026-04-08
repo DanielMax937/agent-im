@@ -11,7 +11,15 @@ import type {
   PullRequestRef,
   ScmClient,
 } from '../platform/scm-client';
-import type { AgentInstanceRecord, PendingApprovalRecord, Project, Sprint, TaskSession } from '../platform/types';
+import { KANBAN_AGENT_LANES_REQUIRING_DEFAULT_RUNNER } from '../platform/kanban-role-assign';
+import type {
+  AgentInstanceRecord,
+  KanbanAgentKind,
+  PendingApprovalRecord,
+  Project,
+  Sprint,
+  TaskSession,
+} from '../platform/types';
 
 export const PLATFORM_DIR = platformDataDir();
 
@@ -198,6 +206,9 @@ export class FakeInstanceManager {
 
 export function createProject(store: JsonPlatformStore, overrides: Partial<Project> = {}): Project {
   const now = new Date().toISOString();
+  const defaultKanbanRunners: Partial<Record<KanbanAgentKind, string>> = Object.fromEntries(
+    KANBAN_AGENT_LANES_REQUIRING_DEFAULT_RUNNER.map((k) => [k, 'test-runner']),
+  ) as Partial<Record<KanbanAgentKind, string>>;
   return store.upsertProject({
     id: overrides.id ?? 'project-1',
     name: overrides.name ?? 'agent-im',
@@ -214,6 +225,7 @@ export function createProject(store: JsonPlatformStore, overrides: Partial<Proje
     // Disable coverage command in tests to avoid running real npm test.
     coverageCommand: overrides.coverageCommand ?? '',
     agents: overrides.agents ?? [],
+    kanbanRoleRunners: overrides.kanbanRoleRunners !== undefined ? overrides.kanbanRoleRunners : defaultKanbanRunners,
     ...(overrides.isPrivate !== undefined ? { isPrivate: overrides.isPrivate } : {}),
     createdAt: overrides.createdAt ?? now,
     updatedAt: overrides.updatedAt ?? now,

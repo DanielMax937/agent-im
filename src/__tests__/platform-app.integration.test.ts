@@ -114,6 +114,36 @@ describe('Platform app integration', () => {
     }
   });
 
+  it('rejects duplicate active sprint name on POST /api/sprints', async () => {
+    const { app, store } = createHarness();
+    const project = createProject(store);
+    const server = await startHttpApp(app);
+    try {
+      const body = {
+        projectId: project.id,
+        name: 'Unique Sprint Name',
+        branchName: 'main',
+        baseBranch: 'main',
+      };
+      const first = await fetchJson(server.baseUrl, '/api/sprints', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      assert.equal(first.status, 200);
+
+      const second = await fetchJson(server.baseUrl, '/api/sprints', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      assert.equal(second.status, 400);
+      assert.match((second.body as { error?: string }).error ?? '', /Sprint already exists/);
+    } finally {
+      await server.close();
+    }
+  });
+
   it('creates a project through the API', async () => {
     const { app } = createHarness();
     const server = await startHttpApp(app);

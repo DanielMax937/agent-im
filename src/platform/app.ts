@@ -38,7 +38,7 @@ import type {
 import { defaultSkillLinesForLane } from './kanban-agents';
 import { listSkillCatalogEntries } from './skill-catalog';
 import { parseBoardBrainstormChatInput } from './board-brainstorm';
-import { roleForActiveWorkflowState } from './workflow-service';
+import { ensureActiveSprintNameUniqueForProject, roleForActiveWorkflowState } from './workflow-service';
 
 const KANBAN_ROLE_KINDS: KanbanAgentKind[] = [
   'agent-dev',
@@ -609,6 +609,11 @@ export function createPlatformApp(options: CreatePlatformAppOptions): PlatformAp
         }
         const project = options.store.getProject(body.projectId);
         if (!project) return notFoundResponse('Project', body.projectId);
+        try {
+          ensureActiveSprintNameUniqueForProject(options.store, body.projectId, body.name);
+        } catch (e) {
+          return jsonResponse({ error: e instanceof Error ? e.message : String(e) }, 400);
+        }
         const safeName = body.name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
         const sprint: Sprint = {
           id: crypto.randomUUID(),
