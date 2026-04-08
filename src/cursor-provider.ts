@@ -30,6 +30,11 @@ export interface CursorProviderOptions {
   defaultModel?: string;
   /** Merged into `agent` subprocess env after `buildSubprocessEnv`. */
   subprocessEnv?: Record<string, string>;
+  /**
+   * When true, pass `--yolo` and `--trust` (non-interactive / auto-approve style), aligned with
+   * `resolveProvider` `autoApprove` for Claude. When false, omit those flags (stricter CLI behavior).
+   */
+  autoApprove?: boolean;
 }
 
 /**
@@ -146,12 +151,14 @@ export class CursorProvider implements LLMProvider {
   private agentPath?: string;
   private defaultModel?: string;
   private subprocessEnv?: Record<string, string>;
+  private readonly autoApprove: boolean;
 
   constructor(spawnFn?: SpawnFn, opts?: CursorProviderOptions) {
     this.spawnFn = spawnFn ?? spawn;
     this.agentPath = opts?.agentPath;
     this.defaultModel = opts?.defaultModel;
     this.subprocessEnv = opts?.subprocessEnv;
+    this.autoApprove = opts?.autoApprove ?? false;
   }
 
   streamChat(params: StreamChatParams): ReadableStream<string> {
@@ -173,8 +180,7 @@ export class CursorProvider implements LLMProvider {
               '--print',
               '--output-format', 'stream-json',
               ...(params.disableLlmStreaming ? [] : ['--stream-partial-output']),
-              '--yolo',
-              '--trust',
+              ...(self.autoApprove ? ['--yolo', '--trust'] : []),
             ];
 
             if (params.workingDirectory) {

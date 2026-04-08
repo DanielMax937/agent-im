@@ -5,7 +5,7 @@ async function main(): Promise<void> {
   const workingDirectory = process.argv[3] || process.cwd();
   const model = process.argv[4] || 'gpt-5.3-codex';
 
-  const provider = new CopilotProvider();
+  const provider = new CopilotProvider(undefined, { autoApprove: true });
   const startedAt = Date.now();
   const stream = provider.streamChat({
     prompt,

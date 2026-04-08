@@ -46,6 +46,21 @@ function parseSSEChunks(chunks: string[]): Array<{ type: string; data: string }>
     .map(line => JSON.parse(line.slice(6)));
 }
 
+describe('resolveCodexApprovalPolicy', () => {
+  it('uses on-failure when autoApprove is true', async () => {
+    const { resolveCodexApprovalPolicy } = await import('../codex-provider');
+    assert.equal(resolveCodexApprovalPolicy(true, 'plan'), 'on-failure');
+    assert.equal(resolveCodexApprovalPolicy(true, undefined), 'on-failure');
+  });
+
+  it('maps permissionMode when autoApprove is false', async () => {
+    const { resolveCodexApprovalPolicy } = await import('../codex-provider');
+    assert.equal(resolveCodexApprovalPolicy(false, 'plan'), 'on-request');
+    assert.equal(resolveCodexApprovalPolicy(false, 'acceptEdits'), 'on-failure');
+    assert.equal(resolveCodexApprovalPolicy(false, undefined), 'on-request');
+  });
+});
+
 describe('CodexProvider', () => {
   it('emits error when SDK init fails', async () => {
     const { CodexProvider } = await import('../codex-provider');

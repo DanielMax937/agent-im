@@ -64,6 +64,11 @@ export interface CodexProviderConfig {
   useLogin?: boolean;
   /** Merged into Codex CLI subprocess env (and API key lookup). */
   subprocessEnv?: Record<string, string>;
+  /**
+   * When true, maps to permissive `approvalPolicy` (`on-failure`), same role as Claude
+   * `SDKLLMProvider` auto-approve / `resolveProvider` `autoApprove`.
+   */
+  autoApprove?: boolean;
 }
 
 export const DEFAULT_CODEX_CONFIG: CodexProviderConfig = {
@@ -74,17 +79,21 @@ export const DEFAULT_CODEX_CONFIG: CodexProviderConfig = {
 };
 
 /**
- * Map bridge permission modes to Codex approval policies.
- * - 'acceptEdits' (code mode) → 'on-failure' (auto-approve most things)
- * - 'plan' → 'on-request' (ask before executing)
- * - 'default' (ask mode) → 'on-request'
+ * Map bridge `permissionMode` + `autoApprove` to Codex `approvalPolicy`.
+ * When `autoApprove` is true (same semantics as Claude `SDKLLMProvider`), use `on-failure`
+ * so the agent does not block on approvals (aligned with permissive tool runs).
  */
-function toApprovalPolicy(permissionMode?: string): string {
+export function resolveCodexApprovalPolicy(autoApprove: boolean, permissionMode?: string): string {
+  if (autoApprove) return 'on-failure';
   switch (permissionMode) {
-    case 'acceptEdits': return 'on-failure';
-    case 'plan': return 'on-request';
-    case 'default': return 'on-request';
-    default: return 'on-request';
+    case 'acceptEdits':
+      return 'on-failure';
+    case 'plan':
+      return 'on-request';
+    case 'default':
+      return 'on-request';
+    default:
+      return 'on-request';
   }
 }
 
@@ -105,12 +114,14 @@ export class CodexProvider implements LLMProvider {
   private sdk: CodexModule | null = null;
   private codex: CodexInstance | null = null;
   private cfg: CodexProviderConfig;
+  private readonly autoApprove: boolean;
 
   /** Maps session IDs to Codex thread IDs for resume. */
   private threadIds = new Map<string, string>();
 
   constructor(private pendingPerms: PendingPermissions, config?: CodexProviderConfig) {
     this.cfg = config ?? DEFAULT_CODEX_CONFIG;
+    this.autoApprove = this.cfg.autoApprove ?? false;
   }
 
   /**
@@ -187,7 +198,7 @@ export class CodexProvider implements LLMProvider {
               savedThreadId = undefined;
             }
 
-            const approvalPolicy = toApprovalPolicy(params.permissionMode);
+            const approvalPolicy = resolveCodexApprovalPolicy(self.autoApprove, params.permissionMode);
             // Always pass resolved model to the SDK; omit Claude-shaped names (migration / stale sessions).
             const threadModel =
               params.model && !looksLikeClaudeModel(params.model) ? params.model : undefined;

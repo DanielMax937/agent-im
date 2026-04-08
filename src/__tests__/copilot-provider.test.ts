@@ -124,7 +124,7 @@ describe('CopilotProvider', () => {
       return inner(cmd, args, opts);
     };
 
-    const provider = new CopilotProvider(mockSpawn);
+    const provider = new CopilotProvider(mockSpawn, { autoApprove: true });
     const stream = provider.streamChat({
       prompt: 'hello',
       sessionId: 'sess',
@@ -147,6 +147,25 @@ describe('CopilotProvider', () => {
     assert.ok(seenArgs.includes('gpt-5-mini'));
     assert.ok(seenArgs.includes('-p'));
     assert.ok(seenArgs.includes('hello'));
+  });
+
+  it('omits --yolo when autoApprove is false', async () => {
+    const { CopilotProvider } = await import('../copilot-provider');
+    let seenArgs: string[] = [];
+    const inner = createMockSpawn([
+      { type: 'session.tools_updated', data: { model: 'gpt-5' } },
+      { type: 'result', sessionId: 's1', exitCode: 0, usage: {} },
+    ]);
+    const mockSpawn = (cmd: string, args: string[], opts: SpawnOptions): ChildProcess => {
+      seenArgs = args;
+      return inner(cmd, args, opts);
+    };
+
+    const provider = new CopilotProvider(mockSpawn, { autoApprove: false });
+    const stream = provider.streamChat({ prompt: 'hi', sessionId: 'sess' });
+    await collectStream(stream);
+
+    assert.equal(seenArgs.includes('--yolo'), false);
   });
 });
 

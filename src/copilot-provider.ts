@@ -34,6 +34,11 @@ export interface CopilotProviderOptions {
   copilotExecutable?: string;
   defaultModel?: string;
   subprocessEnv?: Record<string, string>;
+  /**
+   * When true, pass `--yolo` (aligned with `resolveProvider` `autoApprove` for Claude).
+   * When false, omit `--yolo` so Copilot may prompt for tool approval.
+   */
+  autoApprove?: boolean;
 }
 
 function stringifyContent(value: unknown): string {
@@ -51,12 +56,14 @@ export class CopilotProvider implements LLMProvider {
   private copilotExecutable?: string;
   private defaultModel?: string;
   private subprocessEnv?: Record<string, string>;
+  private readonly autoApprove: boolean;
 
   constructor(spawnFn?: CopilotSpawnFn, opts?: CopilotProviderOptions) {
     this.spawnFn = spawnFn ?? spawn;
     this.copilotExecutable = opts?.copilotExecutable;
     this.defaultModel = opts?.defaultModel;
     this.subprocessEnv = opts?.subprocessEnv;
+    this.autoApprove = opts?.autoApprove ?? false;
   }
 
   streamChat(params: StreamChatParams): ReadableStream<string> {
@@ -69,7 +76,7 @@ export class CopilotProvider implements LLMProvider {
             const args: string[] = [
               '--output-format', 'json',
               '--stream', params.disableLlmStreaming ? 'off' : 'on',
-              '--yolo',
+              ...(self.autoApprove ? ['--yolo'] : []),
             ];
 
             if (params.workingDirectory) {

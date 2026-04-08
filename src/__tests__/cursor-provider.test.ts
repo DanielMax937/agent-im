@@ -331,4 +331,28 @@ describe('CursorProvider stream-json event mapping', () => {
     assert.ok(error);
     assert.equal(error!.data, 'AbortError');
   });
+
+  it('passes --yolo and --trust only when autoApprove is true', async () => {
+    const { CursorProvider } = await import('../cursor-provider');
+    let seenArgs: string[] = [];
+    const inner = createMockSpawn([
+      { type: 'system', subtype: 'init', session_id: 'x' },
+      { type: 'result', subtype: 'success', session_id: 'x', usage: {} },
+    ]);
+    const mockSpawn = (cmd: string, args: string[], _opts: SpawnOptions): ChildProcess => {
+      seenArgs = args;
+      return inner(cmd, args, _opts);
+    };
+
+    const off = new CursorProvider(mockSpawn, { autoApprove: false });
+    await collectStream(off.streamChat({ prompt: 'a', sessionId: 's1' }));
+    assert.equal(seenArgs.includes('--yolo'), false);
+    assert.equal(seenArgs.includes('--trust'), false);
+
+    seenArgs = [];
+    const on = new CursorProvider(mockSpawn, { autoApprove: true });
+    await collectStream(on.streamChat({ prompt: 'b', sessionId: 's2' }));
+    assert.equal(seenArgs.includes('--yolo'), true);
+    assert.equal(seenArgs.includes('--trust'), true);
+  });
 });

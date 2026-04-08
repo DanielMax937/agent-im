@@ -42,6 +42,7 @@ export async function resolveProvider({
       wrapperPath,
       useLogin: runner?.codexUseLogin,
       subprocessEnv: runner?.subprocessEnv,
+      autoApprove,
     });
   }
 
@@ -51,6 +52,7 @@ export async function resolveProvider({
       agentPath: runner?.cursorExecutable,
       defaultModel: runner?.cursorDefaultModel ?? runner?.defaultModel,
       subprocessEnv: runner?.subprocessEnv,
+      autoApprove,
     });
   }
 
@@ -60,6 +62,7 @@ export async function resolveProvider({
       copilotExecutable: runner?.copilotExecutable,
       defaultModel: runner?.defaultModel,
       subprocessEnv: runner?.subprocessEnv,
+      autoApprove,
     });
   }
 
