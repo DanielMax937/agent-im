@@ -12,13 +12,13 @@
 #   ./scripts/e2e/kanban-e2e-test.sh http://127.0.0.1:3300 coverage
 #
 # Environment:
-#   BASE_URL         default: http://127.0.0.1:3000
+#   BASE_URL         default: http://127.0.0.1:3300
 #   E2E_PROJECT_ID   default: todolist
 #   E2E_TIMEOUT      poll timeout in seconds, default: 300
 
 set -euo pipefail
 
-BASE="${1:-${BASE_URL:-http://127.0.0.1:3000}}"
+BASE="${1:-${BASE_URL:-http://127.0.0.1:3300}}"
 FILTER="${2:-}"
 PROJECT_ID="${E2E_PROJECT_ID:-todolist}"
 POLL_TIMEOUT="${E2E_TIMEOUT:-300}"
