@@ -15,7 +15,12 @@ import { createInterface } from 'node:readline';
 
 import type { LLMProvider, StreamChatParams } from './lib/bridge/host';
 import { sseEvent } from './sse-utils';
-import { buildSubprocessEnv, mergeRunnerSubprocessEnv } from './llm-provider';
+import {
+  buildSubprocessEnv,
+  mergeRunnerSubprocessEnv,
+  CURSOR_PROVIDER_LOG_ENV_KEYS,
+  formatProviderEnvKeysForLog,
+} from './llm-provider';
 
 export type SpawnFn = (cmd: string, args: string[], opts: SpawnOptions) => ChildProcess;
 
@@ -31,8 +36,8 @@ export interface CursorProviderOptions {
   /** Merged into `agent` subprocess env after `buildSubprocessEnv`. */
   subprocessEnv?: Record<string, string>;
   /**
-   * When true, pass `--yolo` and `--trust` (non-interactive / auto-approve style), aligned with
-   * `resolveProvider` `autoApprove` for Claude. When false, omit those flags (stricter CLI behavior).
+   * When true, pass `--yolo`, `--trust`, and `-f` after `--workspace` (non-interactive / auto-approve),
+   * aligned with `resolveProvider` `autoApprove`. When false, omit those flags.
    */
   autoApprove?: boolean;
 }
@@ -180,18 +185,17 @@ export class CursorProvider implements LLMProvider {
               '--print',
               '--output-format', 'stream-json',
               ...(params.disableLlmStreaming ? [] : ['--stream-partial-output']),
-              ...(self.autoApprove ? ['--yolo', '--trust'] : []),
             ];
 
             if (params.workingDirectory) {
               args.push('--workspace', params.workingDirectory);
             }
-            
+
             const model = self.defaultModel || process.env.CTI_CURSOR_MODEL || params.model;
             if (model && !model.startsWith('claude')) {
               args.push('--model', model);
             }
-            
+
             if (params.sdkSessionId) {
               args.push('--resume', params.sdkSessionId);
             }
@@ -199,6 +203,12 @@ export class CursorProvider implements LLMProvider {
             const mode = toAgentMode(params.permissionMode);
             if (mode) {
               args.push('--mode', mode);
+            }
+
+            // After --workspace so headless trust applies to the same path (see Cursor `agent --help`).
+            // `--yolo` is an alias for `-f`/`--force`; include both trust + force for Workspace Trust on e.g. /tmp/wt-*.
+            if (self.autoApprove) {
+              args.push('--yolo', '--trust', '-f');
             }
 
             args.push('--', params.prompt);
@@ -221,7 +231,9 @@ export class CursorProvider implements LLMProvider {
 
             console.error(
               `[cursor-provider] Launching agent: executable=${agentPath} cwd=${resolvedCwd} cwdExists=${cwdExists} ` +
-              `sessionId=${params.sessionId ?? '-'} sdkSessionId=${params.sdkSessionId ?? '-'} model=${model ?? '-'}`
+              `autoApprove=${self.autoApprove} sessionId=${params.sessionId ?? '-'} sdkSessionId=${params.sdkSessionId ?? '-'} ` +
+              `params.model=${params.model ?? '-'} effectiveModel=${model ?? '-'} permissionMode=${params.permissionMode ?? '-'} ` +
+              `child env: ${formatProviderEnvKeysForLog(env, CURSOR_PROVIDER_LOG_ENV_KEYS)}`,
             );
 
             let child: ChildProcess;

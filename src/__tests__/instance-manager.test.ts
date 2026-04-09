@@ -30,7 +30,7 @@ describe('InstanceManager', () => {
       sprintId: sprint.id,
       taskId: taskSession.taskId,
       taskSessionId: taskSession.id,
-      runtime: 'codex',
+      runtime: 'cursor',
       role: 'developer',
       status: 'starting',
       branchName: taskSession.branchName,

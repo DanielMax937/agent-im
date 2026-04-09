@@ -12,6 +12,7 @@ import {
   createSprint,
   createTaskSession,
   createTestJsonPlatformStore,
+  TEST_DEFAULT_RUNNER_ID,
   FakeGitService,
   FakeInstanceManager,
   FakeScmClient,
@@ -87,7 +88,7 @@ describe('WorkflowService', () => {
     const sprint = createSprint(store, project.id);
     store.upsertProject({
       ...project,
-      kanbanRoleRunners: { 'agent-dev': 'test-runner' },
+      kanbanRoleRunners: { 'agent-dev': TEST_DEFAULT_RUNNER_ID },
     });
     const created = await workflowService.createTask({
       projectId: project.id,
@@ -117,7 +118,7 @@ describe('WorkflowService', () => {
       sprintId: sprint.id,
       issueId: 'ISSUE-101',
       title: 'Implement workflow',
-      runtime: 'codex',
+      runtime: 'cursor',
     });
     assert.equal(taskSession.workflowState, 'in_progress');
     assert.equal(taskSession.branchName, 'dev/issue-101');
@@ -454,7 +455,7 @@ describe('WorkflowService', () => {
       sprintId: sprint.id,
       taskId: taskSession.taskId,
       taskSessionId: taskSession.id,
-      runtime: 'codex',
+      runtime: 'cursor',
       role: 'developer',
       status: 'running',
       branchName: taskSession.branchName,
@@ -488,7 +489,7 @@ describe('WorkflowService', () => {
       sprintId: sprint.id,
       taskId: taskSession.taskId,
       taskSessionId: taskSession.id,
-      runtime: 'codex',
+      runtime: 'cursor',
       role: 'developer',
       status: 'running',
       branchName: taskSession.branchName,
@@ -522,7 +523,7 @@ describe('WorkflowService', () => {
         sprintId: sprint.id,
         taskId: taskSession.taskId,
         taskSessionId: taskSession.id,
-        runtime: 'codex',
+        runtime: 'cursor',
         role,
         status: 'running',
         branchName: taskSession.branchName,
@@ -716,7 +717,7 @@ describe('WorkflowService', () => {
         sprintId: sprint.id,
         taskId: taskSession.taskId,
         taskSessionId: taskSession.id,
-        runtime: 'codex',
+        runtime: 'cursor',
         role: spec.role,
         status: 'running',
         branchName: taskSession.branchName,

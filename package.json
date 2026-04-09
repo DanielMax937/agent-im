@@ -12,8 +12,9 @@
     "dev:bridge": "NODE_OPTIONS='--experimental-sqlite' tsx src/main.ts",
     "dev:web": "NODE_OPTIONS='--experimental-sqlite' PATH=\"/opt/homebrew/bin:$HOME/.local/bin:$PATH\" next dev",
     "start": "NODE_OPTIONS='--experimental-sqlite' PATH=\"/opt/homebrew/bin:$HOME/.local/bin:$PATH\" next start",
-    "test": "CTI_HOME=$(mktemp -d) CTI_KANBAN_PLATFORM_DIR=cti-home NODE_OPTIONS='--experimental-sqlite' node --test --test-concurrency=1 --import tsx --test-timeout=15000 src/__tests__/*.test.ts",
-    "postinstall": "patch-package"
+    "test": "CTI_HOME=$(mktemp -d) CTI_KANBAN_PLATFORM_DIR=cti-home CTI_RUNNERS='[{\"id\":\"test-runner\",\"runtime\":\"cursor\",\"label\":\"test-runner\",\"autoApprove\":true}]' NODE_OPTIONS='--experimental-sqlite' node --test --test-concurrency=1 --import tsx --test-timeout=15000 src/__tests__/*.test.ts",
+    "postinstall": "patch-package",
+    "test:kanban:full": "node scripts/kanban-full-test-runner.mjs"
   },
   "dependencies": {
     "@anthropic-ai/claude-agent-sdk": "^0.2.62",

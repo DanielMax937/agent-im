@@ -35,6 +35,8 @@ const GLOBAL_KEY = '__agent_im_next_platform_container__';
 async function createPlatformContainer(): Promise<PlatformContainer> {
   const kanbanHome = getKanbanPlatformCtiHome();
   const config = loadKanbanPlatformConfig();
+  // Loads `kanban/config.env` into process.env + applies CTI_PROXY→HTTP_PROXY (see syncConfigFileToProcessEnv).
+  // Lane runners use resolveProvider → buildSubprocessEnv() which inherits this (same as Auto bridge).
   syncConfigFileToProcessEnv(kanbanHome);
   const logger = setupLogger();
 

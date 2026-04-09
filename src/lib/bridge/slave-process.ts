@@ -10,6 +10,7 @@ import { spawn, type ChildProcess } from 'node:child_process';
 import fs from 'node:fs';
 
 import { getCtiHome, getSlaveEnvPath, loadSlaveEnv } from '../../config';
+import { applyStandardProxyEnvFromCtiProxy } from '../proxy-env';
 import { resolveDaemonEntry } from '../bridge-app-child';
 
 // ── In-memory registry ────────────────────────────────────────────────
@@ -99,6 +100,7 @@ export function startSlaveProcess(instanceId: string, envOverrides?: Record<stri
   delete childEnv.TELEGRAM_BOT_TOKEN;
   // Tag as slave so main.ts / adapter can detect it if needed
   childEnv.CTI_SLAVE_BRIDGE = '1';
+  applyStandardProxyEnvFromCtiProxy(childEnv);
 
   const { command, args } = resolveDaemonEntry();
   const child = spawn(command, args, {

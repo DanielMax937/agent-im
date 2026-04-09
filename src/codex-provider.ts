@@ -25,6 +25,9 @@ import {
   buildSubprocessEnvForRuntime,
   coerceProcessEnvToStringRecord,
   mergeRunnerSubprocessEnv,
+  CODEX_PROVIDER_LOG_ENV_KEYS,
+  formatProviderEnvKeysForLog,
+  maskEnvValueForProviderLog,
 } from './llm-provider';
 
 /** MIME → file extension for temp image files. */
@@ -163,6 +166,13 @@ export class CodexProvider implements LLMProvider {
       console.log(`[${this.cfg.logPrefix}] Using CLI login token (CTI_CODEX_USE_LOGIN=true)`);
     }
 
+    console.log(
+      `[${this.cfg.logPrefix}] SDK init (env passed to Codex SDK): ${formatProviderEnvKeysForLog(mergedEnv, CODEX_PROVIDER_LOG_ENV_KEYS)} ` +
+      `useLogin=${useLogin} ` +
+      `resolvedApiKey=${apiKey ? maskEnvValueForProviderLog('CTI_CODEX_API_KEY', apiKey) : '(unset)'} ` +
+      `resolvedBaseUrl=${baseUrl ?? '(unset)'}`,
+    );
+
     const CodexClass = this.sdk.Codex;
     const codexOptions: Record<string, unknown> = {
       codexPathOverride: this.cfg.wrapperPath,
@@ -202,6 +212,12 @@ export class CodexProvider implements LLMProvider {
             // Always pass resolved model to the SDK; omit Claude-shaped names (migration / stale sessions).
             const threadModel =
               params.model && !looksLikeClaudeModel(params.model) ? params.model : undefined;
+
+            console.log(
+              `[${self.cfg.logPrefix}] streamChat: params.model=${params.model ?? '-'} threadModel=${threadModel ?? '-'} ` +
+              `cwd=${params.workingDirectory ?? '-'} sessionId=${params.sessionId ?? '-'} ` +
+              `sdkSessionId=${params.sdkSessionId ?? '-'}`,
+            );
 
             const threadOptions: Record<string, unknown> = {
               ...(threadModel ? { model: threadModel } : {}),

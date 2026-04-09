@@ -9,6 +9,9 @@ import {
   handleMessage,
   buildSubprocessEnvForRuntime,
   buildClaudeRunnerEnvSnapshotForLog,
+  formatProviderEnvKeysForLog,
+  maskEnvValueForProviderLog,
+  CURSOR_PROVIDER_LOG_ENV_KEYS,
 } from '../llm-provider';
 import type { StreamState } from '../llm-provider';
 import { sseEvent } from '../sse-utils';
@@ -182,6 +185,35 @@ describe('buildClaudeRunnerEnvSnapshotForLog', () => {
     });
     assert.ok(snap.HTTPS_PROXY!.endsWith('8080'));
     assert.ok(snap.HTTPS_PROXY!.startsWith('*'));
+  });
+
+  it('includes CTI_PROXY masked', () => {
+    const snap = buildClaudeRunnerEnvSnapshotForLog({
+      CTI_PROXY: 'http://127.0.0.1:7890',
+    });
+    assert.ok(snap.CTI_PROXY!.endsWith('7890'));
+    assert.ok(snap.CTI_PROXY!.startsWith('*'));
+  });
+});
+
+describe('formatProviderEnvKeysForLog / maskEnvValueForProviderLog', () => {
+  it('masks secrets and leaves base URLs plain', () => {
+    const line = formatProviderEnvKeysForLog(
+      {
+        CTI_PROXY: 'http://p:8080',
+        CTI_CURSOR_BASE_URL: 'https://api.example.com',
+        CTI_CURSOR_API_KEY: 'sk-long-secret',
+        CTI_RUNTIME: 'cursor',
+      },
+      [...CURSOR_PROVIDER_LOG_ENV_KEYS],
+    );
+    assert.match(line, /CTI_CURSOR_BASE_URL=https:\/\/api\.example\.com/);
+    assert.match(line, /CTI_RUNTIME=cursor/);
+    assert.ok(line.includes('CTI_CURSOR_API_KEY=') && !line.includes('sk-long-secret'));
+  });
+
+  it('maskEnvValueForProviderLog returns (unset) for empty', () => {
+    assert.equal(maskEnvValueForProviderLog('CTI_PROXY', undefined), '(unset)');
   });
 });
 

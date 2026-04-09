@@ -12,7 +12,12 @@ import { createInterface } from 'node:readline';
 
 import type { LLMProvider, StreamChatParams } from './lib/bridge/host';
 import { sseEvent } from './sse-utils';
-import { buildSubprocessEnv, mergeRunnerSubprocessEnv } from './llm-provider';
+import {
+  buildSubprocessEnv,
+  COPILOT_PROVIDER_LOG_ENV_KEYS,
+  formatProviderEnvKeysForLog,
+  mergeRunnerSubprocessEnv,
+} from './llm-provider';
 
 export type CopilotSpawnFn = (cmd: string, args: string[], opts: SpawnOptions) => ChildProcess;
 
@@ -95,10 +100,19 @@ export class CopilotProvider implements LLMProvider {
 
             args.push('-p', params.prompt);
 
+            const childEnv = mergeRunnerSubprocessEnv(buildSubprocessEnv(), {
+              subprocessEnv: self.subprocessEnv,
+            });
+            console.log(
+              `[copilot-provider] spawn copilot CLI: bin=${bin} cwd=${params.workingDirectory || process.cwd()} ` +
+                `params.model=${params.model ?? '-'} effectiveModel=${model ?? '-'} stream=${params.disableLlmStreaming ? 'off' : 'on'} ` +
+                `autoApprove=${self.autoApprove} sessionId=${params.sessionId ?? '-'} sdkSessionId=${params.sdkSessionId ?? '-'} ` +
+                `process.CTI_RUNTIME=${process.env.CTI_RUNTIME ?? '(unset)'} ` +
+                `child env: ${formatProviderEnvKeysForLog(childEnv, COPILOT_PROVIDER_LOG_ENV_KEYS)}`,
+            );
+
             const child = self.spawnFn(bin, args, {
-              env: mergeRunnerSubprocessEnv(buildSubprocessEnv(), {
-                subprocessEnv: self.subprocessEnv,
-              }),
+              env: childEnv,
               cwd: params.workingDirectory || process.cwd(),
               stdio: ['pipe', 'pipe', 'pipe'],
             });

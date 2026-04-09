@@ -253,7 +253,13 @@ export class AutoModeRedisTransport {
   ): Promise<void> {
     if (!this.client) return;
     const turns = await this.getMasterTurns();
-    if (turns >= this.settings.maxTurns) return;
+    if (turns >= this.settings.maxTurns) {
+      console.warn(
+        `[auto-mode-redis] pushMasterInput skipped: masterTurns=${turns} >= maxTurns=${this.settings.maxTurns} ` +
+          `(bridge=${this.bridgeSlug}).`,
+      );
+      return;
+    }
     const key = this.keyMaster('input');
     await this.client.lPush(
       key,
@@ -271,7 +277,13 @@ export class AutoModeRedisTransport {
   async pushUserInput(text: string): Promise<void> {
     if (!this.client) return;
     const turns = await this.getSlaveTurns();
-    if (turns >= this.settings.maxTurns) return;
+    if (turns >= this.settings.maxTurns) {
+      console.warn(
+        `[auto-mode-redis] pushUserInput skipped: slaveTurns=${turns} >= maxTurns=${this.settings.maxTurns} ` +
+          `(bridge=${this.bridgeSlug}).`,
+      );
+      return;
+    }
     await this.client.lPush(this.keySlave('input'), encodeQueuePayload({ text }));
   }
 
@@ -500,6 +512,10 @@ export class AutoModeRedisTransport {
     try {
       const turns = await this.getSlaveTurns();
       if (turns >= this.settings.maxTurns) {
+        console.warn(
+          `[auto-mode-redis] deliverClaudeReply skipped: slaveTurns=${turns} >= maxTurns=${this.settings.maxTurns} ` +
+            `(bridge=${this.bridgeSlug}). Reply not written to slave:out.`,
+        );
         return { ok: true };
       }
       await this.client.lPush(this.keySlave('out'), text);
@@ -527,7 +543,13 @@ export class AutoModeRedisTransport {
   async pushSlaveHandoff(text: string, outboundChatId?: string): Promise<void> {
     if (!this.client) return;
     const turns = await this.getSlaveTurns();
-    if (turns >= this.settings.maxTurns) return;
+    if (turns >= this.settings.maxTurns) {
+      console.warn(
+        `[auto-mode-redis] pushSlaveHandoff skipped: slaveTurns=${turns} >= maxTurns=${this.settings.maxTurns} ` +
+          `(bridge=${this.bridgeSlug}). Verification follow-up / master handoff will NOT be queued for the slave.`,
+      );
+      return;
+    }
     const key = this.keySlave('input');
     await this.client.lPush(
       key,
@@ -572,6 +594,13 @@ export class AutoModeRedisTransport {
     if (!this.client) return null;
     const turns = await this.getSlaveTurns();
     if (turns >= this.settings.maxTurns) {
+      const backlog = await this.client.lLen(this.keySlave('input'));
+      if (backlog > 0) {
+        console.warn(
+          `[auto-mode-redis] pollOnce blocked: slaveTurns=${turns} >= maxTurns=${this.settings.maxTurns} ` +
+            `but slave:input has ${backlog} message(s) (bridge=${this.bridgeSlug}).`,
+        );
+      }
       return null;
     }
     const raw = await this.client.rPop(this.keySlave('input'));
@@ -627,6 +656,13 @@ export async function runAutoModeRedisInboundLoop(
     try {
       const turns = await transport.getTurns();
       if (turns >= transport.settings.maxTurns) {
+        const stats = await transport.getQueueStats();
+        if (stats.slaveInput > 0) {
+          console.warn(
+            `[auto-mode-redis] Slave inbound loop exiting: slaveTurns=${turns} >= maxTurns=${transport.settings.maxTurns} ` +
+              `but slave:input still has ${stats.slaveInput} message(s) (bridge=${transport.bridgeSlug}).`,
+          );
+        }
         await onMaxTurnsReached();
         break;
       }

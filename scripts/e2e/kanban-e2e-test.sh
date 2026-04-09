@@ -15,6 +15,9 @@
 #   BASE_URL         default: http://127.0.0.1:3300
 #   E2E_PROJECT_ID   default: todolist
 #   E2E_TIMEOUT      poll timeout in seconds, default: 300
+#   E2E_SKIP_GH_REPO=1 — use local bare origin + placeholder SCM (no GitHub API; gh 404 on auto-advance)
+#   E2E_GH_ORG       — if set, gh repo create under this org; else your user (gh api user)
+#   E2E_GH_REPO_PREFIX — default agent-im-e2e- (list/delete: gh repo list | grep agent-im-e2e)
 
 set -euo pipefail
 
@@ -114,6 +117,97 @@ ensure_e2e_git_remote() {
   git -C "$repo" push -u origin HEAD:main 2>/dev/null || git -C "$repo" push -u origin main 2>/dev/null || true
 }
 
+# Create a real GitHub repo via gh (name prefix E2E_GH_REPO_PREFIX) so SCM API calls succeed.
+# Sets E2E_GH_REMOTE_URL, E2E_GH_SCM_PROJECT, E2E_GH_CREATED (1=gh, 0=placeholder/bare).
+ensure_e2e_scm_remote() {
+  local repo="$1"
+  E2E_GH_CREATED=0
+  if [ "${E2E_SKIP_GH_REPO:-}" = "1" ]; then
+    ensure_e2e_git_remote "$repo"
+    E2E_GH_REMOTE_URL="https://github.com/placeholder/${PROJECT_ID}"
+    E2E_GH_SCM_PROJECT="placeholder/${PROJECT_ID}"
+    info "E2E_SKIP_GH_REPO=1 — placeholder SCM (GitHub list PRs will 404 if workflow auto-advance runs)"
+    return 0
+  fi
+  if ! command -v gh >/dev/null 2>&1; then
+    echo -e "${RED}gh not found. Install GitHub CLI or set E2E_SKIP_GH_REPO=1 for bare-remote placeholder.${NC}" >&2
+    exit 1
+  fi
+  if ! gh auth status >/dev/null 2>&1; then
+    echo -e "${RED}gh not authenticated. Run: gh auth login, or set E2E_SKIP_GH_REPO=1${NC}" >&2
+    exit 1
+  fi
+  [ -d "$repo/.git" ] || return 0
+  local GH_OWNER REPO_NAME
+  if [ -n "${E2E_GH_ORG:-}" ]; then
+    GH_OWNER="$E2E_GH_ORG"
+  else
+    GH_OWNER=$(gh api user -q .login 2>/dev/null) || {
+      echo -e "${RED}gh api user failed${NC}" >&2
+      exit 1
+    }
+  fi
+  REPO_NAME="${E2E_GH_REPO_PREFIX:-agent-im-e2e-}${PROJECT_ID}-$(date +%s)-$$"
+  REPO_NAME=$(echo "$REPO_NAME" | tr '[:upper:]' '[:lower:]' | tr -cd 'a-z0-9._-')
+  (
+    cd "$repo" || exit 1
+    git branch -M main 2>/dev/null || true
+    git remote remove origin 2>/dev/null || true
+    gh repo create "${GH_OWNER}/${REPO_NAME}" --public --source=. --remote=origin --push \
+      --description "agent-im kanban e2e disposable (${PROJECT_ID})"
+  ) || {
+    echo -e "${RED}gh repo create failed${NC}" >&2
+    exit 1
+  }
+  E2E_GH_SCM_PROJECT="${GH_OWNER}/${REPO_NAME}"
+  E2E_GH_REMOTE_URL="https://github.com/${E2E_GH_SCM_PROJECT}"
+  E2E_GH_CREATED=1
+  info "GitHub repo ${E2E_GH_SCM_PROJECT} (prefix ${E2E_GH_REPO_PREFIX:-agent-im-e2e-} — gh repo list | grep ${E2E_GH_REPO_PREFIX:-agent-im-e2e-})"
+}
+
+# POST /api/projects upsert: create or merge repository.remoteUrl + scmProject for real GitHub.
+upsert_e2e_project() {
+  local LOCAL_PATH="$1"
+  if api_get "/api/projects/$PROJECT_ID" > /tmp/e2e-proj.json 2>/dev/null; then
+    local MERGED
+    MERGED=$(python3 -c "
+import json, sys
+with open('/tmp/e2e-proj.json') as f:
+    p = json.load(f)
+ru, scm, lp = sys.argv[1:4]
+p.setdefault('repository', {})
+p['repository']['remoteUrl'] = ru
+p['repository']['scmProject'] = scm
+p['repository']['localPath'] = lp
+p['repository']['baseBranch'] = p['repository'].get('baseBranch') or 'main'
+p['repository']['sprintBranchPrefix'] = p['repository'].get('sprintBranchPrefix') or 'feature/'
+p['repository']['taskBranchPrefix'] = p['repository'].get('taskBranchPrefix') or 'dev/'
+p['repository']['scmProvider'] = p['repository'].get('scmProvider') or 'github'
+print(json.dumps(p))
+" "$E2E_GH_REMOTE_URL" "$E2E_GH_SCM_PROJECT" "$LOCAL_PATH")
+    api_post "/api/projects" "$MERGED" > /dev/null
+    pass "Project '$PROJECT_ID' SCM → $E2E_GH_SCM_PROJECT"
+  else
+    info "Creating project '$PROJECT_ID'..."
+    api_post "/api/projects" "{
+    \"id\": \"$PROJECT_ID\",
+    \"name\": \"$PROJECT_ID\",
+    \"repository\": {
+      \"remoteUrl\": \"$E2E_GH_REMOTE_URL\",
+      \"localPath\": \"$LOCAL_PATH\",
+      \"baseBranch\": \"main\",
+      \"sprintBranchPrefix\": \"feature/\",
+      \"taskBranchPrefix\": \"dev/\",
+      \"scmProvider\": \"github\",
+      \"scmProject\": \"$E2E_GH_SCM_PROJECT\"
+    },
+    \"agents\": [],
+    \"isPrivate\": false
+  }" > /dev/null
+    pass "Project '$PROJECT_ID' created"
+  fi
+}
+
 # ─── Step 1: Server health ─────────────────────────────────────────────────────
 section "P0: Server Health"
 if api_get "/health" > /dev/null 2>&1; then
@@ -155,30 +249,8 @@ if [ ! -d "$E2E_REPO_PATH/.git" ]; then
   git -C "$E2E_REPO_PATH" commit --allow-empty -m "init" > /dev/null 2>&1
   pass "Local git repo initialised"
 fi
-ensure_e2e_git_remote "$E2E_REPO_PATH"
-
-# Create project if it doesn't exist
-if ! api_get "/api/projects/$PROJECT_ID" > /dev/null 2>&1; then
-  info "Creating project '$PROJECT_ID'..."
-  api_post "/api/projects" "{
-    \"id\": \"$PROJECT_ID\",
-    \"name\": \"$PROJECT_ID\",
-    \"repository\": {
-      \"remoteUrl\": \"https://github.com/placeholder/$PROJECT_ID\",
-      \"localPath\": \"/tmp/$PROJECT_ID-e2e\",
-      \"baseBranch\": \"main\",
-      \"sprintBranchPrefix\": \"feature/\",
-      \"taskBranchPrefix\": \"dev/\",
-      \"scmProvider\": \"github\",
-      \"scmProject\": \"placeholder/$PROJECT_ID\"
-    },
-    \"agents\": [],
-    \"isPrivate\": false
-  }" > /dev/null
-  pass "Project '$PROJECT_ID' created"
-else
-  pass "Project '$PROJECT_ID' already exists"
-fi
+ensure_e2e_scm_remote "$E2E_REPO_PATH"
+upsert_e2e_project "$E2E_REPO_PATH"
 
 # Get or create sprint
 SPRINT_RESP=$(api_get "/api/sprints?projectId=$PROJECT_ID" 2>/dev/null || echo "[]")
@@ -492,6 +564,9 @@ fi
 fi
 
 # ─── Final Report ──────────────────────────────────────────────────────────────
+if [ "${E2E_GH_CREATED:-0}" = "1" ] && [ -n "${E2E_GH_SCM_PROJECT:-}" ]; then
+  info "Disposable GitHub repo: $E2E_GH_SCM_PROJECT — delete: gh repo delete $E2E_GH_SCM_PROJECT --yes"
+fi
 echo ""
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo "  Kanban E2E Test Results"

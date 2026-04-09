@@ -332,7 +332,7 @@ describe('CursorProvider stream-json event mapping', () => {
     assert.equal(error!.data, 'AbortError');
   });
 
-  it('passes --yolo and --trust only when autoApprove is true', async () => {
+  it('passes --yolo, --trust, -f only when autoApprove is true (after --workspace)', async () => {
     const { CursorProvider } = await import('../cursor-provider');
     let seenArgs: string[] = [];
     const inner = createMockSpawn([
@@ -345,14 +345,19 @@ describe('CursorProvider stream-json event mapping', () => {
     };
 
     const off = new CursorProvider(mockSpawn, { autoApprove: false });
-    await collectStream(off.streamChat({ prompt: 'a', sessionId: 's1' }));
+    await collectStream(off.streamChat({ prompt: 'a', sessionId: 's1', workingDirectory: '/tmp/w' }));
     assert.equal(seenArgs.includes('--yolo'), false);
     assert.equal(seenArgs.includes('--trust'), false);
+    assert.equal(seenArgs.includes('-f'), false);
 
     seenArgs = [];
     const on = new CursorProvider(mockSpawn, { autoApprove: true });
-    await collectStream(on.streamChat({ prompt: 'b', sessionId: 's2' }));
+    await collectStream(on.streamChat({ prompt: 'b', sessionId: 's2', workingDirectory: '/tmp/w' }));
     assert.equal(seenArgs.includes('--yolo'), true);
     assert.equal(seenArgs.includes('--trust'), true);
+    assert.equal(seenArgs.includes('-f'), true);
+    const ws = seenArgs.indexOf('--workspace');
+    const yolo = seenArgs.indexOf('--yolo');
+    assert.ok(ws >= 0 && yolo > ws, '--yolo should come after --workspace');
   });
 });

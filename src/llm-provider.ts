@@ -14,6 +14,7 @@ import type { PendingPermissions } from './permission-gateway';
 import { getLogger } from './logger';
 
 import { sseEvent } from './sse-utils';
+import { applyStandardProxyEnvFromCtiProxy } from './lib/proxy-env';
 
 const llmProviderLog = getLogger().child({ scope: 'llm-provider' });
 
@@ -162,6 +163,7 @@ export function buildSubprocessEnvForRuntime(
     }
   }
 
+  applyStandardProxyEnvFromCtiProxy(out);
   return out;
 }
 
@@ -182,11 +184,94 @@ const CLAUDE_RUNNER_LOG_EXACT_KEYS = [
   'CTI_CLAUDE_CODE_EXECUTABLE',
   'CTI_ENV_ISOLATION',
   'CTI_RUNTIME',
+  'CTI_PROXY',
   'HTTP_PROXY',
   'HTTPS_PROXY',
   'ALL_PROXY',
   'NO_PROXY',
   'NODE_EXTRA_CA_CERTS',
+] as const;
+
+// ── Shared provider launch logs (all runtimes; secrets masked) ──
+
+/** Proxy-related keys included in provider spawn diagnostics. */
+export const PROVIDER_LOG_PROXY_KEYS = [
+  'CTI_PROXY',
+  'HTTP_PROXY',
+  'HTTPS_PROXY',
+  'ALL_PROXY',
+  'NO_PROXY',
+] as const;
+
+const PROVIDER_LOG_PLAIN_KEYS = new Set([
+  'CTI_ENV_ISOLATION',
+  'CTI_RUNTIME',
+  'CTI_CODEX_USE_LOGIN',
+  'ANTHROPIC_BASE_URL',
+  'CTI_CODEX_BASE_URL',
+  'CTI_CURSOR_BASE_URL',
+  'NODE_EXTRA_CA_CERTS',
+  'CTI_CLAUDE_CODE_EXECUTABLE',
+]);
+
+function maskSecretTailOnly(value: string): string {
+  if (value.length <= 4) return '****';
+  return '*'.repeat(Math.min(value.length - 4, 24)) + value.slice(-4);
+}
+
+/**
+ * Mask or pass through a single env value for provider diagnostics.
+ * URLs and non-secret config values may be logged verbatim (see {@link PROVIDER_LOG_PLAIN_KEYS}).
+ */
+export function maskEnvValueForProviderLog(key: string, value: string | undefined): string {
+  if (value === undefined || value === '') return '(unset)';
+  if (PROVIDER_LOG_PLAIN_KEYS.has(key)) return value;
+  return maskSecretTailOnly(value);
+}
+
+/**
+ * One-line summary of selected env keys (masked) for console diagnostics.
+ */
+export function formatProviderEnvKeysForLog(
+  env: NodeJS.ProcessEnv,
+  keys: readonly string[],
+): string {
+  return keys.map((k) => `${k}=${maskEnvValueForProviderLog(k, env[k])}`).join(' ');
+}
+
+/** Env keys logged for Codex SDK / CLI child (first init). */
+export const CODEX_PROVIDER_LOG_ENV_KEYS = [
+  ...PROVIDER_LOG_PROXY_KEYS,
+  'CTI_ENV_ISOLATION',
+  'CTI_RUNTIME',
+  'CTI_CODEX_USE_LOGIN',
+  'CTI_CODEX_BASE_URL',
+  'CTI_CODEX_API_KEY',
+  'CODEX_API_KEY',
+  'OPENAI_API_KEY',
+] as const;
+
+/** Env keys logged for Cursor `agent` subprocess. */
+export const CURSOR_PROVIDER_LOG_ENV_KEYS = [
+  ...PROVIDER_LOG_PROXY_KEYS,
+  'CTI_ENV_ISOLATION',
+  'CTI_RUNTIME',
+  'CTI_CURSOR_MODEL',
+  'CTI_CURSOR_BASE_URL',
+  'CTI_CURSOR_API_KEY',
+  'CURSOR_API_KEY',
+  'OPENAI_API_KEY',
+] as const;
+
+/** Env keys logged for Copilot CLI subprocess. */
+export const COPILOT_PROVIDER_LOG_ENV_KEYS = [
+  ...PROVIDER_LOG_PROXY_KEYS,
+  'CTI_ENV_ISOLATION',
+  'CTI_RUNTIME',
+  'CTI_COPILOT_MODEL',
+  'CTI_COPILOT_EXECUTABLE',
+  'GITHUB_TOKEN',
+  'GH_TOKEN',
 ] as const;
 
 function maskEnvScalar(value: string): string {
@@ -459,16 +544,6 @@ export class SDKLLMProvider implements LLMProvider {
               subprocessEnv ? { subprocessEnv } : undefined,
             );
 
-            llmProviderLog.info(
-              {
-                useLogin,
-                cliPath: cliPath || undefined,
-                cwd: params.workingDirectory,
-                claudeSubprocessEnv: buildClaudeRunnerEnvSnapshotForLog(cleanEnv),
-              },
-              'Claude runner: subprocess env (masked; passed to Claude Code SDK)',
-            );
-
             // Cross-runtime migration safety: drop non-Claude model names
             // that may linger in session data from a previous Codex runtime.
             let model = params.model;
@@ -476,6 +551,27 @@ export class SDKLLMProvider implements LLMProvider {
               llmProviderLog.warn({ model }, 'Ignoring non-Claude model name, using CLI default');
               model = undefined;
             }
+
+            llmProviderLog.info(
+              {
+                useLogin,
+                cliPath: cliPath || undefined,
+                cwd: params.workingDirectory,
+                paramsModel: params.model,
+                resolvedModel: model,
+                sessionId: params.sessionId,
+                sdkSessionId: params.sdkSessionId,
+                proxyEnvLine: formatProviderEnvKeysForLog(cleanEnv, PROVIDER_LOG_PROXY_KEYS),
+                claudeSubprocessEnv: buildClaudeRunnerEnvSnapshotForLog(cleanEnv),
+              },
+              'Claude runner: subprocess env (masked; passed to Claude Code SDK)',
+            );
+            console.log(
+              `[claude-sdk] streamChat: cwd=${params.workingDirectory ?? '-'} paramsModel=${params.model ?? '-'} ` +
+              `resolvedModel=${model ?? '-'} sessionId=${params.sessionId ?? '-'} sdkSessionId=${params.sdkSessionId ?? '-'} ` +
+              `useLogin=${useLogin} cliPath=${cliPath ?? '-'} ` +
+              `proxy=${formatProviderEnvKeysForLog(cleanEnv, PROVIDER_LOG_PROXY_KEYS)}`,
+            );
 
             const queryOptions: Record<string, unknown> = {
               cwd: params.workingDirectory,

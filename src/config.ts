@@ -8,6 +8,7 @@ import {
   parseImBaseAndInstanceId,
   type ImBaseChannel,
 } from "./lib/bridge/im-instance-settings";
+import { applyStandardProxyEnvFromCtiProxy } from "./lib/proxy-env";
 
 import type {
   AgentEnvSlot,
@@ -202,6 +203,7 @@ export function buildSlaveEnvFromRunner(
   }
   // Merge runner-level subprocess env last (overrides)
   if (runner.subprocessEnv) Object.assign(env, runner.subprocessEnv);
+  applyStandardProxyEnvFromCtiProxy(env);
   return env;
 }
 
@@ -792,6 +794,8 @@ export function syncConfigFileToProcessEnv(ctiHomeOverride?: string): void {
     } catch {
       /* ignore */
     }
+    // Kanban Next server, bridge daemon, admin reload: mirror CTI_PROXY → HTTP(S)_PROXY for CLI runners.
+    applyStandardProxyEnvFromCtiProxy(process.env);
   } catch {
     /* missing file */
   }

@@ -204,10 +204,17 @@ export class FakeInstanceManager {
   }
 }
 
+/**
+ * Kanban lane default runner id for tests. Must match `CTI_RUNNERS` in `package.json` `npm test`
+ * (`test-runner` → runtime `cursor`, `autoApprove: true`) so `resolveRuntimeForPlatformInstance` /
+ * `resolveProvider` see a real profile.
+ */
+export const TEST_DEFAULT_RUNNER_ID = 'test-runner';
+
 export function createProject(store: JsonPlatformStore, overrides: Partial<Project> = {}): Project {
   const now = new Date().toISOString();
   const defaultKanbanRunners: Partial<Record<KanbanAgentKind, string>> = Object.fromEntries(
-    KANBAN_AGENT_LANES_REQUIRING_DEFAULT_RUNNER.map((k) => [k, 'test-runner']),
+    KANBAN_AGENT_LANES_REQUIRING_DEFAULT_RUNNER.map((k) => [k, TEST_DEFAULT_RUNNER_ID]),
   ) as Partial<Record<KanbanAgentKind, string>>;
   return store.upsertProject({
     id: overrides.id ?? 'project-1',
@@ -263,7 +270,7 @@ export function createTaskSession(
     issueId: overrides.issueId ?? 'ISSUE-101',
     title: overrides.title ?? 'Implement workflow',
     workflowState: overrides.workflowState ?? 'in_progress',
-    runtime: overrides.runtime ?? 'codex',
+    runtime: overrides.runtime ?? 'cursor',
     role: overrides.role ?? 'developer',
     kanbanAgent: overrides.kanbanAgent,
     sessionId: overrides.sessionId ?? 'session-1',

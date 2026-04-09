@@ -138,3 +138,22 @@ test('AutoModeRedisTransport remains backward-compatible with legacy plain-text 
   assert.equal(slaveMsg.text, 'legacy slave');
   assert.equal(slaveMsg.outboundChatId, 'fallback-chat');
 });
+
+test('pushSlaveHandoff does not enqueue when slaveTurns >= maxTurns', async () => {
+  const state: RedisStubState = {
+    lists: new Map(),
+    values: new Map([['cti:auto:bridge-a:telegram:slave:turns', '2']]),
+  };
+  const transport = new AutoModeRedisTransport(
+    'telegram',
+    { redisUrl: 'redis://127.0.0.1:6379', maxTurns: 2, hybridMode: true },
+    'bridge-a',
+    ['runner-a'],
+    'slave-a',
+    () => 'fallback-chat',
+  );
+  (transport as unknown as { client: ReturnType<typeof createRedisStub> }).client = createRedisStub(state);
+
+  await transport.pushSlaveHandoff('blocked handoff', 'chat-9');
+  assert.equal(state.lists.get('cti:auto:bridge-a:telegram:slave:input')?.length ?? 0, 0);
+});

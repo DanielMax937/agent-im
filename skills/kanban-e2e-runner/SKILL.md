@@ -7,7 +7,9 @@ description: Use when running end-to-end Kanban workflow tests against a live ag
 
 ## Overview
 
-Runs every test case in `docs/KANBAN-TESTCASES.md` against a live agent-im server. For each case the runner creates a real task via API, drives state transitions (calling API endpoints for every "human" action), polls for expected state, and records pass/fail. No browser required — all interactions are pure HTTP.
+Runs every test case in `docs/KANBAN-TESTCASES.md` against a live agent-im server. For each case the runner creates a real task via API, drives state transitions (calling API endpoints for every "human" action), polls for expected state, and records pass/fail.
+
+**Canonical full run (recommended):** `npm run test:kanban:full` — runs `scripts/kanban-full-test-runner.mjs`, which includes API/unit-style checks plus **integration flows** in `scripts/kanban-test-flows.mjs` (real `gh` repos, merges, and workflow transitions). Per-case results are written under `docs/test-results/<run-id>/` as `<ID>.md`. Requires `gh auth`, Chrome DevTools Server (CDS) for board snapshots where used, and a platform runner.
 
 ---
 
