@@ -4,7 +4,7 @@
 import { execFileSync, execSync } from 'node:child_process';
 import { writeFileSync, mkdirSync, mkdtempSync, rmSync, existsSync } from 'node:fs';
 import { join, isAbsolute } from 'node:path';
-import { tmpdir } from 'node:os';
+import { homedir, tmpdir } from 'node:os';
 
 export function resolveGhOwner() {
   const org = process.env.KANBAN_E2E_ORG?.trim();
@@ -137,18 +137,34 @@ export function execGit(cwd, args) {
   execFileSync('git', args, { cwd, stdio: 'pipe', encoding: 'utf8' });
 }
 
-/** Resolves default platform DB path (same rules as JsonPlatformStore). */
-export function getPlatformDbPath() {
+function platformDataDirForScripts() {
   const raw = process.env.CTI_KANBAN_PLATFORM_DIR?.trim();
-  let dir;
-  if (!raw || raw === 'cti-home' || raw === 'legacy') return null;
-  dir = isAbsolute(raw) ? raw : join(process.cwd(), raw);
-  return join(dir, 'platform.db');
+  if (raw === 'cti-home' || raw === 'legacy') {
+    return join(homedir(), '.claude-to-im', 'kanban', 'data', 'platform');
+  }
+  if (raw) {
+    return isAbsolute(raw) ? raw : join(process.cwd(), raw);
+  }
+  return join(process.cwd(), 'data', 'platform');
+}
+
+function platformDbFileNameForScripts() {
+  const raw = process.env.CTI_KANBAN_PLATFORM_DB_FILE?.trim();
+  const name = raw || 'platform.db';
+  if (name.includes('/') || name.includes('\\') || name.includes('..')) {
+    throw new Error('CTI_KANBAN_PLATFORM_DB_FILE must be a basename without path separators');
+  }
+  return name;
+}
+
+/** Resolves platform DB path (same rules as JsonPlatformStore / CTI_KANBAN_PLATFORM_DB_FILE). */
+export function getPlatformDbPath() {
+  return join(platformDataDirForScripts(), platformDbFileNameForScripts());
 }
 
 export function sqliteTableExists(tableName) {
   const dbPath = getPlatformDbPath();
-  if (!dbPath || !existsSync(dbPath)) return { ok: false, detail: dbPath ? `missing ${dbPath}` : 'CTI_KANBAN_PLATFORM_DIR unset or cti-home' };
+  if (!existsSync(dbPath)) return { ok: false, detail: `missing ${dbPath}` };
   try {
     const out = execFileSync(
       'sqlite3',

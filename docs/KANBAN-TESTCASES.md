@@ -1,7 +1,13 @@
 # Kanban 工作流测试用例
 
-> 覆盖范围：所有状态流转、覆盖率机制、私有仓库 CI lane、快速通道、UAT、阻塞/解除阻塞、异步关闭等功能。  
-> 运行前提：已启动服务，至少存在一个 Project。Board 地址：`/board`。
+> 覆盖范围：所有状态流转、覆盖率机制、私有仓库 CI lane、快速通道、UAT、阻塞/解除阻塞、关单（同步 / 异步）等功能。  
+> 运行前提：已启动服务，至少存在一个 Project。Board 地址：`/board`。自动化回归：`npm run test:kanban:full`（`scripts/kanban-full-test-runner.mjs`）。
+
+**与当前源码对齐要点（摘要）**
+
+- **Kanban lane（`/api/projects/:id/kanban-roles`）** 固定 **5 类**：`agent-dev`、`pre-tester`、`codex-senior`、`claude-review`、`copilot-test`。分配任务前每条 lane 需在 `kanbanRoleRunners`（或 roster）中有可用 runner（见 `KANBAN_AGENT_LANES_REQUIRING_DEFAULT_RUNNER`）。**`self-host-runner` 不在该列表中配置**，由工作流在**私有仓回归**时自动写入任务，用于等 CI 回调。
+- **关单**：看板「标记完成」调用 **`POST /api/workflows/tasks/:taskSessionId/close`（同步）**，`pending_release` → **`closed`**，**不经过** `closing`。**`POST .../close-async`** 才会先进入 `closing` 再后台执行与 `closeTask` 相同校验。
+- **CI 回调失败**：`POST .../ci-result` 且 `status: failure` 时调用 `returnTestingToDevelopment`，任务回到 **`in_progress`**（见 `processCiCallback`）。
 
 ---
 
@@ -18,7 +24,7 @@
 9. [回归测试 regression_testing（私有仓库 self-host-runner）](#8-回归测试-regression_testing私有仓库-self-host-runner)
 10. [UAT pending_uat](#9-uat-pending_uat)
 11. [待发布 pending_release](#10-待发布-pending_release)
-12. [异步关闭 closing → closed](#11-异步关闭-closing--closed)
+12. [关单：同步 close 与异步 close-async](#11-关单同步-close-与异步-close-async)
 13. [阻塞 blocked](#12-阻塞-blocked)
 14. [快速通道（Hotfix）](#13-快速通道hotfix)
 15. [覆盖率管理](#14-覆盖率管理)
@@ -33,7 +39,7 @@
 
 | # | 用例 | 步骤 | 期望 |
 |---|------|------|------|
-| P1 | 服务启动 | 启动 `npm run dev`；打开 `/board` | 页面加载；无 JS 报错 |
+| P1 | 服务启动 | 启动 `npm run dev`；`GET /health` 返回 `ok`；打开 `/board` | 页面加载；无 JS 报错 |
 | P2 | 公开仓库项目 | 在 `/projects` 创建项目，**不勾选** "私有仓库"；配置有效的 localPath、baseBranch、SCM 信息 | `/api/projects` 返回该项目；项目卡片无 🔒 图标 |
 | P3 | 私有仓库项目 | 在 `/projects` 创建项目，**勾选** "私有仓库" | 项目卡片显示 🔒 图标；`isPrivate: true` |
 | P4 | UAT 项目 | 在 `/projects` 创建项目，勾选 `requiresUat` | 后续回归后会进入 `pending_uat` 状态 |
@@ -69,7 +75,7 @@
 |---|------|------|------|
 | A1 | 正常分配 | 填写**交接说明**；选 lane（agent-开发/codex-高级开发）→ **分配并启动 runner** | 卡片移至 **开发中**；branch/worktree 创建；runner 启动；workflow 评论记录分配 |
 | A2 | 缺少交接说明 | 清空交接说明 → 分配 | UI 报错"分配前请填写交接说明…" |
-| A3 | 依赖任务未完成 | 为 T1 添加依赖（另一个未到 `pending_release` 的任务）→ 尝试分配 | 报错：依赖任务尚未满足 |
+| A3 | 依赖任务未完成 | 为任务设置 `dependsOnIssueIds`（依赖项未到 `pending_release`）→ `POST /api/workflows/tasks/assign` | 任务可保持 **`pending_start`** 排队等待依赖；看板可能提示依赖未满足（与 `kanban-full-test-runner` A3 一致，未必返回 HTTP 错误） |
 | A4 | 2 次评审打回后分配 | `reviewRejectionCount ≥ 2` 时，选 agent-开发 → 分配 | 服务端自动升级为 **codex-高级开发**；runner 以 codex-senior 启动 |
 | A5 | pending_release 移入时 runner 关闭 | 任务从 `regression_testing` 进入 `pending_release` | 对应任务 runner 实例自动停止 |
 
@@ -104,7 +110,7 @@
 | # | 用例 | 步骤 | 期望 |
 |---|------|------|------|
 | R1 | 提交评审 | 可选填 commit/PR 字段 → **提交评审（claude-review）** | 状态 **评审中**；PR URL 显示在卡片；reviewer runner 启动；workflow 评论包含 PR 信息 |
-| R2 | 评审通过 | reviewer 输出通过信号 | 进入 `regression_testing` 流程 |
+| R2 | 评审通过并合并 PR | 在 **review** 状态下由 Agent 执行 **`APPROVE_MERGE`**（或等价逻辑调用 `mergeApprovedPullRequestAndStartRegression`）合并评审 PR | 合并成功后进入 **`regression_testing`**（公开仓启动 tester；私有仓见 §8） |
 | R3 | 打回开发 | 填写**打回说明** → **打回开发** | 卡片回 **开发中**；`reviewRejectionCount +1`；developer runner 重启；评论记录打回原因 |
 | R4 | 打回说明必填 | 空打回说明 → 打回 | UI 报错"打回时请填写说明…" |
 | R5 | 打回因覆盖率不足 | 打回原因为覆盖率不达标 | Agent 必须先保证改动代码的覆盖率已覆盖，再为覆盖率最低文件编写单测，直到达标 |
@@ -144,7 +150,7 @@
 |---|------|------|------|
 | U1 | 进入 UAT | 回归测试通过，`requiresUat = true` | 卡片移至 **UAT** 列；等待人工确认 |
 | U2 | UAT 通过 | 点击卡片 ✅ **UAT 通过** | 进入 `pending_release` |
-| U3 | UAT 拒绝 | 点击卡片 ❌ **UAT 拒绝** | 返回 `regression_testing`；runner 重启 |
+| U3 | UAT 拒绝 | `POST /api/workflows/tasks/:id/uat-reject`，body `{"reason":"..."}`（或 Board 点击 ❌ **UAT 拒绝** 并输入原因） | 进入 **`regression_testing`**；**tester** runner 重新启动（`uatReject`） |
 | U4 | 不需要 UAT | `requiresUat = false` 的项目回归后 | 直接进入 `pending_release`，跳过 `pending_uat` |
 
 ---
@@ -159,19 +165,22 @@
 
 ---
 
-## 11. 异步关闭 closing → closed
+## 11. 关单：同步 close 与异步 close-async
 
-> 从 `pending_release` 移动到 `closed` 时触发异步 PR 检查 + 覆盖率更新流程。
+> **`closeTask`（`workflow-service.ts`）**：校验 release PR 已合并、`runCoverageAndUpdateAfterClose`（worktree 上跑测试与覆盖率），通过后 **`pending_release` → `closed`**。  
+> **看板默认**：`POST /api/workflows/tasks/:taskSessionId/close` — **同步**执行上述逻辑，**不进入** `closing`。  
+> **异步**：`POST /api/workflows/tasks/:taskSessionId/close-async` — 立即 **`pending_release` → `closing`** 并返回，后台再调用 `closeTask`；成功则 `closed`；失败则回退 **`pending_release`** 并追加评论。
 
 | # | 用例 | 步骤 | 期望 |
 |---|------|------|------|
-| CL1 | 正常关闭 | PR 已合并；点击 **标记完成** | 状态短暂进入 `closing`（板上显示 ⏳ 在 pending_release 列）；后台新建 worktree，运行单测，获取覆盖率报告，调用覆盖率更新接口；完成后状态变为 `closed`；临时 worktree 删除 |
-| CL2 | 覆盖率更新 | 关闭时运行单测覆盖率高于接口记录 | 接口更新项目最新覆盖率；history 新增一条记录 |
-| CL3 | 覆盖率未提升 | 运行结果低于已记录最高覆盖率 | 接口不更新；history 仍记录本次运行结果；任务仍可关闭 |
-| CL4 | 单测运行报错 | 运行测试中出现错误 | 阻止关闭；状态回退到 `pending_release`；弹窗显示错误详情 |
-| CL5 | 覆盖率未达标 | 运行结果低于项目要求覆盖率下限 | 阻止关闭；弹窗提示未达标原因 |
-| CL6 | 批量关闭 | 同时勾选多个 `pending_release` 任务关闭 | 整批视为一次操作；每个任务独立触发异步关闭；全部完成后各自变为 `closed` |
-| CL7 | closing 状态展示 | 任务处于 `closing` 时刷新 Board | 卡片仍显示在 **待发布** 列，带 ⏳ 徽章；不在独立列 |
+| CL1 | 正常关闭（Board 默认） | PR 已合并；点击 **标记完成**（`POST .../close`） | **不经过** `closing`；请求完成后 **`closed`**；覆盖率逻辑在**同一请求**内执行；worktree 清理见 `closeTask` / `runCoverageAndUpdateAfterClose` |
+| CL1a | 异步关单 | `POST .../close-async` | 立即 **`closing`**；后台成功则 **`closed`**；失败回退 **`pending_release`** 并写「关闭验证失败」类评论 |
+| CL2 | 覆盖率更新 | 关闭时运行单测覆盖率高于接口记录 | `updateProjectCoverage` 提升项目水位；`coverage/history` 有记录 |
+| CL3 | 覆盖率未提升 | 运行结果低于已记录最高覆盖率 | 水位不提升；history 仍可记本次（见 store 行为）；任务仍可关闭 |
+| CL4 | 单测运行报错 | 运行测试中出现错误 | **`close` 抛错**，HTTP 4xx；**同步路径不会**先进入 `closing` |
+| CL5 | 覆盖率未达标 | 低于要求下限 | 同上，**close 抛错**阻止关单 |
+| CL6 | 批量关闭 | 看板勾选多个 **待发布** 任务 **标记完成** | 对每个任务依次 `POST .../close`（同步）；各自独立成功/失败 |
+| CL7 | `closing` 展示 | 仅在使用 **`close-async`** 且后台尚未结束时刷新 Board | 卡片在 **待发布** 列带 ⏳、状态 **`closing`**；**纯 `/close` 路径无此状态** |
 
 ---
 
@@ -223,8 +232,8 @@
 
 | # | 用例 | 步骤 | 期望 |
 |---|------|------|------|
-| F1 | testing 中报告失败 | `POST /api/workflows/tasks/:id/testing/fail` body `{ "taskSessionId":"...", "summary":"...", "log":"..." }` 任务在 `testing` | 任务通过 `CompensationService` 返回 `in_progress`；评论记录失败摘要 |
-| F2 | regression 中报告失败 | 同上，任务在 `regression_testing` | 同 F1，返回 `in_progress` |
+| F1 | testing 中报告失败 | `POST /api/workflows/tasks/:taskSessionId/testing/fail`，body **`{ "summary": "...", "log": "..." }`**（task id 在 **URL**）；任务在 `testing` | `handleTestFailure` 将任务退回 **`in_progress`**；workflow 评论记录摘要 |
+| F2 | regression 中报告失败 | 同上，任务在 `regression_testing`（且非 `self-host-runner` 等由 CI 独占的路径） | 同 F1，退回 **`in_progress`** |
 | F3 | 非测试状态报告失败 | 任务在 `todo`/`review` 等状态调用 fail API | 报错：任务不在测试中 |
 
 ---
@@ -257,7 +266,7 @@ PR 已合并，点击关闭 → closing → 单测运行 → 覆盖率更新 →
 - 每一步板上列名变化正确
 - runner 在 `pending_release` 时停止
 - 覆盖率历史新增一条
-- `closing` 期间 worktree 创建后删除
+- 使用默认 **`/close`** 时无 `closing` 态；worktree/覆盖率在 `closeTask` 内完成
 
 ---
 
@@ -294,10 +303,10 @@ pending_release → 关闭流程（同公开仓库 §11）
 | # | 用例 | 步骤 | 期望 |
 |---|------|------|------|
 | EX1 | 非法状态流转 | `POST /api/workflows/tasks/:id/close` 任务在 `todo` | 报错：无效的状态流转 |
-| EX2 | 并发流转 | 两个客户端同时操作同一任务的状态 | 后者报错或返回最新状态（无数据损坏） |
+| EX2 | 并发请求 | 自动化脚本对 **`GET /health` 并发两次** 均成功（`kanban-full-test-runner`） | 服务可同时处理并发只读请求；若需验证「同一任务并发工作流写」需自写脚本 |
 | EX3 | 项目不存在 | 使用不存在的 projectId 创建任务 | 报错：项目不存在 |
 | EX4 | Sprint 不属于项目 | 使用其他项目的 sprintId | 报错：Sprint 与项目不匹配 |
-| EX5 | 数据库迁移 | 在旧版本数据库上启动新版本（含 `project_coverage_history` 表） | 新表自动 migrate；原有任务数据不丢失 |
+| EX5 | 数据库迁移 | 在旧版本 SQLite 上启动新版本（`JsonPlatformStore` 含 `project_coverage_history` 等表） | Schema 升级；`sqlite3` 可校验表存在（或依赖 **CV5** `GET /coverage/history`） |
 | EX6 | worktree 残留 | 关闭流程中途崩溃重启 | 重启后 worktree 目录不自动删除（需人工清理）；任务状态回退到 `pending_release` |
 | EX7 | CI 回调重复 | 同一任务已到 `pending_release` 后再次发送 ci-result | 报错：任务不在 `regression_testing` 状态 |
 
@@ -313,5 +322,8 @@ pending_release → 关闭流程（同公开仓库 §11）
 | 数据持久化 | `src/platform/json-platform-store.ts` |
 | Board UI | `src/app/board/page.tsx` |
 | 项目管理 UI | `src/app/projects/page.tsx` |
-| Lane/角色分配 | `src/platform/kanban-agents.ts` |
+| Lane 默认 runner / 分配 | `src/platform/kanban-role-assign.ts` |
+| Kanban prompt / lane 技能默认 | `src/platform/kanban-agents.ts` |
+| 配置与 `CTI_RUNNERS` | `src/config.ts` |
+| 全量用例自动化 | `scripts/kanban-full-test-runner.mjs`、`scripts/kanban-test-lib.mjs` |
 | 单元测试 | `src/__tests__/workflow-service.test.ts` |

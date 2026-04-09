@@ -12,7 +12,7 @@
     "dev:bridge": "NODE_OPTIONS='--experimental-sqlite' tsx src/main.ts",
     "dev:web": "NODE_OPTIONS='--experimental-sqlite' PATH=\"/opt/homebrew/bin:$HOME/.local/bin:$PATH\" next dev",
     "start": "NODE_OPTIONS='--experimental-sqlite' PATH=\"/opt/homebrew/bin:$HOME/.local/bin:$PATH\" next start",
-    "test": "CTI_HOME=$(mktemp -d) CTI_KANBAN_PLATFORM_DIR=cti-home CTI_RUNNERS='[{\"id\":\"test-runner\",\"runtime\":\"cursor\",\"label\":\"test-runner\",\"autoApprove\":true}]' NODE_OPTIONS='--experimental-sqlite' node --test --test-concurrency=1 --import tsx --test-timeout=15000 src/__tests__/*.test.ts",
+    "test": "CTI_HOME=$(mktemp -d) CTI_KANBAN_PLATFORM_DIR=$(mktemp -d) CTI_KANBAN_PLATFORM_DB_FILE=test.db CTI_KANBAN_CONFIRMATION_MAX_LOOPS=10 CTI_RUNNERS='[{\"id\":\"test-kanban-dev\",\"runtime\":\"cursor\",\"label\":\"kanban-dev\",\"autoApprove\":true},{\"id\":\"test-codex-senior\",\"runtime\":\"codex\",\"label\":\"codex-senior\",\"autoApprove\":true},{\"id\":\"test-claude-review\",\"runtime\":\"claude\",\"label\":\"claude-review\",\"autoApprove\":true},{\"id\":\"test-copilot-test\",\"runtime\":\"copilot\",\"label\":\"copilot-test\",\"autoApprove\":true}]' NODE_OPTIONS='--experimental-sqlite' node --test --test-concurrency=1 --import tsx --test-timeout=15000 src/__tests__/*.test.ts",
     "postinstall": "patch-package",
     "test:kanban:full": "node scripts/kanban-full-test-runner.mjs"
   },

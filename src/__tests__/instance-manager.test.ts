@@ -1,6 +1,5 @@
 import { beforeEach, describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import fs from 'node:fs';
 
 import { InstanceManager } from '../platform/instance-manager';
 import { sseEvent } from '../sse-utils';
@@ -9,13 +8,13 @@ import {
   createSprint,
   createTaskSession,
   createTestJsonPlatformStore,
-  PLATFORM_DIR,
+  resetTestPlatformDir,
   waitFor,
 } from './platform-test-helpers';
 
 describe('InstanceManager', () => {
   beforeEach(() => {
-    fs.rmSync(PLATFORM_DIR, { recursive: true, force: true });
+    resetTestPlatformDir();
     InstanceManager.resetForTests();
   });
 

@@ -26,6 +26,9 @@ import type {
  * Default: `<cwd>/data/platform` (project-local).
  * Override: `CTI_KANBAN_PLATFORM_DIR` — absolute path, or relative to `process.cwd()`.
  * Legacy (under bridge home): `CTI_KANBAN_PLATFORM_DIR=cti-home` → `$CTI_HOME/data/platform`.
+ *
+ * SQLite file name under that directory defaults to `platform.db`; override with
+ * `CTI_KANBAN_PLATFORM_DB_FILE` (e.g. `test.db` for unit/e2e so production `platform.db` is never used).
  */
 export function platformDataDir(): string {
   const raw = process.env.CTI_KANBAN_PLATFORM_DIR?.trim();
@@ -38,8 +41,23 @@ export function platformDataDir(): string {
   return path.join(process.cwd(), 'data', 'platform');
 }
 
+/** Basename only; default `platform.db`. Use `test.db` in automated tests via env. */
+export function platformDbFileName(): string {
+  const raw = process.env.CTI_KANBAN_PLATFORM_DB_FILE?.trim();
+  const name = raw || 'platform.db';
+  if (name.includes('/') || name.includes('\\') || name.includes('..')) {
+    throw new Error('CTI_KANBAN_PLATFORM_DB_FILE must be a basename without path separators');
+  }
+  return name;
+}
+
+/** Full path to the platform SQLite file (same rules as {@link JsonPlatformStore} default). */
+export function platformDbPath(): string {
+  return path.join(platformDataDir(), platformDbFileName());
+}
+
 function defaultDbPath(): string {
-  return path.join(platformDataDir(), 'platform.db');
+  return platformDbPath();
 }
 
 function ensureDir(dirPath: string): void {
@@ -67,7 +85,7 @@ export function createApprovalQueueKey(taskId: string): string {
 }
 
 export type JsonPlatformStoreOptions = {
-  /** Defaults to `<cwd>/data/platform/platform.db`. Use `:memory:` for isolated tests. */
+  /** Defaults to {@link platformDbPath} (`CTI_KANBAN_PLATFORM_DB_FILE`, default `platform.db`). Use `:memory:` for isolated tests. */
   dbPath?: string;
 };
 

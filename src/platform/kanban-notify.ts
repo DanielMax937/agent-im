@@ -55,6 +55,21 @@ export function normalizeTelegramOutboundText(text: string): string {
   return text.replace(/\n{2,}/g, '\n');
 }
 
+/** Matches the opening line of `src/prompts/kanban/system-check.md` (after trim). */
+const KANBAN_SYSTEM_CHECK_CONTENT_PREFIX = '[Kanban system check';
+
+/**
+ * Omit Telegram fan-out for automated system-check user prompts (see `system-check.md`).
+ * Those lines use `source: workflow` + `role: user` and are noisy in chat; other `workflow/user`
+ * lines (e.g. kickoff directives) still send.
+ */
+export function shouldSkipKanbanTelegramConversationEntry(
+  entry: Pick<TaskConversationEntry, 'role' | 'source' | 'content'>,
+): boolean {
+  if (entry.source !== 'workflow' || entry.role !== 'user') return false;
+  return entry.content.trimStart().startsWith(KANBAN_SYSTEM_CHECK_CONTENT_PREFIX);
+}
+
 function kanbanTelegramDispatcher(): Dispatcher | undefined {
   const raw = process.env.CTI_KANBAN_TELEGRAM_PROXY?.trim();
   if (!raw) {
@@ -69,42 +84,88 @@ function kanbanTelegramDispatcher(): Dispatcher | undefined {
   return memoProxyAgent;
 }
 
+/** Minimum delay between consecutive Kanban `sendMessage` calls (global queue). */
+export const KANBAN_TELEGRAM_MIN_SEND_INTERVAL_MS = 5000;
+
+const telegramSendQueue: Array<() => Promise<void>> = [];
+let telegramSendDraining = false;
+
+/**
+ * Serializes all outbound Kanban Telegram `sendMessage` traffic: at most one message every
+ * {@link KANBAN_TELEGRAM_MIN_SEND_INTERVAL_MS} ms (gap applies between sends, not after the last).
+ */
+function enqueueKanbanTelegramSend(job: () => Promise<void>): Promise<void> {
+  return new Promise((resolve, reject) => {
+    telegramSendQueue.push(async () => {
+      try {
+        await job();
+        resolve();
+      } catch (e) {
+        reject(e);
+      }
+    });
+    void drainKanbanTelegramSendQueue();
+  });
+}
+
+async function drainKanbanTelegramSendQueue(): Promise<void> {
+  if (telegramSendDraining) return;
+  telegramSendDraining = true;
+  try {
+    while (telegramSendQueue.length > 0) {
+      const job = telegramSendQueue.shift()!;
+      await job();
+      if (telegramSendQueue.length > 0) {
+        await new Promise((r) => setTimeout(r, KANBAN_TELEGRAM_MIN_SEND_INTERVAL_MS));
+      }
+    }
+  } finally {
+    telegramSendDraining = false;
+    if (telegramSendQueue.length > 0) {
+      void drainKanbanTelegramSendQueue();
+    }
+  }
+}
+
 /**
  * Outbound Telegram only (`sendMessage`); no getUpdates / long polling.
  * Optional env: `CTI_KANBAN_TELEGRAM_BOT_TOKEN`, `CTI_KANBAN_TELEGRAM_CHAT_ID`,
  * optional `CTI_KANBAN_TELEGRAM_MESSAGE_THREAD_ID` (forum topic),
  * optional `CTI_KANBAN_TELEGRAM_PROXY` (HTTP(S) proxy for this send only; omit = direct).
+ * Sends are rate-limited globally (see {@link KANBAN_TELEGRAM_MIN_SEND_INTERVAL_MS}).
  */
 export async function notifyKanbanTelegram(message: string): Promise<void> {
   const token = process.env.CTI_KANBAN_TELEGRAM_BOT_TOKEN?.trim();
   const chatId = process.env.CTI_KANBAN_TELEGRAM_CHAT_ID?.trim();
   if (!token || !chatId) return;
 
-  const url = `https://api.telegram.org/bot${token}/sendMessage`;
-  const body: Record<string, unknown> = {
-    chat_id: chatId,
-    text: normalizeTelegramOutboundText(message).slice(0, 4000),
-    disable_web_page_preview: true,
-  };
-  const thread = process.env.CTI_KANBAN_TELEGRAM_MESSAGE_THREAD_ID?.trim();
-  if (thread && /^\d+$/.test(thread)) {
-    body.message_thread_id = Number(thread);
-  }
+  return enqueueKanbanTelegramSend(async () => {
+    const url = `https://api.telegram.org/bot${token}/sendMessage`;
+    const body: Record<string, unknown> = {
+      chat_id: chatId,
+      text: normalizeTelegramOutboundText(message).slice(0, 4000),
+      disable_web_page_preview: true,
+    };
+    const thread = process.env.CTI_KANBAN_TELEGRAM_MESSAGE_THREAD_ID?.trim();
+    if (thread && /^\d+$/.test(thread)) {
+      body.message_thread_id = Number(thread);
+    }
 
-  const dispatcher = kanbanTelegramDispatcher();
-  const res = await fetch(url, {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify(body),
-    ...(dispatcher ? { dispatcher } : {}),
+    const dispatcher = kanbanTelegramDispatcher();
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(body),
+      ...(dispatcher ? { dispatcher } : {}),
+    });
+    if (!res.ok) {
+      const t = await res.text();
+      getKanbanLogger().warn(
+        { httpStatus: res.status, bodyPreview: t.slice(0, 800) },
+        'Kanban Telegram sendMessage failed',
+      );
+    }
   });
-  if (!res.ok) {
-    const t = await res.text();
-    getKanbanLogger().warn(
-      { httpStatus: res.status, bodyPreview: t.slice(0, 800) },
-      'Kanban Telegram sendMessage failed',
-    );
-  }
 }
 
 /**
@@ -170,21 +231,23 @@ export async function notifyKanbanTelegramToolApproval(params: {
     payload.message_thread_id = Number(thread);
   }
 
-  const dispatcher = kanbanTelegramDispatcher();
-  const url = `https://api.telegram.org/bot${token}/sendMessage`;
-  const res = await fetch(url, {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify(payload),
-    ...(dispatcher ? { dispatcher } : {}),
+  return enqueueKanbanTelegramSend(async () => {
+    const dispatcher = kanbanTelegramDispatcher();
+    const url = `https://api.telegram.org/bot${token}/sendMessage`;
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(payload),
+      ...(dispatcher ? { dispatcher } : {}),
+    });
+    if (!res.ok) {
+      const t = await res.text();
+      getKanbanLogger().warn(
+        { httpStatus: res.status, bodyPreview: t.slice(0, 800) },
+        'Kanban Telegram tool approval sendMessage failed',
+      );
+    }
   });
-  if (!res.ok) {
-    const t = await res.text();
-    getKanbanLogger().warn(
-      { httpStatus: res.status, bodyPreview: t.slice(0, 800) },
-      'Kanban Telegram tool approval sendMessage failed',
-    );
-  }
 }
 
 /** Ack a callback query so Telegram removes the loading spinner. */
@@ -204,6 +267,7 @@ export async function answerKanbanTelegramCallbackQuery(
 /**
  * Fan-out **every** persisted conversation line (workflow, compensation, agent user/assistant, etc.)
  * when Telegram env is configured. Set `CTI_KANBAN_TELEGRAM_SKIP_ASSISTANT=1` to omit assistant replies (noise).
+ * Automated system-check prompts (`[Kanban system check…]`, tagged `workflow`/`user`) are not sent to Telegram.
  */
 export function scheduleConversationEntryTelegram(
   issueId: string,
@@ -212,6 +276,9 @@ export function scheduleConversationEntryTelegram(
   const token = process.env.CTI_KANBAN_TELEGRAM_BOT_TOKEN?.trim();
   const chatId = process.env.CTI_KANBAN_TELEGRAM_CHAT_ID?.trim();
   if (!token || !chatId) return;
+  if (shouldSkipKanbanTelegramConversationEntry(entry)) {
+    return;
+  }
   if (process.env.CTI_KANBAN_TELEGRAM_SKIP_ASSISTANT === '1' && entry.role === 'assistant') {
     return;
   }

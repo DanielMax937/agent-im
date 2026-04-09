@@ -60,8 +60,15 @@ function maskValue(value: unknown): unknown {
 }
 
 function logDirectory(): string {
-  // Next.js API / server: Kanban logs go with fixed platform home (see getKanbanPlatformCtiHome).
+  // Next.js sets NEXT_RUNTIME on the dev server. Bridge daemon / slave processes spawned by Next
+  // inherit it but set CTI_HOME to a per-bridge directory — they must log under that home, not
+  // ~/.claude-to-im/kanban/logs. The Kanban web app itself has no CTI_HOME (only CTI_BOT_NAME=kanban
+  // from kanban/config.env), so it still uses getKanbanPlatformCtiHome() below.
   if (process.env.NEXT_RUNTIME === 'nodejs') {
+    const explicit = process.env.CTI_HOME?.trim();
+    if (explicit) {
+      return path.join(path.resolve(explicit), 'logs');
+    }
     return path.join(getKanbanPlatformCtiHome(), 'logs');
   }
   return path.join(getCtiHome(), 'logs');

@@ -15,6 +15,7 @@
 #   BASE_URL         default: http://127.0.0.1:3300
 #   E2E_PROJECT_ID   default: todolist
 #   E2E_TIMEOUT      poll timeout in seconds, default: 300
+#   CTI_KANBAN_PLATFORM_DB_FILE  default test.db when script starts dev (avoids platform.db)
 #   E2E_SKIP_GH_REPO=1 — use local bare origin + placeholder SCM (no GitHub API; gh 404 on auto-advance)
 #   E2E_GH_ORG       — if set, gh repo create under this org; else your user (gh api user)
 #   E2E_GH_REPO_PREFIX — default agent-im-e2e- (list/delete: gh repo list | grep agent-im-e2e)
@@ -217,8 +218,12 @@ else
   GIT_EXE="${CTI_GIT_EXECUTABLE:-$(command -v git 2>/dev/null || echo "git")}"
   E2E_PLATFORM_DIR="${E2E_PLATFORM_DIR:-$(mktemp -d)}"
   export E2E_PLATFORM_DIR
-  info "Isolated platform store: $E2E_PLATFORM_DIR"
-  (cd "$(dirname "$0")/../.." && CTI_KANBAN_PLATFORM_DIR="$E2E_PLATFORM_DIR" CTI_KANBAN_USE_WORKTREE=0 CTI_GIT_EXECUTABLE="$GIT_EXE" npm run dev > /tmp/agent-im-e2e.log 2>&1) &
+  CTI_KANBAN_PLATFORM_DB_FILE="${CTI_KANBAN_PLATFORM_DB_FILE:-test.db}"
+  export CTI_KANBAN_PLATFORM_DB_FILE
+  CTI_KANBAN_CONFIRMATION_MAX_LOOPS="${CTI_KANBAN_CONFIRMATION_MAX_LOOPS:-10}"
+  export CTI_KANBAN_CONFIRMATION_MAX_LOOPS
+  info "Isolated platform store: $E2E_PLATFORM_DIR (db file: $CTI_KANBAN_PLATFORM_DB_FILE)"
+  (cd "$(dirname "$0")/../.." && CTI_KANBAN_PLATFORM_DIR="$E2E_PLATFORM_DIR" CTI_KANBAN_PLATFORM_DB_FILE="$CTI_KANBAN_PLATFORM_DB_FILE" CTI_KANBAN_CONFIRMATION_MAX_LOOPS="$CTI_KANBAN_CONFIRMATION_MAX_LOOPS" CTI_KANBAN_USE_WORKTREE=0 CTI_GIT_EXECUTABLE="$GIT_EXE" npm run dev > /tmp/agent-im-e2e.log 2>&1) &
   NPM_PID=$!
   # Poll up to 30s for the server to become ready
   STARTED=0

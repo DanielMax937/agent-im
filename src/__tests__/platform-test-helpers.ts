@@ -2,6 +2,8 @@ import assert from 'node:assert/strict';
 import type { Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 
+import fs from 'node:fs';
+
 import { JsonPlatformStore, platformDataDir } from '../platform/json-platform-store';
 import type { GitService } from '../platform/git-service';
 import type { InstanceManager } from '../platform/instance-manager';
@@ -11,17 +13,31 @@ import type {
   PullRequestRef,
   ScmClient,
 } from '../platform/scm-client';
-import { KANBAN_AGENT_LANES_REQUIRING_DEFAULT_RUNNER } from '../platform/kanban-role-assign';
 import type {
   AgentInstanceRecord,
   KanbanAgentKind,
   PendingApprovalRecord,
   Project,
+  ProjectAgentProfile,
   Sprint,
   TaskSession,
 } from '../platform/types';
 
 export const PLATFORM_DIR = platformDataDir();
+
+(function assertSafeTestPlatformDir() {
+  const raw = process.env.CTI_KANBAN_PLATFORM_DIR?.trim();
+  if (raw === 'cti-home' || raw === 'legacy') {
+    throw new Error(
+      'Unit tests must not use CTI_KANBAN_PLATFORM_DIR=cti-home or legacy (that targets ~/.claude-to-im/kanban/data/platform). Use CTI_KANBAN_PLATFORM_DIR=$(mktemp -d) and CTI_KANBAN_PLATFORM_DB_FILE=test.db as in npm test.',
+    );
+  }
+})();
+
+/** Clears the isolated platform directory (npm test uses a temp CTI_KANBAN_PLATFORM_DIR + test.db). */
+export function resetTestPlatformDir(): void {
+  fs.rmSync(PLATFORM_DIR, { recursive: true, force: true });
+}
 
 /** Isolated store for tests (avoids SQLite file locks vs `rmSync` on the default `platform.db`). */
 export function createTestJsonPlatformStore(): JsonPlatformStore {
@@ -205,17 +221,30 @@ export class FakeInstanceManager {
 }
 
 /**
- * Kanban lane default runner id for tests. Must match `CTI_RUNNERS` in `package.json` `npm test`
- * (`test-runner` → runtime `cursor`, `autoApprove: true`) so `resolveRuntimeForPlatformInstance` /
- * `resolveProvider` see a real profile.
+ * Kanban lane → runner id; must match `CTI_RUNNERS` in `package.json` `npm test`.
+ * - 开发: Cursor (`test-kanban-dev`) · 前置测试: Copilot (`test-copilot-test`)
+ * - 高级开发: Codex · 评审: Claude · 功能测试: Copilot
  */
-export const TEST_DEFAULT_RUNNER_ID = 'test-runner';
+export const TEST_KANBAN_LANE_RUNNER_IDS: Partial<Record<KanbanAgentKind, string>> = {
+  'agent-dev': 'test-kanban-dev',
+  'pre-tester': 'test-copilot-test',
+  'codex-senior': 'test-codex-senior',
+  'claude-review': 'test-claude-review',
+  'copilot-test': 'test-copilot-test',
+};
+
+/** Primary Cursor profile for dev lanes; kept for tests that pin a single Kanban runner id. */
+export const TEST_DEFAULT_RUNNER_ID = 'test-kanban-dev';
+
+/** Legacy `Project.agents` defaults: developer / reviewer / tester all use Cursor runtime. */
+const DEFAULT_TEST_PROJECT_AGENTS: ProjectAgentProfile[] = [
+  { id: 'test-profile-developer', name: 'Developer', runtime: 'cursor', role: 'developer' },
+  { id: 'test-profile-reviewer', name: 'Reviewer', runtime: 'cursor', role: 'reviewer' },
+  { id: 'test-profile-tester', name: 'Tester', runtime: 'cursor', role: 'tester' },
+];
 
 export function createProject(store: JsonPlatformStore, overrides: Partial<Project> = {}): Project {
   const now = new Date().toISOString();
-  const defaultKanbanRunners: Partial<Record<KanbanAgentKind, string>> = Object.fromEntries(
-    KANBAN_AGENT_LANES_REQUIRING_DEFAULT_RUNNER.map((k) => [k, TEST_DEFAULT_RUNNER_ID]),
-  ) as Partial<Record<KanbanAgentKind, string>>;
   return store.upsertProject({
     id: overrides.id ?? 'project-1',
     name: overrides.name ?? 'agent-im',
@@ -231,8 +260,9 @@ export function createProject(store: JsonPlatformStore, overrides: Partial<Proje
     },
     // Disable coverage command in tests to avoid running real npm test.
     coverageCommand: overrides.coverageCommand ?? '',
-    agents: overrides.agents ?? [],
-    kanbanRoleRunners: overrides.kanbanRoleRunners !== undefined ? overrides.kanbanRoleRunners : defaultKanbanRunners,
+    agents: overrides.agents ?? DEFAULT_TEST_PROJECT_AGENTS,
+    kanbanRoleRunners:
+      overrides.kanbanRoleRunners !== undefined ? overrides.kanbanRoleRunners : { ...TEST_KANBAN_LANE_RUNNER_IDS },
     ...(overrides.isPrivate !== undefined ? { isPrivate: overrides.isPrivate } : {}),
     createdAt: overrides.createdAt ?? now,
     updatedAt: overrides.updatedAt ?? now,
@@ -283,6 +313,7 @@ export function createTaskSession(
     pullRequestNumber: overrides.pullRequestNumber,
     releasePullRequestUrl: overrides.releasePullRequestUrl,
     releasePullRequestNumber: overrides.releasePullRequestNumber,
+    reviewRejectionCount: overrides.reviewRejectionCount,
     messageQueueKey: overrides.messageQueueKey ?? 'task:ISSUE-101:inbox',
     approvalQueueKey: overrides.approvalQueueKey ?? 'task:ISSUE-101:approvals',
     lastError: overrides.lastError,

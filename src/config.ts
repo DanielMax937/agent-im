@@ -399,20 +399,25 @@ const IM_INSTANCE_CHANNELS: ImInstanceChannel[] = ["telegram", "discord", "feish
 const IM_BASE_CHANNEL_SET = new Set<string>(IM_INSTANCE_CHANNELS);
 
 /**
- * When `imBot` is set, IM platform flags in `CTI_ENABLED_CHANNELS` are derived from that bot.
- * Non-IM entries (e.g. legacy `agent`) are preserved from `config.enabledChannels`.
+ * When `imBot` is set, the bot's primary `channel` is always on; plus any IM channels listed in
+ * `CTI_ENABLED_CHANNELS` (e.g. `telegram,discord`) so multi-channel bridges work. Non-IM entries
+ * (e.g. legacy `agent`) are preserved from `config.enabledChannels`.
  */
 export function effectiveEnabledChannels(config: Config): string[] {
   const bot = config.imBot;
   if (!bot) {
     return [...config.enabledChannels];
   }
-  const fromBots = new Set<string>();
+  const out = new Set<string>();
   if (bot.enabled !== false) {
-    fromBots.add(bot.channel);
+    out.add(bot.channel);
+  }
+  for (const c of config.enabledChannels) {
+    if (IM_BASE_CHANNEL_SET.has(c)) out.add(c);
   }
   const legacyNonIm = config.enabledChannels.filter((c) => !IM_BASE_CHANNEL_SET.has(c));
-  return Array.from(new Set([...fromBots, ...legacyNonIm])).sort();
+  for (const c of legacyNonIm) out.add(c);
+  return Array.from(out).sort();
 }
 
 function pickRunnerBoolRow(o: Record<string, unknown>, key: string): boolean | undefined {

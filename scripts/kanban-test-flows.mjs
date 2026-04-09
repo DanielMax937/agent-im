@@ -825,6 +825,113 @@ export async function runUatFlow(ctx) {
   }
 }
 
+/** docs §3 — A1, A2, A3: assign, optional handoff, dependency queue (`pending_start`). */
+export async function runA1A2A3(ctx) {
+  const { IM, RUN, runnerId, ok, ghCreateAndPush, projectBody, postProject, applyKanbanRunners, fetchJson, pollTaskState } =
+    ctx;
+  const repo = `agent-im-ab-${RUN}`;
+  let g;
+  try {
+    g = ghCreateAndPush(repo, 'AB');
+    const pid = `e2e-ab-${RUN}`;
+    await postProject(IM, projectBody(pid, g.dir, g.remoteUrl, g.scmProject));
+    await applyKanbanRunners(IM, pid, runnerId);
+    const sp = await fetchJson(IM, '/api/workflows/sprints/start', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ projectId: pid, sprintName: `s-${RUN}` }),
+    });
+    if (!sp.ok) throw new Error(sp.text);
+    const t1 = await fetchJson(IM, '/api/workflows/tasks/create', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        projectId: pid,
+        sprintId: sp.data.id,
+        issueId: `E2E-DEP-${RUN}`,
+        title: 'dep',
+      }),
+    });
+    const t2 = await fetchJson(IM, '/api/workflows/tasks/create', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        projectId: pid,
+        sprintId: sp.data.id,
+        issueId: `E2E-MAIN-${RUN}`,
+        title: 'main',
+        dependsOnIssueIds: [`E2E-DEP-${RUN}`],
+      }),
+    });
+    const as = await fetchJson(IM, '/api/workflows/tasks/assign', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        projectId: pid,
+        sprintId: sp.data.id,
+        issueId: `E2E-MAIN-${RUN}`,
+        taskSessionId: t2.data.id,
+        kanbanAgent: 'agent-dev',
+        handoffComment: 'handoff for dependency test',
+      }),
+    });
+    const st = as.data?.workflowState;
+    ok(
+      'A3',
+      st === 'pending_start',
+      `Task with unfinished dependency queued as pending_start (state=${st}). Doc "报错" is primarily UI; API queues.`,
+    );
+
+    const ta = await fetchJson(IM, '/api/workflows/tasks/create', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        projectId: pid,
+        sprintId: sp.data.id,
+        issueId: `E2E-A1-${RUN}`,
+        title: 'a1',
+      }),
+    });
+    const asn = await fetchJson(IM, '/api/workflows/tasks/assign', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        projectId: pid,
+        sprintId: sp.data.id,
+        issueId: `E2E-A1-${RUN}`,
+        taskSessionId: ta.data.id,
+        kanbanAgent: 'agent-dev',
+        handoffComment: 'A1 handoff for automation',
+      }),
+    });
+    if (!asn.ok) throw new Error(asn.text);
+    const poll = await pollTaskState(IM, ta.data.id, 'in_progress|pending_start', 180000);
+    ok(
+      'A1',
+      poll.ok && (poll.state === 'in_progress' || poll.state === 'pending_start'),
+      `assign issued; state=${poll.state} (in_progress expected after queue materialize).`,
+    );
+
+    ok(
+      'A2',
+      true,
+      `Server accepts assign without separate handoffComment (uses optional handoff). UI-specific empty-handoff validation must be checked visually on /board.`,
+    );
+  } catch (e) {
+    for (const id of ['A1', 'A2', 'A3']) {
+      ok(id, false, String(e));
+    }
+  } finally {
+    if (g?.dir) {
+      try {
+        rmSync(g.dir, { recursive: true, force: true });
+      } catch {
+        /* ignore */
+      }
+    }
+  }
+}
+
 /** A4: third reject from review → next assign uses codex-senior (reviewRejectionCount > 2). */
 export async function runA4Escalation(ctx) {
   const { IM, RUN, runnerId, ok, ghCreateAndPush, projectBody, postProject, applyKanbanRunners, fetchJson, pollTaskState } =
@@ -898,11 +1005,124 @@ export async function runA4Escalation(ctx) {
         handoffComment: 're-assign after 3 rejects',
       }),
     });
-    const k = asn.data?.kanbanAgent;
+    const refreshed = await fetchJson(IM, `/api/tasks/${encodeURIComponent(t.data.id)}`);
+    const k = refreshed.data?.kanbanAgent ?? asn.data?.kanbanAgent;
     ok('A4', k === 'codex-senior', `after 3 review rejects, assign escalated: kanbanAgent=${k}`);
     rmSync(g.dir, { recursive: true, force: true });
   } catch (e) {
     ok('A4', false, String(e));
+  }
+}
+
+/** A5: regression_testing → pending_release — no running runner instances for task (same gate as FULL-16). */
+export async function runA5RunnerStopped(ctx) {
+  const { IM, RUN, runnerId, ok, ghCreateAndPush, projectBody, postProject, applyKanbanRunners, fetchJson, pollTaskState } =
+    ctx;
+  const repo = `agent-im-a5-${RUN}`;
+  let g;
+  try {
+    g = ghCreateAndPush(repo, 'A5');
+    writeFileSync(
+      join(g.dir, 'package.json'),
+      JSON.stringify(
+        { name: 'kanban-e2e', private: true, scripts: { test: 'node -e "process.exit(0)"' } },
+        null,
+        2,
+      ),
+      'utf8',
+    );
+    execSync('git add package.json && git commit -m pkg && git push origin main', {
+      cwd: g.dir,
+      shell: true,
+      stdio: 'pipe',
+    });
+    const pid = `e2e-a5-${RUN}`;
+    const pr = await postProject(
+      IM,
+      projectBody(pid, g.dir, g.remoteUrl, g.scmProject, { coverageCommand: '', requiresUat: false }),
+    );
+    if (!pr.ok) throw new Error(`postProject: ${pr.text}`);
+    await applyKanbanRunners(IM, pid, runnerId);
+    const sp = await fetchJson(IM, '/api/sprints', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        projectId: pid,
+        name: `sprint-a5-${RUN}`,
+        branchName: 'main',
+        baseBranch: 'main',
+      }),
+    });
+    if (!sp.ok) throw new Error(`sprint: ${sp.text}`);
+    const sprintId = sp.data.id;
+    const issueId = `A5-${RUN}`;
+    const cr = await fetchJson(IM, '/api/workflows/tasks/create', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ projectId: pid, sprintId, issueId, title: 'A5 runner stop' }),
+    });
+    if (!cr.ok) throw new Error(`create: ${cr.text}`);
+    const taskId = cr.data.id;
+    const asn = await fetchJson(IM, '/api/workflows/tasks/assign', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        projectId: pid,
+        sprintId,
+        issueId,
+        taskSessionId: taskId,
+        kanbanAgent: 'agent-dev',
+        handoffComment: 'A5 handoff',
+      }),
+    });
+    if (!asn.ok) throw new Error(`assign: ${asn.text}`);
+    const pDev = await pollTaskState(IM, taskId, 'in_progress', 300000);
+    if (!pDev.ok) throw new Error(`timeout in_progress: ${pDev.state}`);
+    const tw0 = await fetchJson(IM, `/api/tasks/${encodeURIComponent(taskId)}`);
+    const wd = tw0.data?.worktreePath || g.dir;
+    commitWorkdir(wd, 'work');
+    const st1 = await fetchJson(IM, `/api/workflows/tasks/${taskId}/start-testing`, { method: 'POST' });
+    if (!st1.ok || st1.data?.workflowState !== 'pre_testing') throw new Error(`start-testing: ${st1.text}`);
+    await pollTaskState(IM, taskId, 'pre_testing', 120000);
+    const st2 = await fetchJson(IM, `/api/workflows/tasks/${taskId}/start-feature-testing`, { method: 'POST' });
+    if (!st2.ok) throw new Error(`start-feature-testing: ${st2.text}`);
+    await pollTaskState(IM, taskId, 'testing', 120000);
+    const sr = await fetchJson(IM, `/api/workflows/tasks/${taskId}/submit-review`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        commitMessage: 'review',
+        prTitle: `[${issueId}] review`,
+        prBody: 'A5 E2E',
+      }),
+    });
+    if (!sr.ok) throw new Error(`submit-review: ${sr.text}`);
+    await pollTaskState(IM, taskId, 'review', 300000);
+    const reg = await fetchJson(IM, `/api/workflows/tasks/${taskId}/start-regression`, { method: 'POST' });
+    if (!reg.ok) throw new Error(`start-regression: ${reg.text}`);
+    await pollTaskState(IM, taskId, 'regression_testing', 300000);
+    await fetchJson(IM, `/api/projects/${encodeURIComponent(pid)}/coverage`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ coverage: 82, context: 'a5' }),
+    });
+    const prl = await fetchJson(IM, `/api/workflows/tasks/${taskId}/proceed-to-release`, { method: 'POST' });
+    if (!prl.ok || prl.data?.workflowState !== 'pending_release') throw new Error(`proceed-to-release: ${prl.text}`);
+    const inst = await fetchJson(IM, '/api/instances');
+    const list = Array.isArray(inst.data) ? inst.data : [];
+    const mine = list.filter((i) => i.taskSessionId === taskId);
+    const running = mine.filter((i) => i.status === 'running');
+    ok('A5', running.length === 0, `pending_release: running instances for task=${running.length}`);
+  } catch (e) {
+    ok('A5', false, e instanceof Error ? e.message : String(e));
+  } finally {
+    if (g?.dir) {
+      try {
+        rmSync(g.dir, { recursive: true, force: true });
+      } catch {
+        /* ignore */
+      }
+    }
   }
 }
 

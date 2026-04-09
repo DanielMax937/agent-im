@@ -2,8 +2,8 @@ import type { AgentRole, TaskSession, TaskWorkflowState } from './types';
 import { renderPrompt } from '../prompts/loader';
 
 export function kanbanConfirmationMaxLoops(): number {
-  const raw = Number(process.env.CTI_KANBAN_CONFIRMATION_MAX_LOOPS ?? '100');
-  return Number.isFinite(raw) && raw > 0 ? Math.floor(raw) : 100;
+  const raw = Number(process.env.CTI_KANBAN_CONFIRMATION_MAX_LOOPS ?? '10');
+  return Number.isFinite(raw) && raw > 0 ? Math.floor(raw) : 10;
 }
 
 const WORKFLOW_STATE_HINT: Record<TaskWorkflowState, string> = {

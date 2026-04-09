@@ -5,6 +5,7 @@ import {
   formatKanbanToolInputForTelegram,
   isKanbanTelegramApprovalButtonsEnabled,
   parseKanbanPermCallbackData,
+  shouldSkipKanbanTelegramConversationEntry,
 } from '../platform/kanban-notify';
 
 describe('kanban-notify', () => {
@@ -26,6 +27,41 @@ describe('kanban-notify', () => {
   it('formats tool input as JSON, not [object Object]', () => {
     assert.equal(formatKanbanToolInputForTelegram({ cmd: 'ls' }).includes('cmd'), true);
     assert.equal(formatKanbanToolInputForTelegram('plain'), 'plain');
+  });
+
+  it('skips Telegram only for workflow user lines that open the system-check prompt', () => {
+    assert.equal(
+      shouldSkipKanbanTelegramConversationEntry({
+        role: 'user',
+        source: 'workflow',
+        content: '[Kanban system check — respond in your next assistant message]\n\nCurrent workflow state:',
+      }),
+      true,
+    );
+    assert.equal(
+      shouldSkipKanbanTelegramConversationEntry({
+        role: 'user',
+        source: 'workflow',
+        content: '  \n[Kanban system check — x]',
+      }),
+      true,
+    );
+    assert.equal(
+      shouldSkipKanbanTelegramConversationEntry({
+        role: 'user',
+        source: 'workflow',
+        content: 'Begin work on task ISSUE-1: title.',
+      }),
+      false,
+    );
+    assert.equal(
+      shouldSkipKanbanTelegramConversationEntry({
+        role: 'assistant',
+        source: 'workflow',
+        content: '[Kanban system check — copied by mistake]',
+      }),
+      false,
+    );
   });
 
   it('parses kperm callback_data', () => {

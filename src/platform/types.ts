@@ -353,7 +353,9 @@ export interface AssignTaskInput {
   runtimeProfileId?: string;
   role?: AgentRole;
   /**
-   * When set, assigns an existing **todo** task: creates branch/worktree and starts the mapped runner.
+   * When set, assigns an existing **todo** task (queued `pending_start` → `in_progress`) or **re-assigns**
+   * the developer lane on an **in_progress** task (same escalation rules as todo pick-up, including
+   * codex-senior when `reviewRejectionCount > 2` and `kanbanAgent` is `agent-dev`).
    * Omit for legacy “create + assign developer in one shot”.
    */
   taskSessionId?: string;

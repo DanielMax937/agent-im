@@ -13,7 +13,12 @@
  *   CDS_BASE_URL            default http://127.0.0.1:9223
  *   KANBAN_E2E_ORG          optional GitHub org for gh repo create; else `gh api user`
  *   CTI_KANBAN_PLATFORM_DIR optional absolute/relative platform dir for EX5 sqlite check (see JsonPlatformStore)
+ *   CTI_KANBAN_CONFIRMATION_MAX_LOOPS  must match the running agent-im process (code default 10; `npm test` / e2e auto-dev set 10)
  *   KANBAN_FULL_STRICT=1    exit 1 if any testcase FAIL (default: exit 0 after completing the run)
+ *   KANBAN_FULL_ONLY=p0    run only docs §0 (P1–P6 + P2-ui/P3-ui); skips runner list / later sections
+ *   KANBAN_FULL_ONLY=p1    run only docs §1 Sprint (SP1–SP3); requires runner + agent-im + gh
+ *   KANBAN_FULL_ONLY=p2    run only docs §2 todo (T1–T4); requires runner + agent-im + gh + CDS (T4 UI)
+ *   KANBAN_FULL_ONLY=p3    run only docs §3 in_progress (A1–A5); gh + long polls (see kanban-test-flows)
  */
 import { execFileSync, execSync } from 'node:child_process';
 import { writeFileSync, rmSync } from 'node:fs';
@@ -32,7 +37,12 @@ import {
   ensureOutDir,
   resolveGhOwner,
 } from './kanban-test-lib.mjs';
-import { runAllIntegrationFlows } from './kanban-test-flows.mjs';
+import {
+  runAllIntegrationFlows,
+  runA1A2A3,
+  runA4Escalation,
+  runA5RunnerStopped,
+} from './kanban-test-flows.mjs';
 
 const IM = process.env.AGENT_IM_BASE_URL || 'http://127.0.0.1:3300';
 const CDS = process.env.CDS_BASE_URL || 'http://127.0.0.1:9223';
@@ -130,8 +140,8 @@ async function runP_Prefix() {
   return g;
 }
 
-// ─── SP / T / CV / EX / F (reuse gh fixture) ──────────────────────────────
-async function runSprintAndTasks(runnerId) {
+/** docs/KANBAN-TESTCASES.md §1 — SP1, SP2, SP3 */
+async function runSprintSectionOnly(runnerId) {
   const repo = `agent-im-sp-${RUN}`;
   let local;
   try {
@@ -155,7 +165,24 @@ async function runSprintAndTasks(runnerId) {
       body: JSON.stringify({ projectId: pid, sprintName }),
     });
     ok('SP3', !dup.ok && dup.status >= 400, !dup.ok ? `duplicate rejected HTTP ${dup.status}` : dup.text);
+  } catch (e) {
+    for (const id of ['SP1', 'SP2', 'SP3']) {
+      ok(id, false, String(e));
+    }
+  } finally {
+    if (local) {
+      try {
+        rmSync(local, { recursive: true, force: true });
+      } catch {
+        /* ignore */
+      }
+    }
+  }
+}
 
+/** docs/KANBAN-TESTCASES.md §2 — T1, T2, T3, T4 */
+async function runTodoSectionOnly(runnerId) {
+  try {
     const tr = `agent-im-t-${RUN}`;
     const tg = ghCreateAndPush(tr, 'T tasks');
     const tpid = `e2e-t-${RUN}`;
@@ -210,17 +237,16 @@ async function runSprintAndTasks(runnerId) {
 
     rmSync(tg.dir, { recursive: true, force: true });
   } catch (e) {
-    for (const id of ['SP1', 'SP2', 'SP3', 'T1', 'T2', 'T3', 'T4']) {
+    for (const id of ['T1', 'T2', 'T3', 'T4']) {
       ok(id, false, String(e));
     }
-  } finally {
-    if (local)
-      try {
-        rmSync(local, { recursive: true, force: true });
-      } catch {
-        /* ignore */
-      }
   }
+}
+
+// ─── SP / T / CV / EX / F (reuse gh fixture) ──────────────────────────────
+async function runSprintAndTasks(runnerId) {
+  await runSprintSectionOnly(runnerId);
+  await runTodoSectionOnly(runnerId);
 
   const cvRepo = `agent-im-cv-${RUN}`;
   try {
@@ -382,6 +408,27 @@ async function runSprintAndTasks(runnerId) {
   } catch (e) {
     ok('EX2', false, String(e));
   }
+}
+
+/** docs/KANBAN-TESTCASES.md §3 — A1–A5 (same as `node scripts/kanban-a-only.mjs`). */
+async function runInProgressSectionOnly(runnerId) {
+  const ctx = {
+    IM,
+    RUN,
+    runnerId,
+    ok,
+    ghCreateAndPush,
+    projectBody,
+    postProject,
+    applyKanbanRunners,
+    fetchJson,
+    pollTaskState,
+    CDS,
+    cdsPost,
+  };
+  await runA1A2A3(ctx);
+  await runA4Escalation(ctx);
+  await runA5RunnerStopped(ctx);
 }
 
 // ─── A / B / R4 / G5 / SH5 / HF / agent-only placeholders ─────────────────
@@ -692,12 +739,82 @@ async function runABRGHF(runnerId) {
   });
 }
 
+function writeReadme(extraLine) {
+  const readme = [
+    `# Kanban full test run (${RUN})`,
+    ``,
+    `Source: docs/KANBAN-TESTCASES.md`,
+    extraLine ? `${extraLine}` : null,
+    ``,
+    `Server: ${IM}`,
+    `Chrome DevTools: ${CDS}`,
+    `GitHub owner/org: ${resolveGhOwner()}`,
+    ``,
+    `PASS: ${tally.pass}`,
+    `FAIL: ${tally.fail}`,
+    ``,
+    `Integration flows (scripts/kanban-test-flows.mjs) drive gh-backed repos, merges, and workflow APIs; see per-case .md files for details.`,
+    ``,
+    `Results per case: this directory.`,
+  ]
+    .filter(Boolean)
+    .join('\n');
+  writeFileSync(join(OUT, 'README.md'), readme, 'utf8');
+}
+
 async function main() {
   try {
     execFileSync('gh', ['auth', 'status'], { stdio: 'pipe' });
   } catch {
     console.error('gh auth status failed. Run: gh auth login');
     process.exit(1);
+  }
+
+  const only = process.env.KANBAN_FULL_ONLY?.trim().toLowerCase();
+  if (only === 'p0' || only === 'section0' || only === '§0') {
+    const g0 = await runP_Prefix();
+    if (g0) {
+      try {
+        rmSync(g0.dir, { recursive: true, force: true });
+      } catch {
+        /* ignore */
+      }
+    }
+    writeReadme('Scope: §0 前置条件 only (`KANBAN_FULL_ONLY=p0`).');
+    console.log(`Done (§0 only). PASS=${tally.pass} FAIL=${tally.fail} → ${OUT}/`);
+    const strict = process.env.KANBAN_FULL_STRICT === '1';
+    process.exit(strict && tally.fail > 0 ? 1 : 0);
+    return;
+  }
+
+  if (only === 'p1' || only === 'section1' || only === '§1' || only === 'sp') {
+    const runnerId = await requireRunner();
+    await runSprintSectionOnly(runnerId);
+    writeReadme('Scope: §1 Sprint only (`KANBAN_FULL_ONLY=p1`).');
+    console.log(`Done (§1 only). PASS=${tally.pass} FAIL=${tally.fail} → ${OUT}/`);
+    const strict = process.env.KANBAN_FULL_STRICT === '1';
+    process.exit(strict && tally.fail > 0 ? 1 : 0);
+    return;
+  }
+
+  if (only === 'p2' || only === 'section2' || only === '§2' || only === 'todo') {
+    const runnerId = await requireRunner();
+    await runTodoSectionOnly(runnerId);
+    writeReadme('Scope: §2 创建任务 todo only (`KANBAN_FULL_ONLY=p2`).');
+    console.log(`Done (§2 only). PASS=${tally.pass} FAIL=${tally.fail} → ${OUT}/`);
+    const strict = process.env.KANBAN_FULL_STRICT === '1';
+    process.exit(strict && tally.fail > 0 ? 1 : 0);
+    return;
+  }
+
+  if (only === 'p3' || only === 'section3' || only === '§3' || only === 'in_progress') {
+    const runnerId = await requireRunner();
+    await runInProgressSectionOnly(runnerId);
+    writeReadme('Scope: §3 开发 in_progress only (`KANBAN_FULL_ONLY=p3`).');
+    console.log(`Done (§3 only). PASS=${tally.pass} FAIL=${tally.fail} → ${OUT}/`);
+    const strict = process.env.KANBAN_FULL_STRICT === '1';
+    process.exit(strict && tally.fail > 0 ? 1 : 0);
+    return;
   }
 
   const runnerId = await requireRunner();
@@ -714,23 +831,7 @@ async function main() {
   await runSprintAndTasks(runnerId);
   await runABRGHF(runnerId);
 
-  const readme = [
-    `# Kanban full test run (${RUN})`,
-    ``,
-    `Source: docs/KANBAN-TESTCASES.md`,
-    ``,
-    `Server: ${IM}`,
-    `Chrome DevTools: ${CDS}`,
-    `GitHub owner/org: ${resolveGhOwner()}`,
-    ``,
-    `PASS: ${tally.pass}`,
-    `FAIL: ${tally.fail}`,
-    ``,
-    `Integration flows (scripts/kanban-test-flows.mjs) drive gh-backed repos, merges, and workflow APIs; see per-case .md files for details.`,
-    ``,
-    `Results per case: this directory.`,
-  ].join('\n');
-  writeFileSync(join(OUT, 'README.md'), readme, 'utf8');
+  writeReadme(null);
 
   console.log(`Done. PASS=${tally.pass} FAIL=${tally.fail} → ${OUT}/`);
   const strict = process.env.KANBAN_FULL_STRICT === '1';

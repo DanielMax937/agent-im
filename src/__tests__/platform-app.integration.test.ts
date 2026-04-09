@@ -1,6 +1,5 @@
 import { beforeEach, describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import fs from 'node:fs';
 
 import { CompensationService } from '../platform/compensation-service';
 import { createPlatformApp } from '../platform/app';
@@ -19,13 +18,13 @@ import {
   FakeInstanceManager,
   FakeScmClient,
   fetchJson,
-  PLATFORM_DIR,
+  resetTestPlatformDir,
   startHttpApp,
 } from './platform-test-helpers';
 
 describe('Platform app integration', () => {
   beforeEach(() => {
-    fs.rmSync(PLATFORM_DIR, { recursive: true, force: true });
+    resetTestPlatformDir();
   });
 
   function createHarness() {

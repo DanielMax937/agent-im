@@ -848,12 +848,23 @@ export class WorkflowService {
 
   /**
    * Assign work to a lane runner. Use `taskSessionId` + `kanbanAgent` to pick up a **todo** card
-   * (queued `pending_start` until dependencies and FIFO allow **in_progress**);
+   * (queued `pending_start` until dependencies and FIFO allow **in_progress**), or to **re-assign** the
+   * developer lane while the task is already **in_progress** (e.g. after review pushback — escalation
+   * uses `reviewRejectionCount` like {@link assignFromTodo});
    * otherwise legacy assign (existing non-todo rows keep immediate **in_progress**; new issues use create+queue).
    */
   async assignTask(input: AssignTaskInput): Promise<TaskSession> {
     if (input.taskSessionId) {
-      return this.assignFromTodo(input);
+      const taskSession = this.requireTaskSession(input.taskSessionId);
+      if (taskSession.workflowState === 'todo') {
+        return this.assignFromTodo(input);
+      }
+      if (taskSession.workflowState === 'in_progress') {
+        return this.reassignDeveloperFromBoard(input);
+      }
+      throw new Error(
+        `assign with taskSessionId requires workflowState todo or in_progress (was: ${taskSession.workflowState})`,
+      );
     }
 
     const existingTodo = this.deps.store.getTaskSessionByProjectIssueId(input.projectId, input.issueId);
@@ -1080,6 +1091,93 @@ export class WorkflowService {
 
     await this.processDeveloperAssignmentQueue(sprint.id);
     return this.requireTaskSession(next.id);
+  }
+
+  /**
+   * Re-apply developer lane + runner while the card is already **in_progress** (board “assign again”).
+   * Uses the same `reviewRejectionCount` escalation as {@link assignFromTodo} (e.g. codex-senior after
+   * repeated review rejects). Stops current task instances, then starts the resolved developer runner.
+   */
+  private async reassignDeveloperFromBoard(input: AssignTaskInput): Promise<TaskSession> {
+    const taskSession = this.requireTaskSession(input.taskSessionId!);
+    if (taskSession.workflowState !== 'in_progress') {
+      throw new Error('reassignDeveloperFromBoard requires in_progress');
+    }
+    if (taskSession.projectId !== input.projectId || taskSession.sprintId !== input.sprintId) {
+      throw new Error('projectId/sprintId mismatch for taskSession');
+    }
+    if (input.issueId !== taskSession.issueId) {
+      throw new Error('issueId must match the task session');
+    }
+
+    const project = this.requireProject(taskSession.projectId);
+    assertProjectDefaultRunnersForAssign(project);
+    this.assertProjectLocalRepositoryPath(project);
+
+    const kind: KanbanAgentKind = input.kanbanAgent ?? 'agent-dev';
+    if (kind !== 'agent-dev' && kind !== 'codex-senior') {
+      throw new Error('reassignDeveloperFromBoard only supports kanbanAgent agent-dev or codex-senior');
+    }
+    const rejectionCount = taskSession.reviewRejectionCount ?? 0;
+    const resolved = resolveKanbanAgent(kind, rejectionCount);
+    const handoff = input.handoffComment ?? taskSession.handoffComment;
+
+    const laneKind = resolved.kanbanAgent;
+    const allTasks = this.projectTasks(project.id);
+    const { member, runtimeProfileIdHint } = resolveKanbanAssignment(project, laneKind, taskSession, allTasks, {
+      runtimeProfileId: input.runtimeProfileId,
+      assigneeMemberId: input.assigneeMemberId,
+      autoAssign: input.autoAssign,
+    });
+    const resolvedProfile = pickRuntimeProfile(
+      project,
+      laneKind,
+      input.runtimeProfileId,
+      runtimeProfileIdHint,
+      taskSession.runtimeProfileId,
+    );
+    const assignPatch = mergeKanbanAssignee(taskSession, laneKind, member?.id);
+
+    await this.stopInstancesForTask(taskSession.id);
+
+    await notifyWorkflowStateTransition({
+      task: taskSession,
+      from: 'in_progress',
+      to: 'in_progress',
+      outgoingRole: 'developer',
+      actionLabel: '重新分配开发',
+    });
+
+    const updated = this.deps.store.upsertTaskSession({
+      ...taskSession,
+      title: input.title || taskSession.title,
+      runtime: resolved.runtime,
+      role: resolved.role,
+      kanbanAgent: resolved.kanbanAgent,
+      preferredSkills: preferredSkillsForProjectLane(project, kind, rejectionCount),
+      handoffComment: handoff,
+      runtimeProfileId: resolvedProfile,
+      ...assignPatch,
+      updatedAt: now(),
+      historyComments: [
+        ...(taskSession.historyComments ?? []),
+        buildTransitionHistoryComment(
+          taskSession,
+          'in_progress',
+          'in_progress',
+          'developer',
+          '重新分配开发',
+        ),
+      ],
+    });
+
+    await this.deps.instanceManager.upsertAndStart(this.buildAgentInstance(updated, 'developer'));
+    this.enqueueKickoffPrompt(this.requireTaskSession(updated.id));
+    await this.appendWorkflowComment(
+      updated.id,
+      `Re-assigned developer in current lane (${formatKanbanRunnerSummary(updated)}).`,
+    );
+    return this.requireTaskSession(updated.id);
   }
 
   async rejectReview(taskSessionId: string, comment: string, deferStopInstanceId?: string): Promise<TaskSession> {

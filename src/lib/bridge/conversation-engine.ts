@@ -392,6 +392,10 @@ export async function processMessage(
       // Master must NOT have access to any tools — evaluation only
       allowedTools = [];
     }
+    if (options?.deliverySource === 'master' || options?.deliverySource === 'slave') {
+      const serviceGuardrail = renderPrompt('system/auto-mode-service-guardrail');
+      systemPrompt = systemPrompt ? `${systemPrompt}\n\n${serviceGuardrail}` : serviceGuardrail;
+    }
 
     try {
       const stream = effectiveLlm.streamChat({

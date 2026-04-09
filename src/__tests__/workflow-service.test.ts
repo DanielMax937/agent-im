@@ -1,6 +1,5 @@
 import { beforeEach, describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import fs from 'node:fs';
 
 import { CompensationService } from '../platform/compensation-service';
 import { WorkflowService } from '../platform/workflow-service';
@@ -16,12 +15,12 @@ import {
   FakeGitService,
   FakeInstanceManager,
   FakeScmClient,
-  PLATFORM_DIR,
+  resetTestPlatformDir,
 } from './platform-test-helpers';
 
 describe('WorkflowService', () => {
   beforeEach(() => {
-    fs.rmSync(PLATFORM_DIR, { recursive: true, force: true });
+    resetTestPlatformDir();
   });
 
   function createHarness() {
@@ -794,6 +793,28 @@ describe('WorkflowService', () => {
     });
     assert.equal(assigned.kanbanAgent, 'agent-dev');
     assert.equal(assigned.runtime, 'claude');
+    assert.ok(instanceManager.started.some((x) => x.startsWith('developer:')));
+  });
+
+  it('re-assigns in_progress with taskSessionId: escalates to codex-senior when reviewRejectionCount > 2', async () => {
+    const { workflowService, project, store, instanceManager } = createHarness();
+    const sprint = createSprint(store, project.id);
+    const taskSession = createTaskSession(store, project.id, sprint.id, {
+      issueId: 'ISSUE-A4-RE',
+      workflowState: 'in_progress',
+      kanbanAgent: 'agent-dev',
+      reviewRejectionCount: 3,
+    });
+    const assigned = await workflowService.assignTask({
+      projectId: project.id,
+      sprintId: sprint.id,
+      issueId: 'ISSUE-A4-RE',
+      taskSessionId: taskSession.id,
+      kanbanAgent: 'agent-dev',
+      handoffComment: 're-assign after 3 rejects',
+    });
+    assert.equal(assigned.kanbanAgent, 'codex-senior');
+    assert.equal(assigned.runtime, 'codex');
     assert.ok(instanceManager.started.some((x) => x.startsWith('developer:')));
   });
 

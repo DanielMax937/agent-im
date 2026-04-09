@@ -1391,7 +1391,7 @@ export default function BoardPage() {
           </code>
           。从待办分配后先入队；服务端会按顺序扫描队列，依赖满足即可开始开发（可多卡并行），被依赖卡住的项仍留在队列直至上游就绪。
           <strong>点击卡片标题</strong>查看任务详情（分配快照、工作流记录、各角色发言）；待办卡片点「领取」分配任务。<strong>活跃列</strong>可「手动推进」（向当前 lane 入队用户消息）。自动推进失败时由 <code>system_check</code> 循环确认，上限{' '}
-          <code>CTI_KANBAN_CONFIRMATION_MAX_LOOPS</code>（默认 100）。提交评审、PR、测试/回归、关单等仍由各 lane agent 调 API 完成。
+          <code>CTI_KANBAN_CONFIRMATION_MAX_LOOPS</code>（默认 10）。提交评审、PR、测试/回归、关单等仍由各 lane agent 调 API 完成。
         </p>
         <p className="lead ui-muted" style={{ marginTop: '0.75rem' }}>
           Telegram：<code>CTI_KANBAN_TELEGRAM_*</code>；worktree：<code>CTI_KANBAN_USE_WORKTREE=1</code>。Slave goal 与 <code>CTI_SLAVE_REPORT_GOAL</code> 等同原说明。
