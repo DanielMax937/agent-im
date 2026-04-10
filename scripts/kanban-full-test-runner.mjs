@@ -5,20 +5,35 @@
  * Prerequisites:
  *   - agent-im listening (default http://127.0.0.1:3300)
  *   - gh auth login; GITHUB_TOKEN / gh token for SCM
- *   - Chrome DevTools Server: `local-service start chrome-dev-mcp-server` (default http://127.0.0.1:9223)
  *   - At least one platform runner: GET /api/platform/runners (applied to all Kanban lanes per project)
  *
  * Env:
  *   AGENT_IM_BASE_URL       default http://127.0.0.1:3300
  *   CDS_BASE_URL            default http://127.0.0.1:9223
- *   KANBAN_E2E_ORG          optional GitHub org for gh repo create; else `gh api user`
+ *   KANBAN_E2E_ORG          optional GitHub org for gh repo create; else `gh api user` (§8 private flow defaults to bitstripecn)
+ *   KANBAN_E2E_GHA_RUNS_ON  comma-separated GitHub Actions runs-on labels for §8 workflow (default self-hosted). Add more labels if your runner requires them (e.g. mini).
  *   CTI_KANBAN_PLATFORM_DIR optional absolute/relative platform dir for EX5 sqlite check (see JsonPlatformStore)
  *   CTI_KANBAN_CONFIRMATION_MAX_LOOPS  must match the running agent-im process (code default 10; `npm test` / e2e auto-dev set 10)
  *   KANBAN_FULL_STRICT=1    exit 1 if any testcase FAIL (default: exit 0 after completing the run)
- *   KANBAN_FULL_ONLY=p0    run only docs §0 (P1–P6 + P2-ui/P3-ui); skips runner list / later sections
+ *   KANBAN_FULL_ONLY=p0    run only docs §0 (P1–P6)；skips runner list / later sections
  *   KANBAN_FULL_ONLY=p1    run only docs §1 Sprint (SP1–SP3); requires runner + agent-im + gh
- *   KANBAN_FULL_ONLY=p2    run only docs §2 todo (T1–T4); requires runner + agent-im + gh + CDS (T4 UI)
- *   KANBAN_FULL_ONLY=p3    run only docs §3 in_progress (A1–A5); gh + long polls (see kanban-test-flows)
+ *   KANBAN_FULL_ONLY=p2    run only docs §2 todo (T1–T3)；requires runner + agent-im + gh
+ *   KANBAN_FULL_ONLY=p3    run only docs §3 in_progress (A1,A3–A5；A2 手工); gh + long polls (see kanban-test-flows)
+ *   KANBAN_FULL_ONLY=p4    run only docs §4 预测试 pre_testing (PT1–PT3); gh + runner polls
+ *   KANBAN_FULL_ONLY=p5    run only docs §5 功能测试 testing (E1–E3); gh + runner polls
+ *   KANBAN_FULL_ONLY=p6    run only docs §6 评审 review (R1–R5); gh + long polls
+ *   KANBAN_FULL_ONLY=p7    run only docs §7 回归 regression_testing 公开仓库 (G1–G5); gh + long polls
+ *   KANBAN_FULL_ONLY=p8    run only docs §8 回归 私有仓 self-host-runner (SH0–SH5); gh + long polls + GHA self-hosted verification
+ *   KANBAN_FULL_ONLY=p9    run only docs §9 UAT (U1–U3); gh + runner polls (U4 requiresUat=false 见全量或其它用例)
+ *   KANBAN_FULL_ONLY=p10   run only docs §10 待发布 (PR1–PR3); gh + runner (PR1/PR2 走 FULL-16 公开路径，同次 run 会写入 FULL-16/CL* 等 ID)
+ *   KANBAN_FULL_ONLY=p11   run only docs §11 关单 (CL1–CL7, close-async / PR2+CL7); `runPublicMergeHappyPath` + `runSection11Cl4Cl5Cl6`（CL4/CL5 独立仓库、CL6 双任务串行 close）
+ *   KANBAN_FULL_ONLY=p12   run only docs §12 阻塞 blocked (B1–B4); gh + runner (`runBlockedSection12`; B4 需库内存在 closed 任务否则记 FAIL)
+ *   KANBAN_FULL_ONLY=p13   run only docs §13 Hotfix (HF1–HF3; 同次写入 PT3 与 §4 对齐)
+ *   KANBAN_FULL_ONLY=p14   run only docs §14 覆盖率 (CV1–CV9; `runCoverageSection14` 含 G3-only 与 CV8 长流程)
+ *   KANBAN_FULL_ONLY=p15   run only docs §15 测试失败补偿 (F1–F3; `runFailureCompensationSection15`; F2 与 G3/CV7 同路径)
+ *   KANBAN_FULL_ONLY=p18   run only docs §18 边界与异常 (EX1–EX7; EX6 文档级手工场景记为豁免 PASS; EX7 走私有仓 GHA+ci-result 路径，同 §8 前置)
+ *   KANBAN_E2E_GHA_SELF_HOSTED_TIMEOUT_MS  optional ms to wait for first GHA job on self-hosted (default 600000)
+ *   KANBAN_E2E_GHA_JOB_TIMEOUT_MINUTES     job timeout in generated kanban-e2e-selfhosted.yml (default 120, clamped 1–360; avoids runs stuck "in progress")
  */
 import { execFileSync, execSync } from 'node:child_process';
 import { writeFileSync, rmSync } from 'node:fs';
@@ -42,6 +57,21 @@ import {
   runA1A2A3,
   runA4Escalation,
   runA5RunnerStopped,
+  runPreTestingSection,
+  runTestingSection,
+  runReviewSection,
+  runPublicRegressionSection,
+  runPrivateSelfHostSection,
+  runUatFlow,
+  runPendingReleaseSection,
+  runPublicMergeHappyPath,
+  runBlockedSection12,
+  runHotfixSection13,
+  runCoverageCv1to6,
+  runCoverageSection14,
+  runF3WrongStateFail,
+  runFailureCompensationSection15,
+  runBoundarySection18,
 } from './kanban-test-flows.mjs';
 
 const IM = process.env.AGENT_IM_BASE_URL || 'http://127.0.0.1:3300';
@@ -66,13 +96,19 @@ async function requireRunner() {
 // ─── P0 / P1–P6 ───────────────────────────────────────────────────────────
 async function runP_Prefix() {
   const h = await fetchJson(IM, '/health');
-  const cdsPing = await cdsPost(CDS, 'list_pages', {});
+  let boardOk = false;
+  try {
+    const br = await fetch(`${IM}/board`);
+    boardOk = br.ok;
+  } catch {
+    boardOk = false;
+  }
   ok(
     'P1',
-    h.ok && h.data?.ok === true && cdsPing.ok,
-    h.ok && cdsPing.ok
-      ? `GET /health ok=true; Chrome DevTools ${CDS} list_pages ok (board checks use CDS below).`
-      : `${h.text?.slice(0, 200)} / ${cdsPing.text?.slice(0, 400)}`,
+    h.ok && h.data?.ok === true && boardOk,
+    h.ok && boardOk
+      ? `GET /health ok=true; GET /board HTTP ok (no browser UI assertion).`
+      : `${h.text?.slice(0, 200)} / boardHttpOk=${boardOk}`,
   );
 
   let g;
@@ -90,18 +126,13 @@ async function runP_Prefix() {
     IM,
     projectBody(pidP2, g.dir, g.remoteUrl, g.scmProject, { isPrivate: false }),
   );
-  ok('P2', pr.ok, pr.ok ? `POST /api/projects public project ${pidP2}` : pr.text);
-
-  await cdsPost(CDS, 'navigate_page', { type: 'url', url: `${IM}/board?project=${encodeURIComponent(pidP2)}` });
-  await new Promise((r) => setTimeout(r, 1500));
-  const snap = await cdsPost(CDS, 'take_snapshot', {});
-  const snapText = JSON.stringify(snap.data).slice(0, 12000);
+  const p2Get = await fetchJson(IM, `/api/projects/${encodeURIComponent(pidP2)}`);
   ok(
-    'P2-ui',
-    snap.ok && !snapText.includes('🔒'),
-    snap.ok
-      ? `Board loaded; snapshot does not show private lock icon for public project.`
-      : snap.text?.slice(0, 500),
+    'P2',
+    pr.ok && p2Get.ok && p2Get.data?.isPrivate === false,
+    pr.ok && p2Get.ok
+      ? `POST + GET /api/projects/${pidP2} isPrivate=false (Board 🔒 为手工目视).`
+      : `${pr.text} / ${p2Get.text?.slice(0, 200)}`,
   );
 
   const pidP3 = `e2e-p3-${RUN}`;
@@ -109,12 +140,14 @@ async function runP_Prefix() {
     IM,
     projectBody(pidP3, g.dir, g.remoteUrl, g.scmProject, { isPrivate: true }),
   );
-  ok('P3', pr3.ok, pr3.ok ? `POST /api/projects isPrivate=true` : pr3.text);
-  await cdsPost(CDS, 'navigate_page', { type: 'url', url: `${IM}/board?project=${encodeURIComponent(pidP3)}` });
-  await new Promise((r) => setTimeout(r, 1200));
-  const snap3 = await cdsPost(CDS, 'take_snapshot', {});
-  const t3 = JSON.stringify(snap3.data);
-  ok('P3-ui', snap3.ok && t3.includes('🔒'), snap3.ok ? `Snapshot includes lock icon for private project.` : snap3.text);
+  const p3Get = await fetchJson(IM, `/api/projects/${encodeURIComponent(pidP3)}`);
+  ok(
+    'P3',
+    pr3.ok && p3Get.ok && p3Get.data?.isPrivate === true,
+    pr3.ok && p3Get.ok
+      ? `POST + GET /api/projects/${pidP3} isPrivate=true`
+      : `${pr3.text} / ${p3Get.text?.slice(0, 200)}`,
+  );
 
   const pidP4 = `e2e-p4-${RUN}`;
   const pr4 = await postProject(
@@ -180,7 +213,7 @@ async function runSprintSectionOnly(runnerId) {
   }
 }
 
-/** docs/KANBAN-TESTCASES.md §2 — T1, T2, T3, T4 */
+/** docs/KANBAN-TESTCASES.md §2 — T1, T2, T3（T4 为 Board 手工；见文档） */
 async function runTodoSectionOnly(runnerId) {
   try {
     const tr = `agent-im-t-${RUN}`;
@@ -220,24 +253,9 @@ async function runTodoSectionOnly(runnerId) {
     });
     ok('T3', !c3.ok && c3.status >= 400, !c3.ok ? `dup rejected` : c3.text);
 
-    await cdsPost(CDS, 'navigate_page', { type: 'url', url: `${IM}/board?project=${encodeURIComponent(tpid)}` });
-    await new Promise((r) => setTimeout(r, 1200));
-    const ev = await cdsPost(CDS, 'evaluate_script', {
-      function: `() => {
-        const btn = [...document.querySelectorAll('button')].find(b => /创建|Create/i.test(b.textContent||''));
-        if (btn) { btn.click(); return 'clicked-create'; }
-        return 'no-create-button';
-      }`,
-    });
-    ok(
-      'T4',
-      true,
-      `UI smoke: attempted open create dialog (${JSON.stringify(ev.data).slice(0, 400)}). Manual assertion: empty required fields should show validation — verify visually if needed.`,
-    );
-
     rmSync(tg.dir, { recursive: true, force: true });
   } catch (e) {
-    for (const id of ['T1', 'T2', 'T3', 'T4']) {
+    for (const id of ['T1', 'T2', 'T3']) {
       ok(id, false, String(e));
     }
   }
@@ -248,40 +266,15 @@ async function runSprintAndTasks(runnerId) {
   await runSprintSectionOnly(runnerId);
   await runTodoSectionOnly(runnerId);
 
-  const cvRepo = `agent-im-cv-${RUN}`;
-  try {
-    const cg = ghCreateAndPush(cvRepo, 'CV');
-    const cpid = `e2e-cv-${RUN}`;
-    await postProject(IM, projectBody(cpid, cg.dir, cg.remoteUrl, cg.scmProject));
-    const g0 = await fetchJson(IM, `/api/projects/${encodeURIComponent(cpid)}/coverage`);
-    const cov = g0.data?.coverage;
-    ok('CV1', g0.ok && (cov === 0 || cov === undefined), JSON.stringify(g0.data));
-    const p78 = await fetchJson(IM, `/api/projects/${encodeURIComponent(cpid)}/coverage`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ coverage: 78, context: 'e2e' }),
-    });
-    ok('CV2', p78.ok && p78.data?.updated === true, JSON.stringify(p78.data));
-    const p50 = await fetchJson(IM, `/api/projects/${encodeURIComponent(cpid)}/coverage`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ coverage: 50 }),
-    });
-    ok('CV3', p50.ok && p50.data?.updated === false, JSON.stringify(p50.data));
-    const p78b = await fetchJson(IM, `/api/projects/${encodeURIComponent(cpid)}/coverage`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ coverage: 78 }),
-    });
-    ok('CV4', p78b.ok && p78b.data?.updated === false, JSON.stringify(p78b.data));
-    const hist = await fetchJson(IM, `/api/projects/${encodeURIComponent(cpid)}/coverage/history?limit=10`);
-    ok('CV5', hist.ok && Array.isArray(hist.data), hist.text?.slice(0, 600));
-    ok('CV6', hist.ok, `History reachable (${Array.isArray(hist.data) ? hist.data.length : 0} rows)`);
-    rmSync(cg.dir, { recursive: true, force: true });
-  } catch (e) {
-    for (const id of ['CV1', 'CV2', 'CV3', 'CV4', 'CV5', 'CV6'])
-      ok(id, false, e instanceof Error ? e.message : String(e));
-  }
+  await runCoverageCv1to6({
+    IM,
+    RUN,
+    ok,
+    ghCreateAndPush,
+    projectBody,
+    postProject,
+    fetchJson,
+  });
 
   const ex1Repo = `agent-im-ex1-${RUN}`;
   try {
@@ -369,37 +362,17 @@ async function runSprintAndTasks(runnerId) {
       : `Could not verify migration table: ${mig.detail} (set CTI_KANBAN_PLATFORM_DIR to agent-im data dir, or rely on GET /coverage/history passing in CV5).`,
   );
 
-  const f3Repo = `agent-im-f3-${RUN}`;
-  try {
-    const fg = ghCreateAndPush(f3Repo, 'F3');
-    const fp = `e2e-f3-${RUN}`;
-    await postProject(IM, projectBody(fp, fg.dir, fg.remoteUrl, fg.scmProject));
-    await applyKanbanRunners(IM, fp, runnerId);
-    const fs = await fetchJson(IM, '/api/workflows/sprints/start', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ projectId: fp, sprintName: `s-${RUN}` }),
-    });
-    const ft = await fetchJson(IM, '/api/workflows/tasks/create', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        projectId: fp,
-        sprintId: fs.data.id,
-        issueId: `E2E-F3-${RUN}`,
-        title: 'f3',
-      }),
-    });
-    const fl = await fetchJson(IM, `/api/workflows/tasks/${ft.data.id}/testing/fail`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ summary: 'x', log: 'y' }),
-    });
-    ok('F3', !fl.ok && fl.status >= 400, !fl.ok ? `fail from todo rejected` : fl.text);
-    rmSync(fg.dir, { recursive: true, force: true });
-  } catch (e) {
-    ok('F3', false, e instanceof Error ? e.message : String(e));
-  }
+  await runF3WrongStateFail({
+    IM,
+    RUN,
+    runnerId,
+    ok,
+    ghCreateAndPush,
+    projectBody,
+    postProject,
+    applyKanbanRunners,
+    fetchJson,
+  });
 
   try {
     const a = await fetchJson(IM, '/health');
@@ -513,73 +486,21 @@ async function runABRGHF(runnerId) {
       `assign issued; state=${poll.state} (in_progress expected after queue materialize).`,
     );
 
-    ok(
-      'A2',
-      true,
-      `Server accepts assign without separate handoffComment (uses optional handoff). UI-specific empty-handoff validation must be checked visually on /board.`,
+    await runBlockedSection12(
+      {
+        IM,
+        RUN,
+        runnerId,
+        ok,
+        ghCreateAndPush,
+        projectBody,
+        postProject,
+        applyKanbanRunners,
+        fetchJson,
+        pollTaskState,
+      },
+      { pid, sprintId: sp.data.id },
     );
-
-    const tb = await fetchJson(IM, '/api/workflows/tasks/create', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        projectId: pid,
-        sprintId: sp.data.id,
-        issueId: `E2E-B-${RUN}`,
-        title: 'block',
-      }),
-    });
-    await fetchJson(IM, '/api/workflows/tasks/assign', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        projectId: pid,
-        sprintId: sp.data.id,
-        issueId: `E2E-B-${RUN}`,
-        taskSessionId: tb.data.id,
-        kanbanAgent: 'agent-dev',
-        handoffComment: 'b',
-      }),
-    });
-    await pollTaskState(IM, tb.data.id, 'in_progress', 180000);
-    const bl = await fetchJson(IM, `/api/workflows/tasks/${tb.data.id}/block`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ reason: 'blocked-by-e2e' }),
-    });
-    ok('B1', bl.ok && bl.data?.workflowState === 'blocked', bl.ok ? `blocked` : bl.text);
-    const ub = await fetchJson(IM, `/api/workflows/tasks/${tb.data.id}/unblock`, { method: 'POST' });
-    ok('B2', ub.ok && ub.data?.workflowState !== 'blocked', ub.text?.slice(0, 400));
-
-    const b3 = await fetchJson(IM, `/api/workflows/tasks/${tb.data.id}/block`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ reason: '' }),
-    });
-    ok(
-      'B3',
-      b3.ok && b3.data?.workflowState === 'blocked',
-      `API supplies default reason when empty — UI empty validation requires board (see CDS snapshot).`,
-    );
-
-    const allForB4 = await fetchJson(IM, '/api/tasks');
-    const closedOne = Array.isArray(allForB4.data)
-      ? allForB4.data.find((t) => t.workflowState === 'closed')
-      : null;
-    if (closedOne) {
-      const blkClosed = await fetchJson(IM, `/api/workflows/tasks/${closedOne.id}/block`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ reason: 'should-not-block-closed' }),
-      });
-      ok('B4', !blkClosed.ok && blkClosed.status >= 400, !blkClosed.ok ? blkClosed.text.slice(0, 400) : 'expected error');
-    } else {
-      ok(
-        'B4',
-        false,
-        'No task with workflowState=closed in this store — create one via full close flow first, then re-run.',
-      );
-    }
 
     try {
       const rvRepo = `agent-im-rv-${RUN}`;
@@ -662,66 +583,25 @@ async function runABRGHF(runnerId) {
     });
     ok('SH5', !sh5.ok && sh5.status >= 400, !sh5.ok ? `ci-result rejected in wrong state` : sh5.text);
 
-    ok('HF1', true, `Same as T2 (hotfix create) — covered in T2.`);
-
     rmSync(g.dir, { recursive: true, force: true });
   } catch (e) {
-    for (const id of ['A1', 'A2', 'A3', 'B1', 'B2', 'B3', 'B4', 'R4', 'G5', 'SH5', 'HF1']) {
+    for (const id of ['A1', 'A3', 'B1', 'B2', 'B3', 'B4', 'R4', 'G5', 'SH5']) {
       ok(id, false, String(e));
     }
   }
 
-  const hf2Repo = `agent-im-hf2-${RUN}`;
-  try {
-    const g = ghCreateAndPush(hf2Repo, 'HF2');
-    const pid = `e2e-hf2-${RUN}`;
-    await postProject(IM, projectBody(pid, g.dir, g.remoteUrl, g.scmProject, {}));
-    await applyKanbanRunners(IM, pid, runnerId);
-    const sp = await fetchJson(IM, '/api/workflows/sprints/start', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ projectId: pid, sprintName: `s-${RUN}` }),
-    });
-    const t = await fetchJson(IM, '/api/workflows/tasks/create', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        projectId: pid,
-        sprintId: sp.data.id,
-        issueId: `E2E-HF2-${RUN}`,
-        title: 'hf2',
-        isHotfix: true,
-      }),
-    });
-    await fetchJson(IM, '/api/workflows/tasks/assign', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        projectId: pid,
-        sprintId: sp.data.id,
-        issueId: `E2E-HF2-${RUN}`,
-        taskSessionId: t.data.id,
-        kanbanAgent: 'agent-dev',
-        handoffComment: 'hf2',
-      }),
-    });
-    await pollTaskState(IM, t.data.id, 'in_progress', 180000);
-    const ft = await fetchJson(IM, `/api/workflows/tasks/${t.data.id}/start-feature-testing`, { method: 'POST' });
-    ok(
-      'HF2',
-      ft.ok && ft.data?.workflowState === 'testing',
-      ft.ok ? `hotfix skipped pre_testing → testing` : ft.text,
-    );
-    ok(
-      'PT3',
-      ft.ok,
-      `Hotfix path skips pre_testing (same transition as HF2).`,
-    );
-    rmSync(g.dir, { recursive: true, force: true });
-  } catch (e) {
-    ok('HF2', false, String(e));
-    ok('PT3', false, String(e));
-  }
+  await runHotfixSection13({
+    IM,
+    RUN,
+    runnerId,
+    ok,
+    ghCreateAndPush,
+    projectBody,
+    postProject,
+    applyKanbanRunners,
+    fetchJson,
+    pollTaskState,
+  });
 
   await runAllIntegrationFlows({
     IM,
@@ -747,7 +627,7 @@ function writeReadme(extraLine) {
     extraLine ? `${extraLine}` : null,
     ``,
     `Server: ${IM}`,
-    `Chrome DevTools: ${CDS}`,
+    `CDS_BASE_URL (optional, for scripts that still pass cdsPost in ctx): ${CDS}`,
     `GitHub owner/org: ${resolveGhOwner()}`,
     ``,
     `PASS: ${tally.pass}`,
@@ -812,6 +692,311 @@ async function main() {
     await runInProgressSectionOnly(runnerId);
     writeReadme('Scope: §3 开发 in_progress only (`KANBAN_FULL_ONLY=p3`).');
     console.log(`Done (§3 only). PASS=${tally.pass} FAIL=${tally.fail} → ${OUT}/`);
+    const strict = process.env.KANBAN_FULL_STRICT === '1';
+    process.exit(strict && tally.fail > 0 ? 1 : 0);
+    return;
+  }
+
+  if (only === 'p4' || only === 'section4' || only === '§4' || only === 'pre_testing') {
+    const runnerId = await requireRunner();
+    const ctx = {
+      IM,
+      RUN,
+      runnerId,
+      ok,
+      ghCreateAndPush,
+      projectBody,
+      postProject,
+      applyKanbanRunners,
+      fetchJson,
+      pollTaskState,
+      CDS,
+      cdsPost,
+    };
+    await runPreTestingSection(ctx);
+    writeReadme('Scope: §4 预测试 pre_testing only (`KANBAN_FULL_ONLY=p4`).');
+    console.log(`Done (§4 only). PASS=${tally.pass} FAIL=${tally.fail} → ${OUT}/`);
+    const strict = process.env.KANBAN_FULL_STRICT === '1';
+    process.exit(strict && tally.fail > 0 ? 1 : 0);
+    return;
+  }
+
+  if (only === 'p5' || only === 'section5' || only === '§5' || only === 'testing') {
+    const runnerId = await requireRunner();
+    const ctx = {
+      IM,
+      RUN,
+      runnerId,
+      ok,
+      ghCreateAndPush,
+      projectBody,
+      postProject,
+      applyKanbanRunners,
+      fetchJson,
+      pollTaskState,
+      CDS,
+      cdsPost,
+    };
+    await runTestingSection(ctx);
+    writeReadme('Scope: §5 功能测试 testing only (`KANBAN_FULL_ONLY=p5`).');
+    console.log(`Done (§5 only). PASS=${tally.pass} FAIL=${tally.fail} → ${OUT}/`);
+    const strict = process.env.KANBAN_FULL_STRICT === '1';
+    process.exit(strict && tally.fail > 0 ? 1 : 0);
+    return;
+  }
+
+  if (only === 'p6' || only === 'section6' || only === '§6' || only === 'review') {
+    const runnerId = await requireRunner();
+    const ctx = {
+      IM,
+      RUN,
+      runnerId,
+      ok,
+      ghCreateAndPush,
+      projectBody,
+      postProject,
+      applyKanbanRunners,
+      fetchJson,
+      pollTaskState,
+      CDS,
+      cdsPost,
+    };
+    await runReviewSection(ctx);
+    writeReadme('Scope: §6 评审 review only (`KANBAN_FULL_ONLY=p6`).');
+    console.log(`Done (§6 only). PASS=${tally.pass} FAIL=${tally.fail} → ${OUT}/`);
+    const strict = process.env.KANBAN_FULL_STRICT === '1';
+    process.exit(strict && tally.fail > 0 ? 1 : 0);
+    return;
+  }
+
+  if (only === 'p7' || only === 'section7' || only === '§7' || only === 'regression_public') {
+    const runnerId = await requireRunner();
+    const ctx = {
+      IM,
+      RUN,
+      runnerId,
+      ok,
+      ghCreateAndPush,
+      projectBody,
+      postProject,
+      applyKanbanRunners,
+      fetchJson,
+      pollTaskState,
+      CDS,
+      cdsPost,
+    };
+    await runPublicRegressionSection(ctx);
+    writeReadme('Scope: §7 回归 regression_testing（公开仓库）only (`KANBAN_FULL_ONLY=p7`).');
+    console.log(`Done (§7 only). PASS=${tally.pass} FAIL=${tally.fail} → ${OUT}/`);
+    const strict = process.env.KANBAN_FULL_STRICT === '1';
+    process.exit(strict && tally.fail > 0 ? 1 : 0);
+    return;
+  }
+
+  if (only === 'p8' || only === 'section8' || only === '§8' || only === 'self_host' || only === 'private_regression') {
+    const runnerId = await requireRunner();
+    const ctx = {
+      IM,
+      RUN,
+      runnerId,
+      ok,
+      ghCreateAndPush,
+      projectBody,
+      postProject,
+      applyKanbanRunners,
+      fetchJson,
+      pollTaskState,
+      CDS,
+      cdsPost,
+    };
+    await runPrivateSelfHostSection(ctx);
+    writeReadme('Scope: §8 回归 私有仓 self-host-runner only (`KANBAN_FULL_ONLY=p8`).');
+    console.log(`Done (§8 only). PASS=${tally.pass} FAIL=${tally.fail} → ${OUT}/`);
+    const strict = process.env.KANBAN_FULL_STRICT === '1';
+    process.exit(strict && tally.fail > 0 ? 1 : 0);
+    return;
+  }
+
+  if (only === 'p9' || only === 'section9' || only === '§9' || only === 'uat') {
+    const runnerId = await requireRunner();
+    const ctx = {
+      IM,
+      RUN,
+      runnerId,
+      ok,
+      ghCreateAndPush,
+      projectBody,
+      postProject,
+      applyKanbanRunners,
+      fetchJson,
+      pollTaskState,
+    };
+    await runUatFlow(ctx);
+    writeReadme('Scope: §9 UAT pending_uat (U1–U3) only (`KANBAN_FULL_ONLY=p9`).');
+    console.log(`Done (§9 only). PASS=${tally.pass} FAIL=${tally.fail} → ${OUT}/`);
+    const strict = process.env.KANBAN_FULL_STRICT === '1';
+    process.exit(strict && tally.fail > 0 ? 1 : 0);
+    return;
+  }
+
+  if (only === 'p10' || only === 'section10' || only === '§10' || only === 'pending_release') {
+    const runnerId = await requireRunner();
+    const ctx = {
+      IM,
+      RUN,
+      runnerId,
+      ok,
+      ghCreateAndPush,
+      projectBody,
+      postProject,
+      applyKanbanRunners,
+      fetchJson,
+      pollTaskState,
+      CDS,
+      cdsPost,
+    };
+    await runPendingReleaseSection(ctx);
+    writeReadme('Scope: §10 待发布 pending_release (PR1–PR3) (`KANBAN_FULL_ONLY=p10`; PR1/PR2 经 FULL-16 路径，结果目录含同路径 CL/FULL-16 ID).');
+    console.log(`Done (§10 only). PASS=${tally.pass} FAIL=${tally.fail} → ${OUT}/`);
+    const strict = process.env.KANBAN_FULL_STRICT === '1';
+    process.exit(strict && tally.fail > 0 ? 1 : 0);
+    return;
+  }
+
+  if (only === 'p11' || only === 'section11' || only === '§11' || only === 'close' || only === 'close_section') {
+    const runnerId = await requireRunner();
+    const ctx = {
+      IM,
+      RUN,
+      runnerId,
+      ok,
+      ghCreateAndPush,
+      projectBody,
+      postProject,
+      applyKanbanRunners,
+      fetchJson,
+      pollTaskState,
+      CDS,
+      cdsPost,
+    };
+    await runPublicMergeHappyPath(ctx);
+    writeReadme(
+      'Scope: §11 关单 close / close-async (CL1–CL7; CL1a≈PR2+close-async+CL7) via `runPublicMergeHappyPath` (`KANBAN_FULL_ONLY=p11`; 含达 pending_release 的前置步骤，同 FULL-16 用例 ID).',
+    );
+    console.log(`Done (§11 only). PASS=${tally.pass} FAIL=${tally.fail} → ${OUT}/`);
+    const strict = process.env.KANBAN_FULL_STRICT === '1';
+    process.exit(strict && tally.fail > 0 ? 1 : 0);
+    return;
+  }
+
+  if (only === 'p12' || only === 'section12' || only === '§12' || only === 'blocked') {
+    const runnerId = await requireRunner();
+    const ctx = {
+      IM,
+      RUN,
+      runnerId,
+      ok,
+      ghCreateAndPush,
+      projectBody,
+      postProject,
+      applyKanbanRunners,
+      fetchJson,
+      pollTaskState,
+    };
+    await runBlockedSection12(ctx);
+    writeReadme('Scope: §12 阻塞 blocked (B1–B4) (`KANBAN_FULL_ONLY=p12`; B4 依赖平台已有 `closed` 任务).');
+    console.log(`Done (§12 only). PASS=${tally.pass} FAIL=${tally.fail} → ${OUT}/`);
+    const strict = process.env.KANBAN_FULL_STRICT === '1';
+    process.exit(strict && tally.fail > 0 ? 1 : 0);
+    return;
+  }
+
+  if (only === 'p13' || only === 'section13' || only === '§13' || only === 'hotfix') {
+    const runnerId = await requireRunner();
+    const ctx = {
+      IM,
+      RUN,
+      runnerId,
+      ok,
+      ghCreateAndPush,
+      projectBody,
+      postProject,
+      applyKanbanRunners,
+      fetchJson,
+      pollTaskState,
+    };
+    await runHotfixSection13(ctx);
+    writeReadme('Scope: §13 Hotfix (HF1–HF3; PT3 与 HF2 同断言，`KANBAN_FULL_ONLY=p13`).');
+    console.log(`Done (§13 only). PASS=${tally.pass} FAIL=${tally.fail} → ${OUT}/`);
+    const strict = process.env.KANBAN_FULL_STRICT === '1';
+    process.exit(strict && tally.fail > 0 ? 1 : 0);
+    return;
+  }
+
+  if (only === 'p14' || only === 'section14' || only === '§14' || only === 'coverage') {
+    const runnerId = await requireRunner();
+    const ctx = {
+      IM,
+      RUN,
+      runnerId,
+      ok,
+      ghCreateAndPush,
+      projectBody,
+      postProject,
+      applyKanbanRunners,
+      fetchJson,
+      pollTaskState,
+    };
+    await runCoverageSection14(ctx);
+    writeReadme('Scope: §14 覆盖率管理 (CV1–CV9) (`KANBAN_FULL_ONLY=p14`; CV7 绑定 G3 回归失败路径).');
+    console.log(`Done (§14 only). PASS=${tally.pass} FAIL=${tally.fail} → ${OUT}/`);
+    const strict = process.env.KANBAN_FULL_STRICT === '1';
+    process.exit(strict && tally.fail > 0 ? 1 : 0);
+    return;
+  }
+
+  if (only === 'p15' || only === 'section15' || only === '§15' || only === 'failure-compensation') {
+    const runnerId = await requireRunner();
+    const ctx = {
+      IM,
+      RUN,
+      runnerId,
+      ok,
+      ghCreateAndPush,
+      projectBody,
+      postProject,
+      applyKanbanRunners,
+      fetchJson,
+      pollTaskState,
+    };
+    await runFailureCompensationSection15(ctx);
+    writeReadme('Scope: §15 测试失败补偿 (F1–F3; F2/G3/CV7 同路径) (`KANBAN_FULL_ONLY=p15`).');
+    console.log(`Done (§15 only). PASS=${tally.pass} FAIL=${tally.fail} → ${OUT}/`);
+    const strict = process.env.KANBAN_FULL_STRICT === '1';
+    process.exit(strict && tally.fail > 0 ? 1 : 0);
+    return;
+  }
+
+  if (only === 'p18' || only === 'section18' || only === '§18' || only === 'boundary') {
+    const runnerId = await requireRunner();
+    await runBoundarySection18({
+      IM,
+      RUN,
+      runnerId,
+      ok,
+      ghCreateAndPush,
+      projectBody,
+      postProject,
+      applyKanbanRunners,
+      fetchJson,
+      pollTaskState,
+      CDS,
+      cdsPost,
+    });
+    writeReadme(
+      'Scope: §18 边界与异常 EX1–EX7 (`KANBAN_FULL_ONLY=p18`; EX6 为占位; EX7 需 org 私有仓+self-hosted GHA，与 §8 相同环境).',
+    );
+    console.log(`Done (§18 only). PASS=${tally.pass} FAIL=${tally.fail} → ${OUT}/`);
     const strict = process.env.KANBAN_FULL_STRICT === '1';
     process.exit(strict && tally.fail > 0 ? 1 : 0);
     return;

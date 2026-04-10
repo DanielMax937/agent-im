@@ -13,7 +13,7 @@ import { createInterface } from 'node:readline';
 import type { LLMProvider, StreamChatParams } from './lib/bridge/host';
 import { sseEvent } from './sse-utils';
 import {
-  buildSubprocessEnv,
+  buildSubprocessEnvForRuntime,
   COPILOT_PROVIDER_LOG_ENV_KEYS,
   formatProviderEnvKeysForLog,
   mergeRunnerSubprocessEnv,
@@ -100,9 +100,10 @@ export class CopilotProvider implements LLMProvider {
 
             args.push('-p', params.prompt);
 
-            const childEnv = mergeRunnerSubprocessEnv(buildSubprocessEnv(), {
-              subprocessEnv: self.subprocessEnv,
-            });
+            const childEnv = mergeRunnerSubprocessEnv(
+              buildSubprocessEnvForRuntime({ runtime: 'copilot' }),
+              { subprocessEnv: self.subprocessEnv },
+            );
             console.log(
               `[copilot-provider] spawn copilot CLI: bin=${bin} cwd=${params.workingDirectory || process.cwd()} ` +
                 `params.model=${params.model ?? '-'} effectiveModel=${model ?? '-'} stream=${params.disableLlmStreaming ? 'off' : 'on'} ` +

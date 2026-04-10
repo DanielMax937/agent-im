@@ -247,6 +247,26 @@ describe('buildSubprocessEnvForRuntime', () => {
     }
   });
 
+  it('unsets HTTP_PROXY for Claude subprocess env (inherit mode)', () => {
+    const prevIso = process.env.CTI_ENV_ISOLATION;
+    const prevRt = process.env.CTI_RUNTIME;
+    const prevProxy = process.env.HTTP_PROXY;
+    process.env.CTI_ENV_ISOLATION = 'inherit';
+    process.env.CTI_RUNTIME = 'claude';
+    process.env.HTTP_PROXY = 'http://parent:1';
+    try {
+      const env = buildSubprocessEnvForRuntime({ runtime: 'claude', useLogin: false });
+      assert.equal(env.HTTP_PROXY, undefined);
+    } finally {
+      if (prevIso === undefined) delete process.env.CTI_ENV_ISOLATION;
+      else process.env.CTI_ENV_ISOLATION = prevIso;
+      if (prevRt === undefined) delete process.env.CTI_RUNTIME;
+      else process.env.CTI_RUNTIME = prevRt;
+      if (prevProxy === undefined) delete process.env.HTTP_PROXY;
+      else process.env.HTTP_PROXY = prevProxy;
+    }
+  });
+
   it('strips ANTHROPIC_* vars for Claude login mode', () => {
     const prevIsolation = process.env.CTI_ENV_ISOLATION;
     const prevRuntime = process.env.CTI_RUNTIME;

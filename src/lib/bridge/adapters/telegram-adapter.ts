@@ -894,6 +894,33 @@ export class TelegramAdapter extends BaseChannelAdapter {
     writeRunnerStatus({ slaveBusy: false, slaveSince: undefined });
   }
 
+  /**
+   * Slave wall-clock timeout: feed master the same `## Slave Execution Report` pipeline with a timeout body,
+   * then clear Redis slave busy (same completion semantics as a normal slave turn).
+   */
+  override async handleSlaveSessionTimeoutReport(payload: {
+    partialText: string;
+    errorMessage: string;
+    outboundChatId?: string;
+  }): Promise<void> {
+    if (!this.autoModeRedis) return;
+    const body = [
+      '## Slave session timed out (wall clock)',
+      '',
+      `**Reason:** ${payload.errorMessage}`,
+      '',
+      '### Partial output before abort',
+      '',
+      payload.partialText.trim() || '(no assistant text captured)',
+    ].join('\n');
+    console.log(
+      `[telegram-adapter] Slave session timeout: pushing recoverable report to master. ` +
+        `partialLen=${payload.partialText.length}`,
+    );
+    await this.hybridDuplicateAssistantToRedis(body, 'slave');
+    await this.recordAutoModeSlaveTurnCompleted();
+  }
+
   override async recordAutoModeTurnFailed(payload: {
     source: 'master' | 'slave';
     errorMessage?: string;

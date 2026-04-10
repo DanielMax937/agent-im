@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 /**
- * Runs only docs/KANBAN-TESTCASES.md §3 开发 in_progress (A1–A5).
- * A1–A3: runA1A2A3; A4: runA4Escalation; A5: runA5RunnerStopped.
+ * Runs only docs/KANBAN-TESTCASES.md §3 开发 in_progress (A1,A3–A5；A2 为 Board 手工).
+ * A1,A3: runA1A2A3; A4: runA4Escalation; A5: runA5RunnerStopped.
  */
 import { execFileSync } from 'node:child_process';
 import {

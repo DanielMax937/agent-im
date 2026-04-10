@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 /**
- * Deletes Kanban tasks created by docs §3 in_progress tests (KANBAN_FULL_ONLY=p3).
- * Matches projectId: e2e-ab-*, e2e-a4-*, e2e-a5-* (see scripts/kanban-test-flows.mjs).
+ * Deletes Kanban tasks created by testcase automation (kanban-full-test-runner, kanban-test-flows).
+ * Matches task.projectId starting with `e2e-` (see scripts/kanban-full-test-runner.mjs, kanban-test-flows.mjs).
  *
  * Env:
  *   AGENT_IM_BASE_URL  default http://127.0.0.1:3300
@@ -12,7 +12,8 @@ import { fetchJson } from './kanban-test-lib.mjs';
 const IM = process.env.AGENT_IM_BASE_URL || 'http://127.0.0.1:3300';
 const dry = process.env.DRY_RUN === '1' || process.env.DRY_RUN === 'true';
 
-const SECTION3_PROJECT_RE = /^e2e-(ab|a4|a5)-/;
+/** All automated Kanban E2E projects use this prefix. */
+const E2E_PROJECT_RE = /^e2e-/;
 
 async function main() {
   const list = await fetchJson(IM, '/api/tasks');
@@ -21,13 +22,13 @@ async function main() {
     process.exit(1);
   }
 
-  const tasks = list.data.filter((t) => t?.projectId && SECTION3_PROJECT_RE.test(String(t.projectId)));
+  const tasks = list.data.filter((t) => t?.projectId && E2E_PROJECT_RE.test(String(t.projectId)));
   if (tasks.length === 0) {
-    console.log('No §3 in_progress test tasks found.');
+    console.log('No tasks in e2e-* test projects.');
     return;
   }
 
-  console.log(`Found ${tasks.length} task(s) in §3 test projects (${dry ? 'dry-run' : 'deleting'}).`);
+  console.log(`Found ${tasks.length} task(s) (${dry ? 'dry-run' : 'deleting'}).`);
 
   let ok = 0;
   let fail = 0;

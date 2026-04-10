@@ -14,7 +14,7 @@ import type { PendingPermissions } from './permission-gateway';
 import { getLogger } from './logger';
 
 import { sseEvent } from './sse-utils';
-import { applyStandardProxyEnvFromCtiProxy } from './lib/proxy-env';
+import { applySubprocessProxyPolicyForRuntime } from './lib/proxy-env';
 
 const llmProviderLog = getLogger().child({ scope: 'llm-provider' });
 
@@ -163,7 +163,7 @@ export function buildSubprocessEnvForRuntime(
     }
   }
 
-  applyStandardProxyEnvFromCtiProxy(out);
+  applySubprocessProxyPolicyForRuntime(out, runtime);
   return out;
 }
 
@@ -212,6 +212,8 @@ const PROVIDER_LOG_PLAIN_KEYS = new Set([
   'CTI_CURSOR_BASE_URL',
   'NODE_EXTRA_CA_CERTS',
   'CTI_CLAUDE_CODE_EXECUTABLE',
+  'CTI_CURSOR_AGENT_LAUNCH',
+  'CTI_PROXYCHAINS_EXECUTABLE',
 ]);
 
 function maskSecretTailOnly(value: string): string {
@@ -259,6 +261,9 @@ export const CURSOR_PROVIDER_LOG_ENV_KEYS = [
   'CTI_CURSOR_MODEL',
   'CTI_CURSOR_BASE_URL',
   'CTI_CURSOR_API_KEY',
+  'CTI_CURSOR_EXECUTABLE',
+  'CTI_CURSOR_AGENT_LAUNCH',
+  'CTI_PROXYCHAINS_EXECUTABLE',
   'CURSOR_API_KEY',
   'OPENAI_API_KEY',
 ] as const;

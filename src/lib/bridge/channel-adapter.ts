@@ -155,6 +155,18 @@ export abstract class BaseChannelAdapter {
   }
 
   /**
+   * Slave-only: wall-clock session timeout — push a recoverable report to Redis master and clear slave busy.
+   * Telegram hybrid overrides; default no-op.
+   */
+  async handleSlaveSessionTimeoutReport(_payload: {
+    partialText: string;
+    errorMessage: string;
+    outboundChatId?: string;
+  }): Promise<void> {
+    return;
+  }
+
+  /**
    * Reset auto mode Redis state and restart slave process.
    * Returns a human-readable status message.  `null` means auto mode is not active.
    */

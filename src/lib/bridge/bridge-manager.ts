@@ -936,10 +936,24 @@ async function handleMessage(
       },
     );
 
-    if (msg.deliverySource === 'slave' && !result.hasError) {
+    const slaveSessionTimedOut =
+      msg.deliverySource === 'slave' && result.slaveSessionTimedOut === true;
+
+    if (slaveSessionTimedOut) {
+      await adapter.handleSlaveSessionTimeoutReport({
+        partialText: result.partialAssistantText ?? '',
+        errorMessage: result.errorMessage?.trim() || 'Slave session wall-clock limit exceeded',
+        outboundChatId: msg.outboundChatId,
+      });
+    } else if (msg.deliverySource === 'slave' && !result.hasError) {
       await adapter.recordAutoModeSlaveTurnCompleted?.();
     }
-    if (result.hasError && (msg.deliverySource === 'master' || msg.deliverySource === 'slave')) {
+
+    if (
+      result.hasError &&
+      (msg.deliverySource === 'master' || msg.deliverySource === 'slave') &&
+      !slaveSessionTimedOut
+    ) {
       await adapter.recordAutoModeTurnFailed?.({
         source: msg.deliverySource,
         errorMessage: result.errorMessage,
@@ -948,7 +962,20 @@ async function handleMessage(
     }
 
     // Send response text — render via channel-appropriate format
-    if (result.responseText) {
+    if (slaveSessionTimedOut) {
+      const noticePlain =
+        'Slave session timed out (wall clock). A recoverable report was sent to the master runner.';
+      const noticeTelegram =
+        '<b>Slave session timed out</b> (wall clock). A recoverable report was sent to the master runner.';
+      const notice =
+        adapter.baseChannelType === 'telegram' ? noticeTelegram : noticePlain;
+      await deliver(adapter, {
+        address: outAddr,
+        text: applyHybridDeliveryPrefix(adapter, msg, notice),
+        parseMode: adapter.baseChannelType === 'telegram' ? 'HTML' : 'plain',
+        replyToMessageId,
+      });
+    } else if (result.responseText) {
       await deliverResponse(
         adapter,
         outAddr,

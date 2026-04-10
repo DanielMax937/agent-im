@@ -1,5 +1,8 @@
-import { describe, it } from 'node:test';
+import { describe, it, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import { Readable, Writable } from 'node:stream';
 import { EventEmitter } from 'node:events';
 import type { ChildProcess, SpawnOptions } from 'node:child_process';
@@ -359,5 +362,76 @@ describe('CursorProvider stream-json event mapping', () => {
     const ws = seenArgs.indexOf('--workspace');
     const yolo = seenArgs.indexOf('--yolo');
     assert.ok(ws >= 0 && yolo > ws, '--yolo should come after --workspace');
+  });
+});
+
+describe('CursorProvider CTI_CURSOR_AGENT_LAUNCH', () => {
+  const savedLaunch = process.env.CTI_CURSOR_AGENT_LAUNCH;
+  const savedExec = process.env.CTI_CURSOR_EXECUTABLE;
+  const savedProxychains = process.env.CTI_PROXYCHAINS_EXECUTABLE;
+
+  afterEach(() => {
+    if (savedLaunch === undefined) delete process.env.CTI_CURSOR_AGENT_LAUNCH;
+    else process.env.CTI_CURSOR_AGENT_LAUNCH = savedLaunch;
+    if (savedExec === undefined) delete process.env.CTI_CURSOR_EXECUTABLE;
+    else process.env.CTI_CURSOR_EXECUTABLE = savedExec;
+    if (savedProxychains === undefined) delete process.env.CTI_PROXYCHAINS_EXECUTABLE;
+    else process.env.CTI_PROXYCHAINS_EXECUTABLE = savedProxychains;
+  });
+
+  it('spawns agent path directly when CTI_CURSOR_AGENT_LAUNCH is unset (standard)', async () => {
+    delete process.env.CTI_CURSOR_AGENT_LAUNCH;
+    process.env.CTI_CURSOR_EXECUTABLE = '/tmp/cti-cursor-agent-nonexistent-test';
+
+    let seenCmd = '';
+    let seenArgs: string[] = [];
+    const inner = createMockSpawn([
+      { type: 'system', subtype: 'init', session_id: 'x' },
+      { type: 'result', subtype: 'success', session_id: 'x', usage: {} },
+    ]);
+    const mockSpawn = (cmd: string, args: string[], opts: SpawnOptions): ChildProcess => {
+      seenCmd = cmd;
+      seenArgs = args;
+      return inner(cmd, args, opts);
+    };
+
+    const { CursorProvider } = await import('../cursor-provider');
+    const provider = new CursorProvider(mockSpawn);
+    await collectStream(provider.streamChat({ prompt: 'p', sessionId: 's1' }));
+
+    assert.equal(seenCmd, '/tmp/cti-cursor-agent-nonexistent-test');
+    assert.ok(seenArgs.includes('--print'));
+  });
+
+  it('spawns proxychains + realpath(agent) when CTI_CURSOR_AGENT_LAUNCH=proxychains', async () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'cti-cursor-test-'));
+    const fakeAgent = path.join(tmp, 'fake-agent');
+    fs.writeFileSync(fakeAgent, '# stub\n');
+
+    process.env.CTI_CURSOR_AGENT_LAUNCH = 'proxychains';
+    process.env.CTI_CURSOR_EXECUTABLE = fakeAgent;
+    process.env.CTI_PROXYCHAINS_EXECUTABLE = 'proxychains4';
+
+    let seenCmd = '';
+    let seenArgs: string[] = [];
+    const inner = createMockSpawn([
+      { type: 'system', subtype: 'init', session_id: 'x' },
+      { type: 'result', subtype: 'success', session_id: 'x', usage: {} },
+    ]);
+    const mockSpawn = (cmd: string, args: string[], opts: SpawnOptions): ChildProcess => {
+      seenCmd = cmd;
+      seenArgs = args;
+      return inner(cmd, args, opts);
+    };
+
+    const { CursorProvider } = await import('../cursor-provider');
+    const provider = new CursorProvider(mockSpawn);
+    await collectStream(provider.streamChat({ prompt: 'p', sessionId: 's1' }));
+
+    assert.equal(seenCmd, 'proxychains4');
+    assert.equal(seenArgs[0], fs.realpathSync(fakeAgent));
+    assert.ok(seenArgs.includes('--print'));
+
+    fs.rmSync(tmp, { recursive: true, force: true });
   });
 });

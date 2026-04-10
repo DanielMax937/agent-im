@@ -59,19 +59,43 @@ interface AutoModeToolTelemetry {
   startedAt: number;
 }
 
+/** Max milliseconds for master auto-mode LLM turns; 0 = disabled. */
+function getAutoModeMasterReplyTimeoutMs(): number {
+  const v = Number.parseInt(process.env.CTI_AUTO_MASTER_REPLY_TIMEOUT_MS ?? '', 10);
+  return Number.isFinite(v) && v > 0 ? v : 0;
+}
+
+/**
+ * Slave wall-clock limit for one `streamChat` (entire Copilot/Cursor agent run).
+ * Prefer `CTI_AUTO_SLAVE_SESSION_MAX_MS`; if unset, fall back to `CTI_AUTO_SLAVE_REPLY_TIMEOUT_MS`.
+ */
+export function getAutoModeSlaveWallClockTimeoutMs(): { ms: number; envKey: string } {
+  const sessionMax = Number.parseInt(process.env.CTI_AUTO_SLAVE_SESSION_MAX_MS ?? '', 10);
+  if (Number.isFinite(sessionMax) && sessionMax > 0) {
+    return { ms: sessionMax, envKey: 'CTI_AUTO_SLAVE_SESSION_MAX_MS' };
+  }
+  const fallback = Number.parseInt(process.env.CTI_AUTO_SLAVE_REPLY_TIMEOUT_MS ?? '', 10);
+  if (Number.isFinite(fallback) && fallback > 0) {
+    return { ms: fallback, envKey: 'CTI_AUTO_SLAVE_REPLY_TIMEOUT_MS' };
+  }
+  return { ms: 0, envKey: 'CTI_AUTO_SLAVE_SESSION_MAX_MS' };
+}
+
 /** Max milliseconds for master/slave auto-mode LLM turns; 0 = disabled. Read from env at call time. */
 function getAutoModeReplyTimeoutMs(
   deliverySource: ProcessMessageOptions['deliverySource'],
 ): number {
-  if (deliverySource === 'master') {
-    const v = Number.parseInt(process.env.CTI_AUTO_MASTER_REPLY_TIMEOUT_MS ?? '', 10);
-    return Number.isFinite(v) && v > 0 ? v : 0;
-  }
-  if (deliverySource === 'slave') {
-    const v = Number.parseInt(process.env.CTI_AUTO_SLAVE_REPLY_TIMEOUT_MS ?? '', 10);
-    return Number.isFinite(v) && v > 0 ? v : 0;
-  }
+  if (deliverySource === 'master') return getAutoModeMasterReplyTimeoutMs();
+  if (deliverySource === 'slave') return getAutoModeSlaveWallClockTimeoutMs().ms;
   return 0;
+}
+
+function getAutoModeReplyTimeoutEnvKey(
+  deliverySource: ProcessMessageOptions['deliverySource'],
+): string | undefined {
+  if (deliverySource === 'master') return 'CTI_AUTO_MASTER_REPLY_TIMEOUT_MS';
+  if (deliverySource === 'slave') return getAutoModeSlaveWallClockTimeoutMs().envKey;
+  return undefined;
 }
 
 /** Log each SSE chunk for auto master/slave unless CTI_AUTO_LOG_STREAM_CHUNKS=0 */
@@ -175,6 +199,13 @@ export interface ConversationResult {
   permissionRequests: PermissionRequestInfo[];
   /** SDK session ID captured from status/result events, for session resume */
   sdkSessionId: string | null;
+  /**
+   * Slave-only: wall-clock session limit hit (`CTI_AUTO_SLAVE_SESSION_MAX_MS` or legacy `CTI_AUTO_SLAVE_REPLY_TIMEOUT_MS`).
+   * Bridge should push a timeout report to Redis master and clear slave busy.
+   */
+  slaveSessionTimedOut?: boolean;
+  /** Text accumulated before abort (slave session timeout). */
+  partialAssistantText?: string;
 }
 
 /**
@@ -364,7 +395,8 @@ export async function processMessage(
     }
 
     const replyTimeoutMs = getAutoModeReplyTimeoutMs(options?.deliverySource);
-    const replyTimeoutState = { fired: false };
+    const replyTimeoutEnvKey = getAutoModeReplyTimeoutEnvKey(options?.deliverySource);
+    const replyTimeoutState = { fired: false, timeoutEnvKey: replyTimeoutEnvKey };
     let replyTimeoutId: ReturnType<typeof setTimeout> | undefined;
     if (replyTimeoutMs > 0) {
       replyTimeoutId = setTimeout(() => {
@@ -376,8 +408,9 @@ export async function processMessage(
           event: 'auto_mode_reply_timeout_armed',
           deliverySource: options?.deliverySource,
           timeoutMs: replyTimeoutMs,
+          timeoutEnvKey: replyTimeoutEnvKey,
         },
-        `[conversation-engine] auto-mode reply timeout armed (${replyTimeoutMs}ms)`,
+        `[conversation-engine] auto-mode reply timeout armed (${replyTimeoutMs}ms, ${replyTimeoutEnvKey ?? 'n/a'})`,
       );
     }
 
@@ -445,8 +478,21 @@ export async function processMessage(
 interface ConsumeStreamOptions {
   deliverySource?: ProcessMessageOptions['deliverySource'];
   logStreamChunks?: boolean;
-  replyTimeoutState?: { fired: boolean };
+  replyTimeoutState?: { fired: boolean; timeoutEnvKey?: string };
   verificationRound?: boolean;
+}
+
+function extractPartialAssistantTextForTimeout(
+  contentBlocks: MessageContentBlock[],
+  currentText: string,
+  maxChars = 12000,
+): string {
+  const parts: string[] = [];
+  for (const b of contentBlocks) {
+    if (b.type === 'text') parts.push(b.text);
+  }
+  if (currentText.trim()) parts.push(currentText);
+  return parts.join('\n\n').trim().slice(0, maxChars);
 }
 
 async function consumeStream(
@@ -742,12 +788,13 @@ async function consumeStream(
     let abortMsg = 'Task stopped by user';
     if (isAbort && consumeOpts?.replyTimeoutState?.fired) {
       const envKey =
-        consumeOpts.deliverySource === 'master'
+        consumeOpts.replyTimeoutState.timeoutEnvKey
+        ?? (consumeOpts.deliverySource === 'master'
           ? 'CTI_AUTO_MASTER_REPLY_TIMEOUT_MS'
-          : 'CTI_AUTO_SLAVE_REPLY_TIMEOUT_MS';
+          : 'CTI_AUTO_SLAVE_REPLY_TIMEOUT_MS');
       abortMsg = `Auto mode reply timeout (${consumeOpts.deliverySource} runner exceeded ${envKey})`;
       getLogger().warn(
-        { event: 'auto_mode_reply_timeout', deliverySource: consumeOpts.deliverySource },
+        { event: 'auto_mode_reply_timeout', deliverySource: consumeOpts.deliverySource, timeoutEnvKey: envKey },
         `[conversation-engine] ${abortMsg}`,
       );
     }
@@ -768,6 +815,10 @@ async function consumeStream(
       });
     }
 
+    const partialAssistantText = extractPartialAssistantTextForTimeout(contentBlocks, currentText);
+    const slaveSessionTimedOut =
+      Boolean(isAbort && consumeOpts?.replyTimeoutState?.fired && ds === 'slave');
+
     return {
       responseText: '',
       tokenUsage,
@@ -775,6 +826,8 @@ async function consumeStream(
       errorMessage: isAbort ? abortMsg : (e instanceof Error ? e.message : 'Stream consumption error'),
       permissionRequests,
       sdkSessionId: capturedSdkSessionId,
+      slaveSessionTimedOut,
+      partialAssistantText,
     };
   }
 }

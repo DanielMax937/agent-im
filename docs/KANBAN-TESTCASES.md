@@ -3,6 +3,12 @@
 > 覆盖范围：所有状态流转、覆盖率机制、私有仓库 CI lane、快速通道、UAT、阻塞/解除阻塞、关单（同步 / 异步）等功能。  
 > 运行前提：已启动服务，至少存在一个 Project。Board 地址：`/board`。自动化回归：`npm run test:kanban:full`（`scripts/kanban-full-test-runner.mjs`）。
 
+**自动化与手工**
+
+- **不依赖浏览器快照**：全量脚本不通过 Chrome DevTools 对 Board 做 DOM/截图断言（原 P2-ui / P3-ui、T4、SH6 等改为 **API** 或标为 **手工**）。
+- **Agent / 提示词类用例**：优先用 **`GET /api/kanban/monitor?taskSessionId=…`**（与 Monitor 页同一数据源）检查 `targetAgentPrompt` / `sourceAgentResponse` 等字段，而不是看 Board 上的 Agent 回复。
+- **仍建议 Board 手工核对**：空交接、创建表单校验、🔒 图标、CI 等待卡片上的「手动推进」禁用、剪贴板复制 Webhook 等。
+
 **与当前源码对齐要点（摘要）**
 
 - **Kanban lane（`/api/projects/:id/kanban-roles`）** 固定 **5 类**：`agent-dev`、`pre-tester`、`codex-senior`、`claude-review`、`copilot-test`。分配任务前每条 lane 需在 `kanbanRoleRunners`（或 roster）中有可用 runner（见 `KANBAN_AGENT_LANES_REQUIRING_DEFAULT_RUNNER`）。**`self-host-runner` 不在该列表中配置**，由工作流在**私有仓回归**时自动写入任务，用于等 CI 回调。
@@ -39,9 +45,9 @@
 
 | # | 用例 | 步骤 | 期望 |
 |---|------|------|------|
-| P1 | 服务启动 | 启动 `npm run dev`；`GET /health` 返回 `ok`；打开 `/board` | 页面加载；无 JS 报错 |
-| P2 | 公开仓库项目 | 在 `/projects` 创建项目，**不勾选** "私有仓库"；配置有效的 localPath、baseBranch、SCM 信息 | `/api/projects` 返回该项目；项目卡片无 🔒 图标 |
-| P3 | 私有仓库项目 | 在 `/projects` 创建项目，**勾选** "私有仓库" | 项目卡片显示 🔒 图标；`isPrivate: true` |
+| P1 | 服务启动 | 启动 `npm run dev`；`GET /health` 返回 `ok`；`GET /board` 返回 200 | 服务可用；全量脚本不跑浏览器 JS 检查 |
+| P2 | 公开仓库项目 | 在 `/projects` 创建项目，**不勾选** "私有仓库"；配置有效的 localPath、baseBranch、SCM 信息 | `GET /api/projects/:id` 中 **`isPrivate: false`**；🔒 图标以 Board **手工**为准 |
+| P3 | 私有仓库项目 | 在 `/projects` 创建项目，**勾选** "私有仓库" | `GET /api/projects/:id` 中 **`isPrivate: true`**；🔒 图标以 Board **手工**为准 |
 | P4 | UAT 项目 | 在 `/projects` 创建项目，勾选 `requiresUat` | 后续回归后会进入 `pending_uat` 状态 |
 | P5 | 覆盖率命令 | 在 `/projects` 项目中填写 `coverageCommand`（如 `npm run test:coverage`） | 后续关闭流程可执行覆盖率检查 |
 | P6 | Git & 远端 | 确保 localPath 下 git 正常，`origin` fetch 可用 | 后续 PR/回归步骤不报 git 错误 |
@@ -65,7 +71,7 @@
 | T1 | 正常创建 | 选择项目+Sprint+唯一 issueId+标题 → 点击 **创建** | 卡片出现在 **待办** 列；`workflowState = todo` |
 | T2 | 创建 Hotfix 任务 | 勾选 **快速通道（Hotfix）** → 创建 | 卡片出现 **HOTFIX** 橙色徽章；`isHotfix = true` |
 | T3 | 重复 issueId | 相同 issueId 再次创建 | 报错：任务已存在 |
-| T4 | 缺少必填项 | 不填项目/Sprint/issueId/标题 → 创建 | UI 提示"请选择项目…" |
+| T4 | 缺少必填项 | 不填项目/Sprint/issueId/标题 → 创建 | UI 提示"请选择项目…"（**手工**；全量脚本不覆盖） |
 
 ---
 
@@ -74,7 +80,7 @@
 | # | 用例 | 步骤 | 期望 |
 |---|------|------|------|
 | A1 | 正常分配 | 填写**交接说明**；选 lane（agent-开发/codex-高级开发）→ **分配并启动 runner** | 卡片移至 **开发中**；branch/worktree 创建；runner 启动；workflow 评论记录分配 |
-| A2 | 缺少交接说明 | 清空交接说明 → 分配 | UI 报错"分配前请填写交接说明…" |
+| A2 | 缺少交接说明 | 清空交接说明 → 分配 | UI 报错"分配前请填写交接说明…"（**手工**；全量脚本不覆盖） |
 | A3 | 依赖任务未完成 | 为任务设置 `dependsOnIssueIds`（依赖项未到 `pending_release`）→ `POST /api/workflows/tasks/assign` | 任务可保持 **`pending_start`** 排队等待依赖；看板可能提示依赖未满足（与 `kanban-full-test-runner` A3 一致，未必返回 HTTP 错误） |
 | A4 | 2 次评审打回后分配 | `reviewRejectionCount ≥ 2` 时，选 agent-开发 → 分配 | 服务端自动升级为 **codex-高级开发**；runner 以 codex-senior 启动 |
 | A5 | pending_release 移入时 runner 关闭 | 任务从 `regression_testing` 进入 `pending_release` | 对应任务 runner 实例自动停止 |
@@ -100,8 +106,8 @@
 | # | 用例 | 步骤 | 期望 |
 |---|------|------|------|
 | E1 | 进入测试 | 从 **评审中** → **进入测试（copilot-测试）** | 卡片移至 **测试中**；`kanbanAgent = copilot-test`；tester runner 启动 |
-| E2 | 测试需包含单测 | system-check prompt 检查：无单测文件 | Agent 被打回，提示需要添加单测 |
-| E3 | 测试需覆盖率报告 | system-check prompt 检查：无覆盖率报告产出 | Agent 被打回，提示需要生成覆盖率报告 |
+| E2 | 测试需包含单测 | （行为由 Agent 执行） | 自动化：任务进入 `testing` 且 `kanbanAgent=copilot-test` 后，在 **`GET /api/kanban/monitor`** 中存在含 **`Tester rule:`** 且提到 **unit test(s)** 的 `targetAgentPrompt`（与 Monitor 表一致） |
+| E3 | 测试需覆盖率报告 | （行为由 Agent 执行） | 自动化：同上 Monitor 行中 `targetAgentPrompt` 含 **`coverage-summary` / `coverage.json`** 等覆盖率产出要求 |
 
 ---
 
@@ -133,12 +139,13 @@
 
 | # | 用例 | 步骤 | 期望 |
 |---|------|------|------|
-| SH1 | 私有仓库进入回归 | 合并评审 PR（`isPrivate = true`） | 合并后不启动 AI runner；`kanbanAgent = self-host-runner`；卡片显示 **⏳ CI 等待中** 徽章；workflow 评论包含 Webhook URL |
-| SH2 | 复制 Webhook URL | 点击卡片上 **📋 复制 Webhook URL** 按钮 | URL 复制至剪贴板；格式为 `POST /api/workflows/tasks/:id/ci-result` |
+| SH0 | GitHub Actions 在 self-hosted 上执行 | 首次推送含 `kanban-e2e-selfhosted.yml`（`runs-on` 与 `KANBAN_E2E_GHA_RUNS_ON` 一致） | 轮询 `gh api …/actions/runs/…/jobs`：至少一个 **已完成** job 的 `labels` 包含全部期望标签（默认仅 `self-hosted`） |
+| SH1 | 私有仓库进入回归 | 合并评审 PR（`isPrivate = true`） | 合并后不启动 AI runner；`kanbanAgent = self-host-runner`；**⏳ CI 等待中** 与 Webhook 文案以 Board **手工**为准 |
+| SH2 | Webhook URL 可见 | 合并后 workflow 评论 / handoff 中给出回调说明 | 自动化：`GET /api/tasks/:taskSessionId` 的 **`historyComments` / `handoffComment`** 中含 **`ci-result`** 路径（与复制按钮目标一致；**剪贴板**为手工） |
 | SH3 | CI 成功回调 | `POST /api/workflows/tasks/:id/ci-result` body `{ "status": "success", "coverage": 85 }` | 任务进入 `pending_release`；`coverage` 被记录 |
 | SH4 | CI 失败回调 | body `{ "status": "failure", "reason": "Unit tests failed" }` | 任务返回 `in_progress`；workflow 评论包含失败原因 |
 | SH5 | 非法状态回调 | 任务不在 `regression_testing` 或 `kanbanAgent ≠ self-host-runner` 时调用 | API 报错（状态不匹配） |
-| SH6 | Board 手动操作禁用 | `self-host-runner` 等待中的卡片 | 不显示手动推进按钮（等待 CI 回调） |
+| SH6 | Board 手动操作禁用 | `self-host-runner` 等待中的卡片 | 不显示手动推进按钮（**手工**；全量脚本不覆盖） |
 
 ---
 
@@ -224,7 +231,7 @@
 |---|------|------|------|
 | CV7 | 回归要求覆盖率 ≥ 记录值 | 项目当前覆盖率 80%；回归运行结果 75% | 打回开发；评论："需达到最低覆盖率 80%" |
 | CV8 | 回归覆盖率达标 | 回归运行结果 82% | 通过；进入 `pending_release` |
-| CV9 | 打回因覆盖率不足 | 评审打回原因为覆盖率不足 | Agent 先确认改动代码覆盖率已达到，再为覆盖率最低文件补写单测，直到总覆盖率达标 |
+| CV9 | 打回因覆盖率不足（与 R5 语义相关） | 评审 / 回归侧对覆盖率的约束 | 文档级行为以 Agent 执行为准；自动化：在 **G3 回归失败路径** 跑完后，**`GET /api/kanban/monitor`** 中存在含 **coverage-summary / minimum required coverage / lowest-coverage** 等字样的 `targetAgentPrompt`（回归测试 lane 提示词） |
 
 ---
 
