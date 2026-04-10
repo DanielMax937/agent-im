@@ -485,8 +485,9 @@ export class TelegramAdapter extends BaseChannelAdapter {
 
   getPreviewCapabilities(chatId: string): PreviewCapabilities | null {
     const la = readAutoModeSettings(getBridgeContext().store, 'telegram', this.instanceId);
-    // Disable streaming in any auto mode (hybrid or redis-only)
-    if (la) return null;
+    // Hybrid master: skip Telegram drafts (Redis drives turns; avoid duplicate UX noise).
+    // Slave bridge (Redis-only consumer): allow drafts so the user sees streaming while tools run.
+    if (la && this.hybridAutoMode) return null;
     // Global kill switch
     if (this.imGet('bridge_telegram_stream_enabled') === 'false') return null;
 
@@ -501,7 +502,8 @@ export class TelegramAdapter extends BaseChannelAdapter {
   }
 
   async sendPreview(chatId: string, text: string, draftId: number): Promise<'sent' | 'skip' | 'degrade'> {
-    if (this.autoModeRedis) return 'skip';
+    // Hybrid master: drafts disabled (same as getPreviewCapabilities). Slave keeps drafts; Redis dup stays in hybridDuplicateAssistantToRedis only.
+    if (this.autoModeRedis && this.hybridAutoMode) return 'skip';
     const token = this.botToken;
     if (!token) return 'skip';
 

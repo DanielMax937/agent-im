@@ -11,7 +11,11 @@ export interface ResolveProviderOptions {
   runner?: RunnerConfig;
 }
 
-function resolveAutoApprove(
+/**
+ * Effective auto-approve for CLI providers: runner override → optional call-site override → bridge config.
+ * Exported for unit tests; same rules as {@link resolveProvider}.
+ */
+export function resolveAutoApprove(
   config: Pick<Config, 'autoApprove'>,
   autoApproveOverride: boolean | undefined,
   runner: RunnerConfig | undefined,

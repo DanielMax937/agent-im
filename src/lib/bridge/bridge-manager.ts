@@ -845,9 +845,12 @@ async function handleMessage(
   state.activeTasks.set(binding.codepilotSessionId, taskAbort);
 
   // ── Streaming preview setup ──────────────────────────────────
+  // Hybrid Auto slave: stream assistant text to the Telegram bot (sendPreview drafts) while the
+  // LLM runs; Redis duplication (hybridDuplicateAssistantToRedis) still happens once on final
+  // deliverResponse — unchanged.
   let previewState: StreamingPreviewState | null = null;
   const caps = adapter.getPreviewCapabilities?.(outChat) ?? null;
-  if (caps?.supported && !(autoModePipelineActive && msg.deliverySource === 'slave')) {
+  if (caps?.supported) {
     previewState = {
       draftId: generateDraftId(),
       chatId: outChat,
@@ -930,8 +933,6 @@ async function handleMessage(
       hasAttachments ? msg.attachments : undefined,
       onPartialText,
       {
-        disableLlmStreaming:
-          msg.deliverySource === 'slave' && Boolean(autoModePipelineActive),
         deliverySource: msg.deliverySource,
       },
     );
