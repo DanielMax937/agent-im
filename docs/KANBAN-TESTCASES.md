@@ -147,6 +147,10 @@
 | SH5 | 非法状态回调 | 任务不在 `regression_testing` 或 `kanbanAgent ≠ self-host-runner` 时调用 | API 报错（状态不匹配） |
 | SH6 | Board 手动操作禁用 | `self-host-runner` 等待中的卡片 | 不显示手动推进按钮（**手工**；全量脚本不覆盖） |
 
+> **§8 自动化与单机 runner：** 单台 self-hosted runner 在 org 内**串行**执行 job；同一时段若跑多个 E2E，GitHub 上后续 run 会长时间「排队中」，SH0 的 `gh run list` 轮询可能超时。脚本默认 **`KANBAN_E2E_GHA_SELF_HOSTED_TIMEOUT_MS=1200000`（20 分钟）**，并通过 **`~/.cache/kanban-e2e/selfhosted-runner.lock`** 保证同一时刻**最多一条** `runPrivateCiFlow`（§8 / 依赖私有仓 GHA 的流程）；并行跑多条时请设 `KANBAN_E2E_SKIP_RUNNER_LOCK=1` 且自行避免抢 runner。  
+> **§8 任务状态轮询（`runPrivateCiFlow`）默认（毫秒）：** `KANBAN_E2E_POLL_IN_PROGRESS_MS=600000`（10 min）、`KANBAN_E2E_POLL_LANE_MS=180000`（pre_testing/testing）、`KANBAN_E2E_POLL_REVIEW_MS=600000`（10 min）、`KANBAN_E2E_POLL_REGRESSION_MS=900000`（15 min，`start-regression` → `regression_testing|pending_release`，合并/SCM 慢时优先调大）。  
+> **SH1 与 `pending_release` 竞态：** 若 org 配置了指向 agent-im 的 **GHA webhook**，合并后可能**先于**测试脚本对 `GET /api/tasks` 的轮询调用 **`POST .../ci-result`**，任务会直接进入 **`pending_release`**。自动化脚本将 **`regression_testing|pending_release`** 均视为 SH1 合法终态；SH3 若已是 `pending_release` 则不再重复 POST。排查时可临时关闭 webhook 或改用专用测试 org。
+
 ---
 
 ## 9. UAT pending_uat

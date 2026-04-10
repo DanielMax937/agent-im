@@ -850,8 +850,9 @@ export class WorkflowService {
    * Assign work to a lane runner. Use `taskSessionId` + `kanbanAgent` to pick up a **todo** card
    * (queued `pending_start` until dependencies and FIFO allow **in_progress**), or to **re-assign** the
    * developer lane while the task is already **in_progress** (e.g. after review pushback — escalation
-   * uses `reviewRejectionCount` like {@link assignFromTodo});
-   * otherwise legacy assign (existing non-todo rows keep immediate **in_progress**; new issues use create+queue).
+   * uses `reviewRejectionCount` like {@link assignFromTodo}).
+   * Calling again while the card is still **`pending_start`** is idempotent (re-drains the sprint queue).
+   * Otherwise legacy assign (existing non-todo rows keep immediate **in_progress**; new issues use create+queue).
    */
   async assignTask(input: AssignTaskInput): Promise<TaskSession> {
     if (input.taskSessionId) {
@@ -862,8 +863,23 @@ export class WorkflowService {
       if (taskSession.workflowState === 'in_progress') {
         return this.reassignDeveloperFromBoard(input);
       }
+      /**
+       * Already queued from todo (`assignFromTodo` → `pending_start`). Safe to call again: e.g. HTTP client
+       * retry, or automation re-posting before the queue drains. Re-run the sprint queue and return the
+       * latest task row (still `pending_start` if dependencies block materialization).
+       */
+      if (taskSession.workflowState === 'pending_start') {
+        if (taskSession.projectId !== input.projectId || taskSession.sprintId !== input.sprintId) {
+          throw new Error('projectId/sprintId mismatch for taskSession');
+        }
+        if (input.issueId !== taskSession.issueId) {
+          throw new Error('issueId must match the task session');
+        }
+        await this.processDeveloperAssignmentQueue(taskSession.sprintId);
+        return this.requireTaskSession(input.taskSessionId);
+      }
       throw new Error(
-        `assign with taskSessionId requires workflowState todo or in_progress (was: ${taskSession.workflowState})`,
+        `assign with taskSessionId requires workflowState todo, pending_start, or in_progress (was: ${taskSession.workflowState})`,
       );
     }
 

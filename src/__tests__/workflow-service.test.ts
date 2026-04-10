@@ -818,6 +818,45 @@ describe('WorkflowService', () => {
     assert.ok(instanceManager.started.some((x) => x.startsWith('developer:')));
   });
 
+  it('assign with taskSessionId is idempotent when task stays pending_start (dependency queue or retry)', async () => {
+    const { workflowService, project, store } = createHarness();
+    const sprint = createSprint(store, project.id);
+    await workflowService.createTask({
+      projectId: project.id,
+      sprintId: sprint.id,
+      issueId: 'ISSUE-DEP-PEND',
+      title: 'dep',
+    });
+    const main = await workflowService.createTask({
+      projectId: project.id,
+      sprintId: sprint.id,
+      issueId: 'ISSUE-MAIN-PEND',
+      title: 'main',
+      dependsOnIssueIds: ['ISSUE-DEP-PEND'],
+    });
+    const first = await workflowService.assignTask({
+      projectId: project.id,
+      sprintId: sprint.id,
+      issueId: 'ISSUE-MAIN-PEND',
+      title: '',
+      taskSessionId: main.id,
+      kanbanAgent: 'agent-dev',
+      handoffComment: 'queue until dep done',
+    });
+    assert.equal(first.workflowState, 'pending_start');
+    const second = await workflowService.assignTask({
+      projectId: project.id,
+      sprintId: sprint.id,
+      issueId: 'ISSUE-MAIN-PEND',
+      title: '',
+      taskSessionId: main.id,
+      kanbanAgent: 'agent-dev',
+      handoffComment: 'queue until dep done',
+    });
+    assert.equal(second.workflowState, 'pending_start');
+    assert.equal(second.id, main.id);
+  });
+
   it('assigns from todo with kanban lane and creates branch', async () => {
     const { workflowService, project, store, instanceManager, gitService } = createHarness();
     const sprint = createSprint(store, project.id);

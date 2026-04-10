@@ -11,7 +11,7 @@
  *   AGENT_IM_BASE_URL       default http://127.0.0.1:3300
  *   CDS_BASE_URL            default http://127.0.0.1:9223
  *   KANBAN_E2E_ORG          optional GitHub org for gh repo create; else `gh api user` (§8 private flow defaults to bitstripecn)
- *   KANBAN_E2E_GHA_RUNS_ON  comma-separated GitHub Actions runs-on labels for §8 workflow (default self-hosted). Add more labels if your runner requires them (e.g. mini).
+ *   KANBAN_E2E_GHA_RUNS_ON  comma-separated GitHub Actions runs-on labels for §8 workflow (default self-hosted only). Add labels only when your org’s runner registration requires extra labels to match.
  *   CTI_KANBAN_PLATFORM_DIR optional absolute/relative platform dir for EX5 sqlite check (see JsonPlatformStore)
  *   CTI_KANBAN_CONFIRMATION_MAX_LOOPS  must match the running agent-im process (code default 10; `npm test` / e2e auto-dev set 10)
  *   KANBAN_FULL_STRICT=1    exit 1 if any testcase FAIL (default: exit 0 after completing the run)
@@ -32,7 +32,10 @@
  *   KANBAN_FULL_ONLY=p14   run only docs §14 覆盖率 (CV1–CV9; `runCoverageSection14` 含 G3-only 与 CV8 长流程)
  *   KANBAN_FULL_ONLY=p15   run only docs §15 测试失败补偿 (F1–F3; `runFailureCompensationSection15`; F2 与 G3/CV7 同路径)
  *   KANBAN_FULL_ONLY=p18   run only docs §18 边界与异常 (EX1–EX7; EX6 文档级手工场景记为豁免 PASS; EX7 走私有仓 GHA+ci-result 路径，同 §8 前置)
- *   KANBAN_E2E_GHA_SELF_HOSTED_TIMEOUT_MS  optional ms to wait for first GHA job on self-hosted (default 600000)
+ *   KANBAN_E2E_GHA_SELF_HOSTED_TIMEOUT_MS  optional ms to wait for first GHA job on self-hosted (default 1200000 = 20 min)
+ *   KANBAN_E2E_SKIP_RUNNER_LOCK=1       skip ~/.cache/kanban-e2e/selfhosted-runner.lock (§8 serializes on one org runner by default)
+ *   §8 runPrivateCiFlow poll overrides (ms): KANBAN_E2E_POLL_IN_PROGRESS_MS (default 600000), KANBAN_E2E_POLL_LANE_MS (180000),
+ *     KANBAN_E2E_POLL_REVIEW_MS (600000), KANBAN_E2E_POLL_REGRESSION_MS (900000) — raise regression/review when SCM merge is slow
  *   KANBAN_E2E_GHA_JOB_TIMEOUT_MINUTES     job timeout in generated kanban-e2e-selfhosted.yml (default 120, clamped 1–360; avoids runs stuck "in progress")
  */
 import { execFileSync, execSync } from 'node:child_process';

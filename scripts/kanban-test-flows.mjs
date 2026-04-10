@@ -5,7 +5,13 @@
 import { writeFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { execFileSync, execSync } from 'node:child_process';
-import { pollGithubActionsSelfHostedVerification, sqliteTableExists, pollKanbanMonitorRows } from './kanban-test-lib.mjs';
+import {
+  acquireSelfHostedE2eLock,
+  KANBAN_E2E_GHA_SELF_HOSTED_DEFAULT_MS,
+  pollGithubActionsSelfHostedVerification,
+  pollKanbanMonitorRows,
+  sqliteTableExists,
+} from './kanban-test-lib.mjs';
 
 /** Marker commit in task worktree (identity + explicit add — avoids empty commit when global ignore hides dotfiles). */
 function commitWorkdir(workDir, msg = 'e2e') {
@@ -1924,11 +1930,31 @@ export async function runR3R5Reject(ctx) {
   }
 }
 
+/** §8 `runPrivateCiFlow` poll windows (ms). Override via env when SCM/GitHub is slow. */
+function kanbanE2ePollMs() {
+  const n = (key, fallback) => {
+    const raw = process.env[key]?.trim();
+    const v = raw ? Number(raw) : NaN;
+    return Number.isFinite(v) && v > 0 ? v : fallback;
+  };
+  return {
+    /** assign → in_progress */
+    inProgress: n('KANBAN_E2E_POLL_IN_PROGRESS_MS', 600_000),
+    /** pre_testing|testing / testing lane settles */
+    lane: n('KANBAN_E2E_POLL_LANE_MS', 180_000),
+    /** submit-review → review */
+    review: n('KANBAN_E2E_POLL_REVIEW_MS', 600_000),
+    /** start-regression → regression_testing|pending_release (merge + SCM; often the bottleneck) */
+    regression: n('KANBAN_E2E_POLL_REGRESSION_MS', 900_000),
+  };
+}
+
 export async function runPrivateCiFlow(ctx, opts = {}) {
   const onlySection8 = opts.onlySection8 === true;
   const boundaryEx7Only = opts.boundaryEx7Only === true;
   const { IM, RUN, runnerId, ok, ghCreateAndPush, projectBody, postProject, applyKanbanRunners, fetchJson, pollTaskState } =
     ctx;
+  const poll = kanbanE2ePollMs();
   const repo = `agent-im-priv-${RUN}`;
   /** §8: GitHub private repo under org (default bitstripecn) + Actions workflow targeting self-hosted runner labels. */
   const e2eOrg = process.env.KANBAN_E2E_ORG?.trim() || 'bitstripecn';
@@ -1938,13 +1964,16 @@ export async function runPrivateCiFlow(ctx, opts = {}) {
     .filter(Boolean);
   const wfLabels = parsedRunsOn.length ? parsedRunsOn : ['self-hosted'];
   let g;
+  let releaseRunnerLock = async () => {};
   try {
+    releaseRunnerLock = await acquireSelfHostedE2eLock();
     g = ghCreateAndPush(repo, 'FULL-17', {
       visibility: 'private',
       org: e2eOrg,
       selfHostedRunnerLabels: wfLabels,
     });
-    const ghSelfTimeout = Number(process.env.KANBAN_E2E_GHA_SELF_HOSTED_TIMEOUT_MS?.trim()) || 600_000;
+    const ghSelfTimeout =
+      Number(process.env.KANBAN_E2E_GHA_SELF_HOSTED_TIMEOUT_MS?.trim()) || KANBAN_E2E_GHA_SELF_HOSTED_DEFAULT_MS;
     const ghVerify = await pollGithubActionsSelfHostedVerification(e2eOrg, repo, wfLabels, {
       workflowFile: 'kanban-e2e-selfhosted.yml',
       timeoutMs: ghSelfTimeout,
@@ -1990,11 +2019,11 @@ export async function runPrivateCiFlow(ctx, opts = {}) {
         handoffComment: 'x',
       }),
     });
-    await pollTaskState(IM, t.data.id, 'in_progress', 300000);
+    await pollTaskState(IM, t.data.id, 'in_progress', poll.inProgress);
     const tw = await fetchJson(IM, `/api/tasks/${encodeURIComponent(t.data.id)}`);
     commitWorkdir(tw.data?.worktreePath || g.dir, 'pv');
     await fetchJson(IM, `/api/workflows/tasks/${t.data.id}/start-testing`, { method: 'POST' });
-    await pollTaskState(IM, t.data.id, 'pre_testing|testing', 120000);
+    await pollTaskState(IM, t.data.id, 'pre_testing|testing', poll.lane);
     let tFeat = await fetchJson(IM, `/api/tasks/${encodeURIComponent(t.data.id)}`);
     const wsA = tFeat.data?.workflowState;
     if (wsA === 'pre_testing') {
@@ -2008,27 +2037,36 @@ export async function runPrivateCiFlow(ctx, opts = {}) {
     } else if (wsA !== 'testing') {
       throw new Error(`expected pre_testing or testing, got ${wsA}`);
     }
-    await pollTaskState(IM, t.data.id, 'testing', 120000);
+    await pollTaskState(IM, t.data.id, 'testing', poll.lane);
     await fetchJson(IM, `/api/workflows/tasks/${t.data.id}/submit-review`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ commitMessage: 'c', prTitle: 'p', prBody: 'b' }),
     });
-    await pollTaskState(IM, t.data.id, 'review', 300000);
+    await pollTaskState(IM, t.data.id, 'review', poll.review);
     const reg = await fetchJson(IM, `/api/workflows/tasks/${t.data.id}/start-regression`, { method: 'POST' });
-    const pr = await pollTaskState(IM, t.data.id, 'regression_testing', 300000);
-    const td = await fetchJson(IM, `/api/tasks/${encodeURIComponent(t.data.id)}`);
-    const sh1Pass = reg.ok && pr.ok && td.data?.kanbanAgent === 'self-host-runner';
+    /** Webhook may POST ci-result before we observe regression_testing — accept pending_release + self-host-runner. */
+    const pr = await pollTaskState(IM, t.data.id, 'regression_testing|pending_release', poll.regression);
+    let td = await fetchJson(IM, `/api/tasks/${encodeURIComponent(t.data.id)}`);
+    const ws = td.data?.workflowState;
+    const agent = td.data?.kanbanAgent;
+    const sh1Pass =
+      reg.ok &&
+      pr.ok &&
+      (ws === 'regression_testing' || ws === 'pending_release') &&
+      agent === 'self-host-runner';
     ok(
       'SH1',
       sh1Pass,
       sh1Pass
-        ? `merged → private regression; kanbanAgent=self-host-runner`
+        ? ws === 'pending_release'
+          ? `merged → private CI; GHA webhook ci-result raced to pending_release (skipped observing regression_testing)`
+          : `merged → private regression; kanbanAgent=self-host-runner`
         : !reg.ok
           ? reg.text
           : !pr.ok
-            ? `poll regression_testing: ${pr.state}`
-            : `kanbanAgent=${td.data?.kanbanAgent}`,
+            ? `poll regression_testing|pending_release: ${pr.state}`
+            : `workflowState=${ws}; kanbanAgent=${agent}`,
     );
     if (!onlySection8) {
       ok('FULL-17', pr.ok, `Private path to CI wait`);
@@ -2037,22 +2075,31 @@ export async function runPrivateCiFlow(ctx, opts = {}) {
     const taskAfterSh1 = await fetchJson(IM, `/api/tasks/${encodeURIComponent(t.data.id)}`);
     const hist = taskAfterSh1.data?.historyComments ?? [];
     const handoff = String(taskAfterSh1.data?.handoffComment ?? '');
-    const blob = JSON.stringify(hist) + handoff;
+    const blob = JSON.stringify(hist) + handoff + JSON.stringify(taskAfterSh1.data ?? {});
     const sh2Pass = taskAfterSh1.ok && /ci-result/.test(blob);
     ok(
       'SH2',
       sh2Pass,
       sh2Pass
-        ? `GET /api/tasks: historyComments/handoff include ci-result webhook path (same as Board copy target).`
+        ? `GET /api/tasks: historyComments/handoff (or task JSON) include ci-result webhook path (same as Board copy target).`
         : taskAfterSh1.text?.slice(0, 400) ?? 'task fetch failed',
     );
 
-    const okCi = await fetchJson(IM, `/api/workflows/tasks/${t.data.id}/ci-result`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ status: 'success', coverage: 88 }),
-    });
-    ok('SH3', okCi.ok && okCi.data?.workflowState === 'pending_release', okCi.ok ? `CI success → pending_release` : okCi.text);
+    td = await fetchJson(IM, `/api/tasks/${encodeURIComponent(t.data.id)}`);
+    if (td.data?.workflowState === 'pending_release') {
+      ok(
+        'SH3',
+        true,
+        `already pending_release (GHA webhook applied ci-result); duplicate POST not required for SH3`,
+      );
+    } else {
+      const okCi = await fetchJson(IM, `/api/workflows/tasks/${t.data.id}/ci-result`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ status: 'success', coverage: 88 }),
+      });
+      ok('SH3', okCi.ok && okCi.data?.workflowState === 'pending_release', okCi.ok ? `CI success → pending_release` : okCi.text);
+    }
 
     if (!onlySection8) {
       const badCi = await fetchJson(IM, `/api/workflows/tasks/${t.data.id}/ci-result`, {
@@ -2090,11 +2137,11 @@ export async function runPrivateCiFlow(ctx, opts = {}) {
         handoffComment: 'x',
       }),
     });
-    await pollTaskState(IM, t2.data.id, 'in_progress', 300000);
+    await pollTaskState(IM, t2.data.id, 'in_progress', poll.inProgress);
     const tw2 = await fetchJson(IM, `/api/tasks/${encodeURIComponent(t2.data.id)}`);
     commitWorkdir(tw2.data?.worktreePath || g.dir, 'pv2');
     await fetchJson(IM, `/api/workflows/tasks/${t2.data.id}/start-testing`, { method: 'POST' });
-    await pollTaskState(IM, t2.data.id, 'pre_testing|testing', 120000);
+    await pollTaskState(IM, t2.data.id, 'pre_testing|testing', poll.lane);
     let t2Feat = await fetchJson(IM, `/api/tasks/${encodeURIComponent(t2.data.id)}`);
     const wsB = t2Feat.data?.workflowState;
     if (wsB === 'pre_testing') {
@@ -2108,21 +2155,31 @@ export async function runPrivateCiFlow(ctx, opts = {}) {
     } else if (wsB !== 'testing') {
       throw new Error(`expected pre_testing or testing, got ${wsB}`);
     }
-    await pollTaskState(IM, t2.data.id, 'testing', 120000);
+    await pollTaskState(IM, t2.data.id, 'testing', poll.lane);
     await fetchJson(IM, `/api/workflows/tasks/${t2.data.id}/submit-review`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ commitMessage: 'c2', prTitle: 'p2', prBody: 'b2' }),
     });
-    await pollTaskState(IM, t2.data.id, 'review', 300000);
-    await fetchJson(IM, `/api/workflows/tasks/${t2.data.id}/start-regression`, { method: 'POST' });
-    await pollTaskState(IM, t2.data.id, 'regression_testing', 300000);
-    const failCi = await fetchJson(IM, `/api/workflows/tasks/${t2.data.id}/ci-result`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ status: 'failure', reason: 'CI failed' }),
-    });
-    ok('SH4', failCi.ok && failCi.data?.workflowState === 'in_progress', failCi.ok ? `CI fail → dev` : failCi.text);
+    await pollTaskState(IM, t2.data.id, 'review', poll.review);
+    const reg2 = await fetchJson(IM, `/api/workflows/tasks/${t2.data.id}/start-regression`, { method: 'POST' });
+    const pr2 = await pollTaskState(IM, t2.data.id, 'regression_testing', poll.regression);
+    if (!reg2.ok || !pr2.ok) {
+      ok(
+        'SH4',
+        false,
+        !reg2.ok
+          ? `start-regression: ${reg2.text}`
+          : `timeout waiting regression_testing (got ${pr2.state ?? '?'}) — cannot POST ci-result failure`,
+      );
+    } else {
+      const failCi = await fetchJson(IM, `/api/workflows/tasks/${t2.data.id}/ci-result`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ status: 'failure', reason: 'CI failed' }),
+      });
+      ok('SH4', failCi.ok && failCi.data?.workflowState === 'in_progress', failCi.ok ? `CI fail → dev` : failCi.text);
+    }
 
     const sh5Cr = await fetchJson(IM, '/api/workflows/tasks/create', {
       method: 'POST',
@@ -2148,6 +2205,8 @@ export async function runPrivateCiFlow(ctx, opts = {}) {
       ? ['SH0', 'SH1', 'SH2', 'SH3', 'SH4', 'SH5']
       : ['SH0', 'SH1', 'SH2', 'SH3', 'SH4', 'SH5', 'FULL-17', 'EX7'];
     for (const id of failIds) ok(id, false, String(e));
+  } finally {
+    await releaseRunnerLock();
   }
 }
 
@@ -2370,7 +2429,7 @@ export async function runA1A2A3(ctx) {
   }
 }
 
-/** A4: third reject from review → next assign uses codex-senior (reviewRejectionCount > 2). */
+/** A4: after repeated review rejects, re-assign with lane agent-dev escalates to codex-senior (see resolveKanbanAgent). */
 export async function runA4Escalation(ctx) {
   const { IM, RUN, runnerId, ok, ghCreateAndPush, projectBody, postProject, applyKanbanRunners, fetchJson, pollTaskState } =
     ctx;
@@ -2443,9 +2502,15 @@ export async function runA4Escalation(ctx) {
         handoffComment: 're-assign after 3 rejects',
       }),
     });
-    const refreshed = await fetchJson(IM, `/api/tasks/${encodeURIComponent(t.data.id)}`);
-    const k = refreshed.data?.kanbanAgent ?? asn.data?.kanbanAgent;
-    ok('A4', k === 'codex-senior', `after 3 review rejects, assign escalated: kanbanAgent=${k}`);
+    // Prefer assign response: a follow-up GET can race with the dev runner (e.g. already in pre_testing → pre-tester).
+    const k = asn.ok ? asn.data?.kanbanAgent : undefined;
+    ok(
+      'A4',
+      asn.ok && k === 'codex-senior',
+      asn.ok
+        ? `after 3 review rejects, assign escalated: kanbanAgent=${k ?? '(missing)'}`
+        : (asn.text ?? 'assign failed').slice(0, 400),
+    );
     rmSync(g.dir, { recursive: true, force: true });
   } catch (e) {
     ok('A4', false, String(e));

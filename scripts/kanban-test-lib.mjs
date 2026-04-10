@@ -3,8 +3,67 @@
  */
 import { execFileSync, execSync } from 'node:child_process';
 import { writeFileSync, mkdirSync, mkdtempSync, rmSync, existsSync } from 'node:fs';
+import { mkdir, open, readFile, stat, unlink } from 'fs/promises';
 import { join, isAbsolute } from 'node:path';
 import { homedir, tmpdir } from 'node:os';
+
+/** Default: 20 minutes — single self-hosted runner often queues behind other org jobs. */
+export const KANBAN_E2E_GHA_SELF_HOSTED_DEFAULT_MS = 1_200_000;
+
+/**
+ * Serialize Kanban flows that share one org self-hosted runner (§8 / runPrivateCiFlow).
+ * Set `KANBAN_E2E_SKIP_RUNNER_LOCK=1` to disable (e.g. parallel jobs on different runners).
+ * Lock file: `~/.cache/kanban-e2e/selfhosted-runner.lock` (stale lock removed after 2h mtime).
+ */
+export async function acquireSelfHostedE2eLock() {
+  if (process.env.KANBAN_E2E_SKIP_RUNNER_LOCK === '1') {
+    return async () => {};
+  }
+  const dir = join(homedir(), '.cache', 'kanban-e2e');
+  const lockPath = join(dir, 'selfhosted-runner.lock');
+  const staleMs = 2 * 60 * 60 * 1000;
+
+  async function take(allowStaleRetry) {
+    await mkdir(dir, { recursive: true });
+    try {
+      const fh = await open(lockPath, 'wx');
+      await fh.writeFile(`${process.pid}\n`, 'utf8');
+      await fh.close();
+    } catch (e) {
+      if (e?.code !== 'EEXIST') throw e;
+      if (allowStaleRetry) {
+        try {
+          const st = await stat(lockPath);
+          if (Date.now() - st.mtimeMs > staleMs) {
+            await unlink(lockPath);
+            return take(false);
+          }
+        } catch {
+          /* ignore */
+        }
+      }
+      let pidHint = '';
+      try {
+        pidHint = (await readFile(lockPath, 'utf8')).trim();
+      } catch {
+        /* ignore */
+      }
+      throw new Error(
+        `Kanban E2E self-hosted runner lock: ${lockPath} held (pid ${pidHint}). ` +
+          `Run one §8 / private-ci flow at a time on a single runner, or set KANBAN_E2E_SKIP_RUNNER_LOCK=1.`,
+      );
+    }
+    return async () => {
+      try {
+        await unlink(lockPath);
+      } catch {
+        /* ignore */
+      }
+    };
+  }
+
+  return take(true);
+}
 
 export function resolveGhOwner() {
   const org = process.env.KANBAN_E2E_ORG?.trim();
@@ -266,7 +325,7 @@ export function ensureOutDir(runId) {
  */
 export async function pollGithubActionsSelfHostedVerification(owner, repo, expectedLabels, options = {}) {
   const workflowFile = options.workflowFile || 'kanban-e2e-selfhosted.yml';
-  const timeoutMs = options.timeoutMs ?? 600_000;
+  const timeoutMs = options.timeoutMs ?? KANBAN_E2E_GHA_SELF_HOSTED_DEFAULT_MS;
   const intervalMs = options.intervalMs ?? 4_000;
   const t0 = Date.now();
   let lastDetail = '';
@@ -308,6 +367,7 @@ export async function pollGithubActionsSelfHostedVerification(owner, repo, expec
     }
     const run = runs[0];
     if (run.status !== 'completed') {
+      lastDetail = `run ${run.databaseId} status=${run.status} (waiting for completed; queued/in_progress means runner busy or job still running)`;
       await new Promise((r) => setTimeout(r, intervalMs));
       continue;
     }
