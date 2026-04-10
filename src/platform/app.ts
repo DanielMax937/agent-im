@@ -372,10 +372,12 @@ export function createPlatformApp(options: CreatePlatformAppOptions): PlatformAp
 
     try {
       if (request.method === 'GET' && pathname === '/health') {
+        const mem = process.memoryUsage();
         return jsonResponse({
           ok: true,
           bridge: getBridgeStatusForApi(),
           runningInstances: options.instanceManager.listRunningInstanceIds(),
+          rssMb: Math.round(mem.rss / 1024 / 1024 * 10) / 10,
         });
       }
 

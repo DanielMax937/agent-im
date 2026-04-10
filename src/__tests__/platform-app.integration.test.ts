@@ -78,6 +78,8 @@ describe('Platform app integration', () => {
     try {
       const health = await fetchJson(server.baseUrl, '/health');
       assert.equal(health.status, 200);
+      assert.equal(typeof (health.body as { rssMb: number }).rssMb, 'number', 'health.rssMb should be a number (MB)');
+      assert.ok((health.body as { rssMb: number }).rssMb > 0, 'health.rssMb should be > 0');
 
       const projects = await fetchJson(server.baseUrl, '/api/projects');
       assert.equal((projects.body as Array<unknown>).length, 1);
