@@ -1335,6 +1335,27 @@ async function handleCommand(
     case '/stop': {
       const binding = router.resolve(msg.address);
       const st = getState();
+      const parsedChannel = parseImBaseAndInstanceId(adapter.channelType);
+      const hybridAuto =
+        parsedChannel &&
+        readAutoModeSettings(store, parsedChannel.base, parsedChannel.instanceId) &&
+        isHybridAutoModeEnabled(store, parsedChannel.base, parsedChannel.instanceId);
+
+      // Hybrid Auto: in-flight work is keyed by synthetic chat sessions, not the real Telegram
+      // binding — delegate to the same abort path as /autostop.
+      if (hybridAuto && typeof adapter.stopAutoModeTasks === 'function') {
+        const autoResult = await adapter.stopAutoModeTasks(st.activeTasks);
+        const realTask = st.activeTasks.get(binding.codepilotSessionId);
+        if (realTask) {
+          realTask.abort();
+          st.activeTasks.delete(binding.codepilotSessionId);
+        }
+        response =
+          autoResult ??
+          (realTask ? 'Stopping current task...' : 'No task is currently running.');
+        break;
+      }
+
       const taskAbort = st.activeTasks.get(binding.codepilotSessionId);
       if (taskAbort) {
         taskAbort.abort();

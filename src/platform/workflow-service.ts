@@ -1840,9 +1840,20 @@ export class WorkflowService {
     return updatedTaskSession;
   }
 
-  /** @deprecated Prefer merge from review via APPROVE_MERGE. Kept for API: merges PR then starts regression when in **review**. */
+  /**
+   * Merges PR then starts regression when in **review**.
+   * Idempotent: if the reviewer already advanced the card (APPROVE_MERGE / automation race), the task may
+   * already be **regression_testing** before this HTTP handler runs — return without error.
+   */
   async startRegressionTesting(taskSessionId: string, deferStopInstanceId?: string): Promise<TaskSession> {
     const taskSession = this.requireTaskSession(taskSessionId);
+    if (taskSession.workflowState === 'regression_testing') {
+      getKanbanLogger().info(
+        { taskSessionId, issueId: taskSession.issueId },
+        'start-regression: already regression_testing (likely reviewer merged before API)',
+      );
+      return taskSession;
+    }
     if (taskSession.workflowState !== 'review') {
       throw new Error('startRegressionTesting: task must be in review (open PR) to merge and start regression');
     }

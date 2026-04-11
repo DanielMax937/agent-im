@@ -14,6 +14,58 @@ export interface DiscordChunk {
 const SOFT_LIMIT = 1900;
 
 /**
+ * Collapse 3+ consecutive newlines to 2 in prose only (paragraph break).
+ * Leaves fenced code regions (triple-backtick lines) unchanged so spacing in code is preserved.
+ * Uses the same fence toggle rule as chunking: line-start triple backtick opens/closes.
+ */
+export function collapseExtraNewlinesOutsideFences(text: string): string {
+  const lines = text.split(/\r?\n/);
+  let result = '';
+  const proseLines: string[] = [];
+  const fenceLines: string[] = [];
+  let inFence = false;
+
+  const flushProse = (): void => {
+    if (proseLines.length === 0) return;
+    const collapsed = proseLines.join('\n').replace(/\n{3,}/g, '\n\n');
+    if (result !== '') result += '\n';
+    result += collapsed;
+    proseLines.length = 0;
+  };
+
+  for (const line of lines) {
+    const fenceMatch = line.match(/^(`{3,})([\w]*)/);
+    if (fenceMatch) {
+      if (inFence) {
+        fenceLines.push(line);
+        const fence = fenceLines.join('\n');
+        if (result !== '') result += '\n';
+        result += fence;
+        fenceLines.length = 0;
+        inFence = false;
+      } else {
+        flushProse();
+        inFence = true;
+        fenceLines.push(line);
+      }
+    } else if (inFence) {
+      fenceLines.push(line);
+    } else {
+      proseLines.push(line);
+    }
+  }
+
+  if (inFence) {
+    if (result !== '') result += '\n';
+    result += fenceLines.join('\n');
+  } else {
+    flushProse();
+  }
+
+  return result;
+}
+
+/**
  * Split markdown into Discord-safe chunks.
  * Splits at line boundaries and rebalances open code fences at split points.
  */
@@ -23,14 +75,15 @@ export function markdownToDiscordChunks(
 ): DiscordChunk[] {
   if (!markdown) return [];
 
+  const normalized = collapseExtraNewlinesOutsideFences(markdown);
   const softLimit = Math.min(limit - 100, SOFT_LIMIT);
 
   // Fast path: fits in one message
-  if (markdown.length <= limit) {
-    return [{ text: markdown }];
+  if (normalized.length <= limit) {
+    return [{ text: normalized }];
   }
 
-  const lines = markdown.split('\n');
+  const lines = normalized.split('\n');
   const chunks: DiscordChunk[] = [];
   let currentLines: string[] = [];
   let currentLen = 0;

@@ -26,6 +26,8 @@ interface RedisClient {
   connect(): Promise<void>;
   disconnect(): Promise<void>;
   lPush(key: string, value: string): Promise<number>;
+  rPush(key: string, value: string): Promise<number>;
+  lPop(key: string): Promise<string | null>;
   rPop(key: string): Promise<string | null>;
   lRange(key: string, start: number, stop: number): Promise<string[]>;
   lLen(key: string): Promise<number>;
@@ -33,6 +35,7 @@ interface RedisClient {
   set(key: string, value: string, options?: { EX?: number }): Promise<string>;
   del(key: string): Promise<number>;
   incr(key: string): Promise<number>;
+  eval(script: string, options: { keys: string[]; arguments?: string[] }): Promise<unknown>;
 }
 
 export interface AutoModeStoreSettings {
@@ -53,6 +56,40 @@ function encodeQueuePayload(payload: AutoModeQueueEnvelope): string {
 
 function encodeChatSegment(chatId: string): string {
   return encodeURIComponent(chatId);
+}
+
+/** Queued Telegram user text while the single task slot is busy (hybrid). */
+export interface PendingTelegramUserMessage {
+  text: string;
+  outboundChatId?: string;
+  masterRunnerId: string;
+}
+
+function encodePendingTelegramUserMessage(p: PendingTelegramUserMessage): string {
+  return JSON.stringify(p);
+}
+
+function decodePendingTelegramUserMessage(raw: string): PendingTelegramUserMessage | null {
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+      const o = parsed as Record<string, unknown>;
+      if (typeof o.text === 'string' && typeof o.masterRunnerId === 'string') {
+        const outboundChatId = o.outboundChatId;
+        return {
+          text: o.text,
+          masterRunnerId: o.masterRunnerId,
+          outboundChatId:
+            typeof outboundChatId === 'string' && outboundChatId.trim()
+              ? outboundChatId
+              : undefined,
+        };
+      }
+    }
+  } catch {
+    /* ignore */
+  }
+  return null;
 }
 
 function decodeQueuePayload(raw: string): AutoModeQueueEnvelope {
@@ -245,20 +282,21 @@ export class AutoModeRedisTransport {
   /**
    * Fan-out user text from IM into the **master** `input` list (hybrid Telegram).
    * `masterRunnerId` is the chat’s current runner (`/runner`), not a separate config field.
+   * @returns false when Redis is unavailable, master turn cap is reached, or push did not occur.
    */
   async pushMasterInput(
     text: string,
     _masterRunnerId: string,
     outboundChatId?: string,
-  ): Promise<void> {
-    if (!this.client) return;
+  ): Promise<boolean> {
+    if (!this.client) return false;
     const turns = await this.getMasterTurns();
     if (turns >= this.settings.maxTurns) {
       console.warn(
         `[auto-mode-redis] pushMasterInput skipped: masterTurns=${turns} >= maxTurns=${this.settings.maxTurns} ` +
           `(bridge=${this.bridgeSlug}).`,
       );
-      return;
+      return false;
     }
     const key = this.keyMaster('input');
     await this.client.lPush(
@@ -270,6 +308,68 @@ export class AutoModeRedisTransport {
       `[auto-mode-redis] Pushed to master:input (${this.bridgeSlug}), ` +
       `key=${key}, type=${isReport ? 'slave-report' : 'other'}, ` +
       `len=${text.length}, preview=${JSON.stringify(text.slice(0, 100))}`,
+    );
+    return true;
+  }
+
+  /**
+   * Hybrid Telegram only: atomically take the single user-message slot (next Telegram→master input).
+   * Missing key or value `'1'` means idle; `'0'` means a task is in progress.
+   */
+  async tryAcquireTelegramUserInputSlot(): Promise<boolean> {
+    if (!this.client) return false;
+    const idleKey = this.keyMaster('user_input_idle');
+    const raw = await this.client.eval(
+      `
+      local cur = redis.call('GET', KEYS[1])
+      if (not cur) or (cur == '1') then
+        redis.call('SET', KEYS[1], '0')
+        return 1
+      end
+      return 0
+      `,
+      { keys: [idleKey], arguments: [] },
+    );
+    return raw === 1 || raw === '1';
+  }
+
+  /** Allow the next user message from Telegram into `master:input` (task finished or bridge reset). */
+  async releaseTelegramUserInputSlot(): Promise<void> {
+    if (!this.client) return;
+    await this.client.set(this.keyMaster('user_input_idle'), '1');
+  }
+
+  /**
+   * Hybrid: append a user message while the task slot is busy (FIFO: RPUSH, drain with LPOP).
+   * @returns list length after enqueue
+   */
+  async enqueuePendingTelegramUserMessage(
+    payload: PendingTelegramUserMessage,
+  ): Promise<number> {
+    if (!this.client) return 0;
+    const key = this.keyMaster('user_pending');
+    await this.client.rPush(key, encodePendingTelegramUserMessage(payload));
+    return this.client.lLen(key);
+  }
+
+  async getPendingTelegramUserMessageCount(): Promise<number> {
+    if (!this.client) return 0;
+    return this.client.lLen(this.keyMaster('user_pending'));
+  }
+
+  async dequeueOnePendingTelegramUserMessage(): Promise<PendingTelegramUserMessage | null> {
+    if (!this.client) return null;
+    const raw = await this.client.lPop(this.keyMaster('user_pending'));
+    if (!raw) return null;
+    return decodePendingTelegramUserMessage(raw);
+  }
+
+  /** Re-queue at the front when pushMasterInput failed after dequeue (LPUSH). */
+  async prependPendingTelegramUserMessage(payload: PendingTelegramUserMessage): Promise<void> {
+    if (!this.client) return;
+    await this.client.lPush(
+      this.keyMaster('user_pending'),
+      encodePendingTelegramUserMessage(payload),
     );
   }
 
@@ -450,7 +550,17 @@ export class AutoModeRedisTransport {
   async resetAll(): Promise<void> {
     if (!this.client) return;
     const suffixes: AutoRedisQueueSuffix[] = [
-      'input', 'out', 'turns', 'resp', 'summary', 'busy', 'last_user', 'reverify', 'review_loops',
+      'input',
+      'out',
+      'turns',
+      'resp',
+      'summary',
+      'busy',
+      'last_user',
+      'reverify',
+      'review_loops',
+      'user_input_idle',
+      'user_pending',
     ];
     for (const suffix of suffixes) {
       await this.client.del(this.keyMaster(suffix));
@@ -459,11 +569,21 @@ export class AutoModeRedisTransport {
     this.initialized = false;
   }
 
-  /** Drain master and slave input queues (discard pending work without resetting counters). */
-  async drainInputQueues(): Promise<void> {
+  /**
+   * Clear master/slave input lists after abort (drop in-flight pipeline work).
+   * Does not delete `user_pending` — Hybrid Telegram backlog is preserved for /stop → next message.
+   */
+  async drainInFlightInputQueues(): Promise<void> {
     if (!this.client) return;
     await this.client.del(this.keyMaster('input'));
     await this.client.del(this.keySlave('input'));
+  }
+
+  /** Drain master and slave input queues and Hybrid `user_pending` (full discard). */
+  async drainInputQueues(): Promise<void> {
+    if (!this.client) return;
+    await this.drainInFlightInputQueues();
+    await this.client.del(this.keyMaster('user_pending'));
   }
 
   // ── Monitor peek methods (read without consuming) ──

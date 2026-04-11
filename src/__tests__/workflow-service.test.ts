@@ -1169,6 +1169,21 @@ describe('WorkflowService', () => {
     assert.ok(!gitService.calls.some((c) => c.startsWith('removeTaskWorktree:')));
   });
 
+  it('startRegressionTesting is idempotent when already regression_testing (reviewer raced before HTTP)', async () => {
+    const { workflowService, project, store, scmClient } = createHarness();
+    const sprint = createSprint(store, project.id);
+    const taskSession = createTaskSession(store, project.id, sprint.id, {
+      workflowState: 'regression_testing',
+      pullRequestNumber: 42,
+      pullRequestUrl: 'https://example.test/pr/42',
+      regressionMasterSha: 'sha-already',
+    });
+    const out = await workflowService.startRegressionTesting(taskSession.id);
+    assert.equal(out.workflowState, 'regression_testing');
+    assert.equal(out.regressionMasterSha, 'sha-already');
+    assert.deepEqual(scmClient.calls, []);
+  });
+
   it('removes linked task worktree after successful merge (before fetch)', async () => {
     const { workflowService, project, store, gitService } = createHarness();
     const sprint = createSprint(store, project.id);

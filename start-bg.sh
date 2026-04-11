@@ -22,8 +22,28 @@ export PORT
 unset CTI_HOME
 export CTI_HOME=
 
+# Same git resolution as ecosystem.config.cjs (no /opt/homebrew/bin/git probe — use CTI_GIT_EXECUTABLE or brew install git).
+resolve_git_for_pm2() {
+  if [[ -n "${CTI_GIT_EXECUTABLE:-}" ]]; then
+    echo "  Git: using CTI_GIT_EXECUTABLE=${CTI_GIT_EXECUTABLE} (already set)"
+    return 0
+  fi
+  local _c
+  for _c in /usr/local/bin/git /usr/bin/git; do
+    if [[ -x "${_c}" ]] && "${_c}" --version &>/dev/null; then
+      export CTI_GIT_EXECUTABLE="${_c}"
+      echo "  Git: CTI_GIT_EXECUTABLE=${CTI_GIT_EXECUTABLE} (start-bg probe → PM2 inherits)"
+      return 0
+    fi
+  done
+  echo "  Git: CTI_GIT_EXECUTABLE unset (ecosystem.config.cjs will probe /usr/local → /usr/bin)"
+  return 0
+}
+
 echo "Building (daemon + Next.js)..."
 npm run build
+
+resolve_git_for_pm2
 
 if $PM2 describe "$APP_NAME" &>/dev/null; then
   echo "Restarting existing PM2 app $APP_NAME (ecosystem env, CTI_HOME cleared)..."

@@ -31,6 +31,7 @@ import {
   runAutoModeRedisInboundLoop,
 } from '../redis-local-transport';
 import { buildDiscordRestProxyAgent, configureDiscordGatewayProxy } from '../discord-ws-proxy';
+import { collapseExtraNewlinesOutsideFences } from '../markdown/discord';
 
 /** Max number of message IDs to keep for dedup. */
 const DEDUP_MAX = 1000;
@@ -1024,7 +1025,7 @@ export class DiscordAdapter extends BaseChannelAdapter {
    * Handles the common tags used in bridge-manager command responses.
    */
   private htmlToDiscordMarkdown(html: string): string {
-    return html
+    const converted = html
       .replace(/<b>(.*?)<\/b>/gi, '**$1**')
       .replace(/<strong>(.*?)<\/strong>/gi, '**$1**')
       .replace(/<i>(.*?)<\/i>/gi, '*$1*')
@@ -1036,6 +1037,7 @@ export class DiscordAdapter extends BaseChannelAdapter {
       .replace(/&amp;/g, '&')
       .replace(/<br\s*\/?>/gi, '\n')
       .replace(/<[^>]+>/g, ''); // Strip remaining HTML tags
+    return collapseExtraNewlinesOutsideFences(converted).trim();
   }
 }
 

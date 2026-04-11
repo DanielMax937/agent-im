@@ -21,6 +21,18 @@ function createRedisStub(state: RedisStubState) {
       state.lists.set(key, list);
       return list.length;
     },
+    async rPush(key: string, value: string) {
+      const list = state.lists.get(key) ?? [];
+      list.push(value);
+      state.lists.set(key, list);
+      return list.length;
+    },
+    async lPop(key: string) {
+      const list = state.lists.get(key) ?? [];
+      const value = list.shift() ?? null;
+      state.lists.set(key, list);
+      return value;
+    },
     async rPop(key: string) {
       const list = state.lists.get(key) ?? [];
       const value = list.pop() ?? null;
@@ -49,6 +61,16 @@ function createRedisStub(state: RedisStubState) {
       const next = (parseInt(state.values.get(key) ?? '0', 10) || 0) + 1;
       state.values.set(key, String(next));
       return next;
+    },
+    async eval(script: string, options: { keys: string[]; arguments?: string[] }) {
+      const key = options.keys[0];
+      if (!key) return 0;
+      const cur = state.values.get(key);
+      if (cur === undefined || cur === '1') {
+        state.values.set(key, '0');
+        return 1;
+      }
+      return 0;
     },
   };
 }
@@ -93,7 +115,8 @@ test('AutoModeRedisTransport preserves outbound chat routing for master and slav
   );
   (transport as unknown as { client: ReturnType<typeof createRedisStub> }).client = createRedisStub(state);
 
-  await transport.pushMasterInput('hello master', 'runner-a', 'chat-1');
+  const pushed = await transport.pushMasterInput('hello master', 'runner-a', 'chat-1');
+  assert.equal(pushed, true);
   const masterMsg = await transport.pollOnceMaster();
   assert.ok(masterMsg);
   assert.equal(masterMsg.text, 'hello master');
@@ -156,4 +179,56 @@ test('pushSlaveHandoff does not enqueue when slaveTurns >= maxTurns', async () =
 
   await transport.pushSlaveHandoff('blocked handoff', 'chat-9');
   assert.equal(state.lists.get('cti:auto:bridge-a:telegram:slave:input')?.length ?? 0, 0);
+});
+
+test('enqueuePendingTelegramUserMessage drains FIFO (RPUSH/LPOP)', async () => {
+  const state: RedisStubState = {
+    lists: new Map(),
+    values: new Map(),
+  };
+  const transport = new AutoModeRedisTransport(
+    'telegram',
+    { redisUrl: 'redis://127.0.0.1:6379', maxTurns: 10, hybridMode: true },
+    'bridge-a',
+    ['runner-a'],
+    'slave-a',
+    () => 'fallback-chat',
+  );
+  (transport as unknown as { client: ReturnType<typeof createRedisStub> }).client = createRedisStub(state);
+
+  await transport.enqueuePendingTelegramUserMessage({
+    text: 'first',
+    masterRunnerId: 'r1',
+    outboundChatId: 'c1',
+  });
+  await transport.enqueuePendingTelegramUserMessage({
+    text: 'second',
+    masterRunnerId: 'r1',
+    outboundChatId: 'c1',
+  });
+  const a = await transport.dequeueOnePendingTelegramUserMessage();
+  const b = await transport.dequeueOnePendingTelegramUserMessage();
+  assert.equal(a?.text, 'first');
+  assert.equal(b?.text, 'second');
+});
+
+test('tryAcquireTelegramUserInputSlot is atomic: second acquire fails until release', async () => {
+  const state: RedisStubState = {
+    lists: new Map(),
+    values: new Map(),
+  };
+  const transport = new AutoModeRedisTransport(
+    'telegram',
+    { redisUrl: 'redis://127.0.0.1:6379', maxTurns: 10, hybridMode: true },
+    'bridge-a',
+    ['runner-a'],
+    'slave-a',
+    () => 'fallback-chat',
+  );
+  (transport as unknown as { client: ReturnType<typeof createRedisStub> }).client = createRedisStub(state);
+
+  assert.equal(await transport.tryAcquireTelegramUserInputSlot(), true);
+  assert.equal(await transport.tryAcquireTelegramUserInputSlot(), false);
+  await transport.releaseTelegramUserInputSlot();
+  assert.equal(await transport.tryAcquireTelegramUserInputSlot(), true);
 });

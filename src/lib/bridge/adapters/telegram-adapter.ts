@@ -7,6 +7,7 @@
 
 import crypto from 'crypto';
 import type {
+  ChannelBinding,
   ChannelType,
   InboundMessage,
   OutboundMessage,
@@ -214,6 +215,9 @@ export class TelegramAdapter extends BaseChannelAdapter {
       } catch (err) {
         console.warn('[telegram-adapter] Failed to start slave process:', err);
       }
+      void this.flushNextPendingUserMessageIfAny().catch((err) => {
+        console.warn('[telegram-adapter] flush pending user messages after hybrid start:', err);
+      });
       console.log(
         `[telegram-adapter] Hybrid Auto mode (Telegram + Redis), instance=${this.instanceId}`,
       );
@@ -286,6 +290,9 @@ export class TelegramAdapter extends BaseChannelAdapter {
     });
 
     if (this.autoModeRedis) {
+      if (this.hybridAutoMode) {
+        await this.autoModeRedis.releaseTelegramUserInputSlot().catch(() => {});
+      }
       await this.autoModeRedis.disconnect();
       this.autoModeRedis = null;
     }
@@ -646,6 +653,7 @@ export class TelegramAdapter extends BaseChannelAdapter {
         await this.autoModeRedis.resetReviewLoops().catch(() => {});
         await this.autoModeRedis.incrMasterTurns().catch(() => {});
         await this.sendAutoModeTaskFinishedNotice(payload.outboundChatId);
+        await this.releaseHybridTelegramSlotAndFlushNextPending().catch(() => {});
         return;
       }
 
@@ -782,6 +790,7 @@ export class TelegramAdapter extends BaseChannelAdapter {
         }).catch(() => {});
       }
       await this.autoModeRedis.incrMasterTurns().catch(() => {});
+      await this.releaseHybridTelegramSlotAndFlushNextPending().catch(() => {});
       return;
     }
 
@@ -995,21 +1004,23 @@ export class TelegramAdapter extends BaseChannelAdapter {
   override async stopAutoModeTasks(activeTasks: Map<string, AbortController>): Promise<string | null> {
     if (!this.autoModeRedis) return null;
 
-    // Active task keys are CodePilot session ids, so resolve current auto-mode
-    // bindings and abort by their bound sessions instead of matching chat-id text.
     const bridgeSlug = this.autoModeRedis.bridgeSlug;
-    const autoSessionIds = new Set(
-      router
-        .listBindings(this.channelType)
-        .filter((binding) =>
-          binding.chatId.startsWith(`auto:${bridgeSlug}:`) ||
-          binding.chatId.startsWith(`auto:master:${bridgeSlug}:`),
-        )
-        .map((binding) => binding.codepilotSessionId),
-    );
+    const allBindings = router.listBindings();
+
+    const bindingMatchesThisAdapter = (b: ChannelBinding): boolean =>
+      b.channelType === this.channelType ||
+      (this.instanceId === 'default' && b.channelType === this.baseChannelType) ||
+      b.channelType === `${this.baseChannelType}:${this.instanceId}`;
+
+    const isAutoSyntheticChat = (b: ChannelBinding): boolean =>
+      b.chatId.startsWith(`auto:${bridgeSlug}:`) || b.chatId.startsWith(`auto:master:${bridgeSlug}:`);
+
+    // Abort by session id: activeTasks keys must match binding.codepilotSessionId for synthetic
+    // auto chats (not the real Telegram chat id — /stop used to miss these).
     let aborted = 0;
-    for (const [sessionId, controller] of activeTasks) {
-      if (autoSessionIds.has(sessionId)) {
+    for (const [sessionId, controller] of [...activeTasks]) {
+      const binding = allBindings.find((b) => b.codepilotSessionId === sessionId);
+      if (binding && bindingMatchesThisAdapter(binding) && isAutoSyntheticChat(binding)) {
         controller.abort();
         activeTasks.delete(sessionId);
         aborted++;
@@ -1020,8 +1031,22 @@ export class TelegramAdapter extends BaseChannelAdapter {
     await this.autoModeRedis.clearSlaveBusy().catch(() => {});
     writeRunnerStatus({ masterBusy: false, slaveBusy: false, masterSince: undefined, slaveSince: undefined });
 
-    // Drain pending input queues so no queued work fires after stop
-    await this.autoModeRedis.drainInputQueues().catch(() => {});
+    // Drop in-flight master/slave Redis input only; keep `user_pending` so backlog survives /stop.
+    await this.autoModeRedis.drainInFlightInputQueues().catch(() => {});
+
+    let hybridQueueLine = '';
+    if (this.hybridAutoMode) {
+      await this.autoModeRedis.releaseTelegramUserInputSlot().catch(() => {});
+      const flushedNext = await this.flushNextPendingUserMessageIfAny({ notifyAutoNext: true }).catch(() => false);
+      const pendingRemaining = await this.autoModeRedis.getPendingTelegramUserMessageCount().catch(() => 0);
+      if (flushedNext) {
+        hybridQueueLine =
+          `\n• Next queued Telegram message started automatically` +
+          (pendingRemaining > 0 ? ` (${pendingRemaining} still in queue)` : '');
+      } else if (pendingRemaining > 0) {
+        hybridQueueLine = `\n• ${pendingRemaining} Telegram message(s) still in queue (slot released)`;
+      }
+    }
 
     // Drop already-enqueued master/slave synthetic messages waiting in memory.
     this.queue = this.queue.filter(
@@ -1029,7 +1054,11 @@ export class TelegramAdapter extends BaseChannelAdapter {
     );
 
     console.log(`[telegram-adapter] Auto mode tasks stopped for ${this.instanceId}, aborted=${aborted}`);
-    return `Auto mode tasks stopped.\n• ${aborted} in-flight task(s) aborted\n• Slave busy flag cleared\n• Input queues drained\n• Queued auto-mode messages dropped`;
+    return (
+      `Auto mode tasks stopped.\n• ${aborted} in-flight task(s) aborted\n• Slave busy flag cleared\n• Master/slave input queues cleared (in-flight only; user backlog preserved)` +
+      hybridQueueLine +
+      `\n• Queued auto-mode messages dropped`
+    );
   }
 
   // ── Lifecycle hooks (called generically by bridge-manager) ───
@@ -1067,6 +1096,52 @@ export class TelegramAdapter extends BaseChannelAdapter {
     });
   }
 
+  private async releaseHybridTelegramSlotAndFlushNextPending(): Promise<void> {
+    const rt = this.autoModeRedis;
+    if (!rt || !this.hybridAutoMode) return;
+    await rt.releaseTelegramUserInputSlot();
+    await this.flushNextPendingUserMessageIfAny();
+  }
+
+  /**
+   * After the task slot is idle, move one queued Telegram user message (if any) into `master:input`.
+   * @returns whether a message was successfully pushed to `master:input`
+   */
+  private async flushNextPendingUserMessageIfAny(opts?: { notifyAutoNext?: boolean }): Promise<boolean> {
+    const rt = this.autoModeRedis;
+    if (!rt || !this.hybridAutoMode) return false;
+    if ((await rt.getPendingTelegramUserMessageCount()) === 0) return false;
+    const acquired = await rt.tryAcquireTelegramUserInputSlot();
+    if (!acquired) return false;
+    const pending = await rt.dequeueOnePendingTelegramUserMessage();
+    if (!pending) {
+      await rt.releaseTelegramUserInputSlot();
+      return false;
+    }
+    const pushed = await rt.pushMasterInput(
+      pending.text,
+      pending.masterRunnerId,
+      pending.outboundChatId,
+    );
+    if (!pushed) {
+      await rt.prependPendingTelegramUserMessage(pending);
+      await rt.releaseTelegramUserInputSlot();
+      return false;
+    }
+    if (opts?.notifyAutoNext && this.botToken) {
+      const remaining = await rt.getPendingTelegramUserMessageCount();
+      const line =
+        remaining > 0
+          ? `⏭️ 已中止当前任务，正在处理队列中的下一条（剩余 ${remaining} 条待处理）。`
+          : `⏭️ 已中止当前任务，正在处理队列中的下一条。`;
+      await callTelegramApi(this.botToken, 'sendMessage', {
+        chat_id: pending.outboundChatId,
+        text: line,
+      }).catch(() => {});
+    }
+    return true;
+  }
+
   private enqueue(msg: InboundMessage): void {
     if (
       this.hybridAutoMode &&
@@ -1080,20 +1155,37 @@ export class TelegramAdapter extends BaseChannelAdapter {
         this.hybridMirrorChatId = msg.address.chatId;
         if (!msg.deliverySource) msg.deliverySource = 'runner';
         const binding = router.resolve(msg.address);
-        // Check if slave is busy before pushing to master
-        void this.autoModeRedis.isSlaveBusy().then((busy) => {
-          if (busy) {
-            void callTelegramApi(this.botToken!, 'sendMessage', {
+        const token = this.botToken!;
+        const rt = this.autoModeRedis;
+        void (async () => {
+          const acquired = await rt.tryAcquireTelegramUserInputSlot();
+          if (!acquired) {
+            const masterRunnerId =
+              binding.runnerProfileId ??
+              getBridgeContext().getDefaultRunnerIdForChannelType?.(this.channelType) ??
+              'default';
+            const n = await rt.enqueuePendingTelegramUserMessage({
+              text: t,
+              outboundChatId: msg.address.chatId,
+              masterRunnerId,
+            });
+            await callTelegramApi(token, 'sendMessage', {
               chat_id: msg.address.chatId,
-              text: '⏳ Slave 正在处理中，已排队等待...',
+              text: `📥 已加入待处理队列（共 ${n} 条）。当前任务结束后会按顺序处理。`,
             }).catch(() => {});
+            return;
           }
-          void this.autoModeRedis!.pushMasterInput(
+          const pushed = await rt.pushMasterInput(
             t,
-            binding.runnerProfileId ?? getBridgeContext().getDefaultRunnerIdForChannelType?.(this.channelType) ?? 'default',
+            binding.runnerProfileId ??
+              getBridgeContext().getDefaultRunnerIdForChannelType?.(this.channelType) ??
+              'default',
             msg.address.chatId,
           );
-        });
+          if (!pushed) {
+            await rt.releaseTelegramUserInputSlot().catch(() => {});
+          }
+        })();
         return;
       }
     }
@@ -1122,6 +1214,7 @@ export class TelegramAdapter extends BaseChannelAdapter {
       () => this.running,
       async () => {
         console.log(`[telegram-adapter] Auto mode max turns/responses (${this.instanceId})`);
+        await this.autoModeRedis?.releaseTelegramUserInputSlot().catch(() => {});
         await this.stop();
       },
       (msg) => {
@@ -1153,6 +1246,7 @@ export class TelegramAdapter extends BaseChannelAdapter {
       () => this.running,
       async () => {
         console.log(`[telegram-adapter] Auto mode master max turns (${this.instanceId})`);
+        await this.autoModeRedis?.releaseTelegramUserInputSlot().catch(() => {});
         await this.stop();
       },
     );

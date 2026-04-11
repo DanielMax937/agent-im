@@ -311,6 +311,7 @@ export function createTaskSession(
     reviewBranchName: overrides.reviewBranchName,
     pullRequestUrl: overrides.pullRequestUrl,
     pullRequestNumber: overrides.pullRequestNumber,
+    regressionMasterSha: overrides.regressionMasterSha,
     releasePullRequestUrl: overrides.releasePullRequestUrl,
     releasePullRequestNumber: overrides.releasePullRequestNumber,
     reviewRejectionCount: overrides.reviewRejectionCount,

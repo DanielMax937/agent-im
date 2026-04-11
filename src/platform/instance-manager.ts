@@ -670,9 +670,19 @@ export class InstanceManager {
 
   async stopInstance(instanceId: string): Promise<void> {
     const runner = this.runners.get(instanceId);
-    if (!runner) return;
-    await runner.stop();
-    this.runners.delete(instanceId);
+    if (runner) {
+      await runner.stop();
+      this.runners.delete(instanceId);
+      return;
+    }
+    const inst = this.deps.store.getAgentInstance(instanceId);
+    if (inst && (inst.status === 'running' || inst.status === 'starting')) {
+      this.deps.store.upsertAgentInstance({
+        ...inst,
+        status: 'stopped',
+        stoppedAt: new Date().toISOString(),
+      });
+    }
   }
 
   async deleteInstance(instanceId: string): Promise<void> {

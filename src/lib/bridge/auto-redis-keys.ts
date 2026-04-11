@@ -24,7 +24,14 @@ export type AutoRedisQueueSuffix =
   /** Counter: how many times master has sent a follow-up back to slave in the current task cycle. */
   | 'review_loops'
   /** Stored peak coverage percentage (0–100) for this bridge's project, updated after each passing verification. */
-  | 'coverage_baseline';
+  | 'coverage_baseline'
+  /**
+   * Hybrid Telegram: `'1'` = may accept the next user message from Telegram into `master:input`;
+   * `'0'` = task in progress (until verification PASSED, max turns, review cap halt, reset, or bridge stop).
+   */
+  | 'user_input_idle'
+  /** Hybrid Telegram: FIFO list (RPUSH/LPOP) of JSON pending user messages while the task slot is busy. */
+  | 'user_pending';
 
 export type AutoRedisRole = 'master' | 'slave';
 

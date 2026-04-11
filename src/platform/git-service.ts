@@ -1,7 +1,9 @@
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+
+import { getKanbanLogger } from './kanban-logger';
 
 const PATH_SEP = process.platform === 'win32' ? ';' : ':';
 
@@ -18,18 +20,41 @@ function prependPathDir(env: NodeJS.ProcessEnv, dir: string): void {
 /** Lazily resolved absolute path to `git` (or `git` / `git.exe` as fallback). */
 let cachedGitExecutable: string | undefined;
 
-function fileIsRunnableGit(absPath: string): boolean {
-  if (!fs.existsSync(absPath)) return false;
+/** One-shot log on first resolution (PM2 / E2E debugging). */
+let didLogGitResolution = false;
+
+type GitProbeFail = { candidate: string; detail: string };
+
+/**
+ * Existence + exec bit + `git --version` smoke test. Returns failure detail or null if OK.
+ * `stat`/`access` can pass while `spawn` still fails (broken shim, sandbox); smoke catches that.
+ */
+function probeGitCandidate(absPath: string): string | null {
+  if (!absPath) return 'empty candidate';
+  if (!fs.existsSync(absPath)) return 'path does not exist on disk';
   if (process.platform === 'win32') {
     const lower = absPath.toLowerCase();
-    return lower.endsWith('.exe') || lower.endsWith('.cmd');
+    if (!lower.endsWith('.exe') && !lower.endsWith('.cmd')) return 'not a .exe/.cmd';
+  } else {
+    try {
+      fs.accessSync(absPath, fs.constants.F_OK | fs.constants.X_OK);
+    } catch (e) {
+      return `access: ${e instanceof Error ? e.message : String(e)}`;
+    }
   }
-  try {
-    fs.accessSync(absPath, fs.constants.F_OK | fs.constants.X_OK);
-    return true;
-  } catch {
-    return false;
+  const r = spawnSync(absPath, ['--version'], {
+    stdio: ['ignore', 'pipe', 'pipe'],
+    timeout: 5000,
+    windowsHide: true,
+  });
+  if (r.error) {
+    const err = r.error as NodeJS.ErrnoException;
+    return `spawn git --version: ${err.code ?? err.message} (${err.message})`;
   }
+  if (r.status !== 0) {
+    return `git --version exit=${r.status} stderr=${String(r.stderr ?? '').slice(0, 400)}`;
+  }
+  return null;
 }
 
 /**
@@ -66,18 +91,54 @@ function resolveGitExecutable(): string {
       candidates.push(path.join(local, 'Programs', 'Git', 'cmd', 'git.exe'));
     }
   } else {
-    candidates.push('/opt/homebrew/bin/git', '/usr/local/bin/git', '/usr/bin/git');
+    candidates.push('/usr/local/bin/git', '/usr/bin/git');
   }
 
+  const rejected: GitProbeFail[] = [];
   for (const c of candidates) {
     if (!c) continue;
-    if (fileIsRunnableGit(c)) {
+    const why = probeGitCandidate(c);
+    if (why === null) {
       cachedGitExecutable = c;
+      if (!didLogGitResolution) {
+        didLogGitResolution = true;
+        getKanbanLogger().info(
+          {
+            event: 'git_executable_resolved',
+            resolved: c,
+            fromEnv: Boolean(envGit),
+            ctiGitExecutableEnv: envGit || null,
+            ctiGitPm2BootSource: process.env.CTI_GIT_PM2_BOOT_SOURCE ?? null,
+            pid: process.pid,
+            platform: process.platform,
+            rejectedCount: rejected.length,
+            rejected,
+          },
+          'Git executable resolved for spawn',
+        );
+      }
       return c;
     }
+    rejected.push({ candidate: c, detail: why });
   }
 
   cachedGitExecutable = 'git';
+  if (!didLogGitResolution) {
+    didLogGitResolution = true;
+    getKanbanLogger().warn(
+      {
+        event: 'git_executable_fallback_path_lookup',
+        resolved: 'git',
+        ctiGitExecutableEnv: envGit || null,
+        ctiGitPm2BootSource: process.env.CTI_GIT_PM2_BOOT_SOURCE ?? null,
+        pid: process.pid,
+        pathHead: (process.env.PATH ?? '').slice(0, 2500),
+        cwd: process.cwd(),
+        rejected,
+      },
+      'No absolute git passed probe; falling back to PATH lookup "git"',
+    );
+  }
   return 'git';
 }
 
@@ -134,6 +195,7 @@ class ShellCommandRunner implements CommandRunner {
   async run(command: string, args: string[], cwd: string, allowedExitCodes: number[] = [0]): Promise<CommandResult> {
     const exe = command === 'git' ? resolveGitExecutable() : command;
     return new Promise<CommandResult>((resolve, reject) => {
+      const cwdExists = Boolean(cwd && fs.existsSync(cwd));
       const child = spawn(exe, args, {
         cwd,
         env: envForPlatformCli(),
@@ -149,7 +211,27 @@ class ShellCommandRunner implements CommandRunner {
         stderr += String(chunk);
       });
 
-      child.on('error', reject);
+      child.on('error', (err) => {
+        if (command === 'git') {
+          try {
+            getKanbanLogger().error(
+              {
+                event: 'git_spawn_failed',
+                err,
+                errno: (err as NodeJS.ErrnoException).code,
+                exe,
+                cwd,
+                cwdExists,
+                argsPreview: args.slice(0, 16),
+              },
+              'git spawn child_process error (check cwd exists; ENOENT often means missing binary or bad cwd)',
+            );
+          } catch {
+            /* logger not ready */
+          }
+        }
+        reject(err);
+      });
       child.on('close', (code) => {
         const exitCode = code ?? 1;
         const result = { stdout, stderr, exitCode };
