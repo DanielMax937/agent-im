@@ -1,5 +1,6 @@
 node_modules/
 dist/
+*.pid
 *.tgz
 .env
 .env.local

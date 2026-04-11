@@ -18,6 +18,9 @@ import {
   formatProviderEnvKeysForLog,
   mergeRunnerSubprocessEnv,
 } from './llm-provider';
+import { reportProviderError, runProviderAsync, safeClose, safeEnqueue } from './provider-stream-safety';
+
+const COPILOT_LOG = 'copilot-provider';
 
 export type CopilotSpawnFn = (cmd: string, args: string[], opts: SpawnOptions) => ChildProcess;
 
@@ -75,7 +78,8 @@ export class CopilotProvider implements LLMProvider {
     const self = this;
     return new ReadableStream<string>({
       start(controller) {
-        (async () => {
+        runProviderAsync(controller, COPILOT_LOG, async () => {
+          const emit = (chunk: string) => safeEnqueue(controller, chunk, COPILOT_LOG);
           try {
             const bin = resolveCopilotPath(self.copilotExecutable);
             const args: string[] = [
@@ -105,7 +109,7 @@ export class CopilotProvider implements LLMProvider {
               { subprocessEnv: self.subprocessEnv },
             );
             console.log(
-              `[copilot-provider] spawn copilot CLI: bin=${bin} cwd=${params.workingDirectory || process.cwd()} ` +
+              `[${COPILOT_LOG}] spawn copilot CLI: bin=${bin} cwd=${params.workingDirectory || process.cwd()} ` +
                 `params.model=${params.model ?? '-'} effectiveModel=${model ?? '-'} stream=${params.disableLlmStreaming ? 'off' : 'on'} ` +
                 `autoApprove=${self.autoApprove} sessionId=${params.sessionId ?? '-'} sdkSessionId=${params.sdkSessionId ?? '-'} ` +
                 `process.CTI_RUNTIME=${process.env.CTI_RUNTIME ?? '(unset)'} ` +
@@ -164,109 +168,113 @@ export class CopilotProvider implements LLMProvider {
             });
 
             rl.on('line', (line) => {
-              if (!line.trim()) return;
-              noteActivity();
-
-              let event: Record<string, unknown>;
               try {
-                event = JSON.parse(line);
-              } catch {
-                return;
-              }
+                if (!line.trim()) return;
+                noteActivity();
 
-              const type = event.type as string | undefined;
-              const data = (event.data as Record<string, unknown> | undefined) ?? {};
-
-              switch (type) {
-                case 'session.tools_updated': {
-                  const eventModel = data.model as string | undefined;
-                  controller.enqueue(sseEvent('status', {
-                    ...(sessionId ? { session_id: sessionId } : {}),
-                    ...(eventModel ? { model: eventModel } : {}),
-                  }));
-                  break;
+                let event: Record<string, unknown>;
+                try {
+                  event = JSON.parse(line);
+                } catch {
+                  return;
                 }
 
-                case 'assistant.turn_start': {
-                  const interactionId = data.interactionId as string | undefined;
-                  if (interactionId) {
-                    controller.enqueue(sseEvent('status', {
+                const type = event.type as string | undefined;
+                const data = (event.data as Record<string, unknown> | undefined) ?? {};
+
+                switch (type) {
+                  case 'session.tools_updated': {
+                    const eventModel = data.model as string | undefined;
+                    emit(sseEvent('status', {
                       ...(sessionId ? { session_id: sessionId } : {}),
-                      interaction_id: interactionId,
+                      ...(eventModel ? { model: eventModel } : {}),
                     }));
+                    break;
                   }
-                  break;
-                }
 
-                case 'assistant.message_delta': {
-                  const delta = data.deltaContent as string | undefined;
-                  if (delta) {
-                    controller.enqueue(sseEvent('text', delta));
+                  case 'assistant.turn_start': {
+                    const interactionId = data.interactionId as string | undefined;
+                    if (interactionId) {
+                      emit(sseEvent('status', {
+                        ...(sessionId ? { session_id: sessionId } : {}),
+                        interaction_id: interactionId,
+                      }));
+                    }
+                    break;
                   }
-                  break;
-                }
 
-                case 'assistant.message': {
-                  const content = data.content as string | undefined;
-                  if (content) {
-                    controller.enqueue(sseEvent('text', content));
+                  case 'assistant.message_delta': {
+                    const delta = data.deltaContent as string | undefined;
+                    if (delta) {
+                      emit(sseEvent('text', delta));
+                    }
+                    break;
                   }
-                  break;
-                }
 
-                case 'tool.execution_start': {
-                  const toolCallId = data.toolCallId as string | undefined;
-                  const toolName = data.toolName as string | undefined;
-                  controller.enqueue(sseEvent('tool_use', {
-                    id: toolCallId || `tool-${Date.now()}`,
-                    name: toolName || 'tool',
-                    input: (data.arguments as Record<string, unknown> | undefined) ?? {},
-                  }));
-                  break;
-                }
-
-                case 'tool.execution_complete': {
-                  const result = data.result as Record<string, unknown> | undefined;
-                  const ok = data.success === true;
-                  controller.enqueue(sseEvent('tool_result', {
-                    tool_use_id: (data.toolCallId as string) || `tool-${Date.now()}`,
-                    content:
-                      stringifyContent(result?.detailedContent)
-                      || stringifyContent(result?.content)
-                      || (ok ? 'Done' : 'Tool error'),
-                    is_error: !ok,
-                  }));
-                  break;
-                }
-
-                case 'result': {
-                  sawResult = true;
-                  clearTimers();
-                  sessionId =
-                    (event.sessionId as string | undefined)
-                    || (data.sessionId as string | undefined)
-                    || sessionId;
-                  const exitCode =
-                    typeof event.exitCode === 'number'
-                      ? event.exitCode
-                      : (typeof data.exitCode === 'number' ? data.exitCode : 0);
-                  const usage = (event.usage as Record<string, unknown> | undefined)
-                    ?? (data.usage as Record<string, unknown> | undefined);
-                  controller.enqueue(sseEvent('result', {
-                    ...(sessionId ? { session_id: sessionId } : {}),
-                    usage: usage ? {
-                      input_tokens: Number(usage.inputTokens ?? usage.input_tokens ?? 0),
-                      output_tokens: Number(usage.outputTokens ?? usage.output_tokens ?? 0),
-                      cache_read_input_tokens: Number(usage.cacheReadTokens ?? usage.cache_read_input_tokens ?? 0),
-                    } : undefined,
-                    is_error: exitCode !== 0,
-                    exit_code: exitCode,
-                  }));
-                  if (exitCode !== 0) {
-                    controller.enqueue(sseEvent('error', `Copilot exited with code ${exitCode}`));
+                  case 'assistant.message': {
+                    const content = data.content as string | undefined;
+                    if (content) {
+                      emit(sseEvent('text', content));
+                    }
+                    break;
                   }
-                  break;
+
+                  case 'tool.execution_start': {
+                    const toolCallId = data.toolCallId as string | undefined;
+                    const toolName = data.toolName as string | undefined;
+                    emit(sseEvent('tool_use', {
+                      id: toolCallId || `tool-${Date.now()}`,
+                      name: toolName || 'tool',
+                      input: (data.arguments as Record<string, unknown> | undefined) ?? {},
+                    }));
+                    break;
+                  }
+
+                  case 'tool.execution_complete': {
+                    const result = data.result as Record<string, unknown> | undefined;
+                    const ok = data.success === true;
+                    emit(sseEvent('tool_result', {
+                      tool_use_id: (data.toolCallId as string) || `tool-${Date.now()}`,
+                      content:
+                        stringifyContent(result?.detailedContent)
+                        || stringifyContent(result?.content)
+                        || (ok ? 'Done' : 'Tool error'),
+                      is_error: !ok,
+                    }));
+                    break;
+                  }
+
+                  case 'result': {
+                    sawResult = true;
+                    clearTimers();
+                    sessionId =
+                      (event.sessionId as string | undefined)
+                      || (data.sessionId as string | undefined)
+                      || sessionId;
+                    const exitCode =
+                      typeof event.exitCode === 'number'
+                        ? event.exitCode
+                        : (typeof data.exitCode === 'number' ? data.exitCode : 0);
+                    const usage = (event.usage as Record<string, unknown> | undefined)
+                      ?? (data.usage as Record<string, unknown> | undefined);
+                    emit(sseEvent('result', {
+                      ...(sessionId ? { session_id: sessionId } : {}),
+                      usage: usage ? {
+                        input_tokens: Number(usage.inputTokens ?? usage.input_tokens ?? 0),
+                        output_tokens: Number(usage.outputTokens ?? usage.output_tokens ?? 0),
+                        cache_read_input_tokens: Number(usage.cacheReadTokens ?? usage.cache_read_input_tokens ?? 0),
+                      } : undefined,
+                      is_error: exitCode !== 0,
+                      exit_code: exitCode,
+                    }));
+                    if (exitCode !== 0) {
+                      emit(sseEvent('error', `Copilot exited with code ${exitCode}`));
+                    }
+                    break;
+                  }
                 }
+              } catch (lineErr) {
+                reportProviderError(controller, lineErr, COPILOT_LOG);
               }
             });
 
@@ -288,8 +296,8 @@ export class CopilotProvider implements LLMProvider {
                     : `code ${code ?? 0}`;
                   reject(new Error(
                     (hasStartupTimeout
-                      ? `[copilot-provider] copilot timed out waiting for startup/output after ${copilotStartTimeoutMs()}ms`
-                      : `[copilot-provider] copilot exited with ${exitLabel}`) +
+                      ? `[${COPILOT_LOG}] copilot timed out waiting for startup/output after ${copilotStartTimeoutMs()}ms`
+                      : `[${COPILOT_LOG}] copilot exited with ${exitLabel}`) +
                     (stderr ? `\n${stderr.slice(0, 1000)}` : '')
                   ));
                 } else {
@@ -299,18 +307,11 @@ export class CopilotProvider implements LLMProvider {
               child.on('error', reject);
             });
 
-            controller.close();
+            safeClose(controller, COPILOT_LOG);
           } catch (err) {
-            const message = err instanceof Error ? err.message : String(err);
-            console.error('[copilot-provider] Error:', err instanceof Error ? err.stack || err.message : err);
-            try {
-              controller.enqueue(sseEvent('error', message));
-              controller.close();
-            } catch {
-              /* already closed */
-            }
+            reportProviderError(controller, err, COPILOT_LOG);
           }
-        })();
+        });
       },
     });
   }

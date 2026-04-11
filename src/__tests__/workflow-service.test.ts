@@ -441,6 +441,59 @@ describe('WorkflowService', () => {
     assert.deepEqual(instanceManager.started, [`tester:${taskSession.id}`]);
   });
 
+  it('startFeatureTesting is idempotent when already in testing', async () => {
+    const { workflowService, project, store, instanceManager } = createHarness();
+    const sprint = createSprint(store, project.id);
+    const taskSession = createTaskSession(store, project.id, sprint.id, {
+      workflowState: 'testing',
+      kanbanAgent: 'copilot-test',
+    });
+
+    const again = await workflowService.startFeatureTesting(taskSession.id);
+    assert.equal(again.workflowState, 'testing');
+    assert.deepEqual(instanceManager.started, []);
+  });
+
+  it('startTesting is idempotent when already in pre_testing', async () => {
+    const { workflowService, project, store, instanceManager } = createHarness();
+    const sprint = createSprint(store, project.id);
+    const taskSession = createTaskSession(store, project.id, sprint.id, {
+      workflowState: 'pre_testing',
+      kanbanAgent: 'pre-tester',
+    });
+
+    const again = await workflowService.startTesting(taskSession.id);
+    assert.equal(again.workflowState, 'pre_testing');
+    assert.deepEqual(instanceManager.started, []);
+  });
+
+  it('proceedToPendingRelease is idempotent when already pending_release and stops instances', async () => {
+    const { workflowService, project, store, instanceManager } = createHarness();
+    const sprint = createSprint(store, project.id);
+    const taskSession = createTaskSession(store, project.id, sprint.id, {
+      workflowState: 'pending_release',
+    });
+    store.upsertAgentInstance({
+      id: 'leftover-tester',
+      projectId: project.id,
+      sprintId: sprint.id,
+      taskId: taskSession.taskId,
+      taskSessionId: taskSession.id,
+      runtime: 'cursor',
+      role: 'tester',
+      status: 'running',
+      branchName: taskSession.branchName,
+      workingDirectory: '/tmp/agent-im',
+      approvalsRequired: true,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    });
+
+    const again = await workflowService.proceedToPendingRelease(taskSession.id);
+    assert.equal(again.workflowState, 'pending_release');
+    assert.ok(instanceManager.stopped.includes('leftover-tester'));
+  });
+
   it('returns tester failures to the developer queue and reopens the task', async () => {
     const { workflowService, project, store, instanceManager } = createHarness();
     const sprint = createSprint(store, project.id);

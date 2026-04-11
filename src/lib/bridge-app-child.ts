@@ -108,7 +108,8 @@ function diskStatusToBridgeStatus(
   disk: ReturnType<typeof readBridgeDaemonDiskStatus>,
   home: string,
 ): BridgeStatus {
-  if (!disk.effectiveRunning) {
+  const slaveUp = disk.slave?.effectiveRunning === true;
+  if (!disk.effectiveRunning && !slaveUp) {
     return { running: false, startedAt: null, adapters: [], managedByApp: false };
   }
   const channels = disk.channels ?? [];
@@ -119,9 +120,15 @@ function diskStatusToBridgeStatus(
     lastMessageAt: null,
     error: null,
   }));
+  const startedAt =
+    disk.effectiveRunning && disk.startedAt
+      ? disk.startedAt
+      : slaveUp && disk.slave?.startedAt
+        ? disk.slave.startedAt
+        : disk.startedAt ?? disk.slave?.startedAt ?? null;
   return {
     running: true,
-    startedAt: disk.startedAt ?? null,
+    startedAt: startedAt ?? null,
     adapters,
     managedByApp: isBridgeManagedByApp(home),
   };
@@ -206,10 +213,10 @@ export async function startBridgeDaemonChild(ctiHomeOverride?: string): Promise<
   const home = resolveBridgeHomeKey(ctiHomeOverride);
 
   const disk0 = readBridgeDaemonDiskStatus(home);
-  if (disk0.effectiveRunning) {
+  if (disk0.effectiveRunning || disk0.slave?.effectiveRunning) {
     if (isBridgeManagedByApp(home)) return;
     throw new Error(
-      `桥接已在运行（PID ${disk0.pid ?? '?'}）。若为外部 daemon.sh 启动，请先停止或更换 CTI_HOME。`,
+      `桥接已在运行（PID ${disk0.pid ?? disk0.slave?.pid ?? '?'}）。若为外部 daemon.sh 启动，请先停止或更换 CTI_HOME。`,
     );
   }
 
@@ -220,14 +227,15 @@ export async function startBridgeDaemonChild(ctiHomeOverride?: string): Promise<
   }
 
   const { command, args } = resolveDaemonEntry();
+  // Never inherit CTI_SLAVE_BRIDGE from the Next/parent process — otherwise the spawned
+  // daemon writes only `slave.*` in status.json and Telegram hybrid master never runs.
+  const childEnv: NodeJS.ProcessEnv = { ...process.env, CTI_HOME: home };
+  delete childEnv.CTI_SLAVE_BRIDGE;
+  childEnv.CTI_BOT_NAME = path.basename(home);
+
   const child = spawn(command, args, {
     cwd: getProjectRoot(),
-    env: {
-      ...process.env,
-      CTI_HOME: home,
-      // Override parent CTI_BOT_NAME (e.g. Next/kanban) so child matches this bridge directory.
-      CTI_BOT_NAME: path.basename(home),
-    },
+    env: childEnv,
     stdio: 'inherit',
     detached: false,
   });

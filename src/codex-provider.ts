@@ -29,6 +29,7 @@ import {
   formatProviderEnvKeysForLog,
   maskEnvValueForProviderLog,
 } from './llm-provider';
+import { reportProviderError, runProviderAsync, safeClose, safeEnqueue } from './provider-stream-safety';
 
 /** MIME → file extension for temp image files. */
 const MIME_EXT: Record<string, string> = {
@@ -190,7 +191,8 @@ export class CodexProvider implements LLMProvider {
 
     return new ReadableStream<string>({
       start(controller) {
-        (async () => {
+        runProviderAsync(controller, self.cfg.logPrefix, async () => {
+          const emit = (chunk: string) => safeEnqueue(controller, chunk, self.cfg.logPrefix);
           const tempFiles: string[] = [];
           try {
             const { codex } = await self.ensureSDK();
@@ -286,7 +288,7 @@ export class CodexProvider implements LLMProvider {
                       const threadId = event.thread_id as string;
                       self.threadIds.set(params.sessionId, threadId);
 
-                      controller.enqueue(sseEvent('status', {
+                      emit(sseEvent('status', {
                         session_id: threadId,
                       }));
                       break;
@@ -302,7 +304,7 @@ export class CodexProvider implements LLMProvider {
                       const usage = event.usage as Record<string, unknown> | undefined;
                       const threadId = self.threadIds.get(params.sessionId);
 
-                      controller.enqueue(sseEvent('result', {
+                      emit(sseEvent('result', {
                         usage: usage ? {
                           input_tokens: usage.input_tokens ?? 0,
                           output_tokens: usage.output_tokens ?? 0,
@@ -316,14 +318,14 @@ export class CodexProvider implements LLMProvider {
                     case 'turn.failed': {
                       const error = (event as { message?: string }).message;
                       if (error) lastCodexStreamError = error;
-                      controller.enqueue(sseEvent('error', error || 'Turn failed'));
+                      emit(sseEvent('error', error || 'Turn failed'));
                       break;
                     }
 
                     case 'error': {
                       const error = (event as { message?: string }).message;
                       if (error) lastCodexStreamError = error;
-                      controller.enqueue(sseEvent('error', error || 'Thread error'));
+                      emit(sseEvent('error', error || 'Thread error'));
                       break;
                     }
 
@@ -348,23 +350,16 @@ export class CodexProvider implements LLMProvider {
               }
             }
 
-            controller.close();
+            safeClose(controller, self.cfg.logPrefix);
           } catch (err) {
-            const message = err instanceof Error ? err.message : String(err);
-            console.error(`[${self.cfg.logPrefix}] Error:`, err instanceof Error ? err.stack || err.message : err);
-            try {
-              controller.enqueue(sseEvent('error', message));
-              controller.close();
-            } catch {
-              // Controller already closed
-            }
+            reportProviderError(controller, err, self.cfg.logPrefix);
           } finally {
             // Clean up temp image files
             for (const tmp of tempFiles) {
               try { fs.unlinkSync(tmp); } catch { /* ignore */ }
             }
           }
-        })();
+        });
       },
     });
   }
@@ -376,13 +371,25 @@ export class CodexProvider implements LLMProvider {
     controller: ReadableStreamDefaultController<string>,
     item: Record<string, unknown>,
   ): void {
+    const emit = (chunk: string) => safeEnqueue(controller, chunk, this.cfg.logPrefix);
+    try {
+      this.handleCompletedItemInner(emit, item);
+    } catch (err) {
+      reportProviderError(controller, err, this.cfg.logPrefix);
+    }
+  }
+
+  private handleCompletedItemInner(
+    emit: (chunk: string) => void,
+    item: Record<string, unknown>,
+  ): void {
     const itemType = item.type as string;
 
     switch (itemType) {
       case 'agent_message': {
         const text = (item.text as string) || '';
         if (text) {
-          controller.enqueue(sseEvent('text', text));
+          emit(sseEvent('text', text));
         }
         break;
       }
@@ -394,14 +401,14 @@ export class CodexProvider implements LLMProvider {
         const exitCode = item.exit_code as number | undefined;
         const isError = exitCode != null && exitCode !== 0;
 
-        controller.enqueue(sseEvent('tool_use', {
+        emit(sseEvent('tool_use', {
           id: toolId,
           name: 'Bash',
           input: { command },
         }));
 
         const resultContent = output || (isError ? `Exit code: ${exitCode}` : 'Done');
-        controller.enqueue(sseEvent('tool_result', {
+        emit(sseEvent('tool_result', {
           tool_use_id: toolId,
           content: resultContent,
           is_error: isError,
@@ -414,13 +421,13 @@ export class CodexProvider implements LLMProvider {
         const changes = item.changes as Array<{ path: string; kind: string }> || [];
         const summary = changes.map(c => `${c.kind}: ${c.path}`).join('\n');
 
-        controller.enqueue(sseEvent('tool_use', {
+        emit(sseEvent('tool_use', {
           id: toolId,
           name: 'Edit',
           input: { files: changes },
         }));
 
-        controller.enqueue(sseEvent('tool_result', {
+        emit(sseEvent('tool_result', {
           tool_use_id: toolId,
           content: summary || 'File changes applied',
           is_error: false,
@@ -439,13 +446,13 @@ export class CodexProvider implements LLMProvider {
         const resultContent = result?.content ?? result?.structured_content;
         const resultText = typeof resultContent === 'string' ? resultContent : (resultContent ? JSON.stringify(resultContent) : undefined);
 
-        controller.enqueue(sseEvent('tool_use', {
+        emit(sseEvent('tool_use', {
           id: toolId,
           name: `mcp__${server}__${tool}`,
           input: args,
         }));
 
-        controller.enqueue(sseEvent('tool_result', {
+        emit(sseEvent('tool_result', {
           tool_use_id: toolId,
           content: error?.message || resultText || 'Done',
           is_error: !!error,
@@ -457,7 +464,7 @@ export class CodexProvider implements LLMProvider {
         // Reasoning is internal; emit as status
         const text = (item.text as string) || '';
         if (text) {
-          controller.enqueue(sseEvent('status', { reasoning: text }));
+          emit(sseEvent('status', { reasoning: text }));
         }
         break;
       }

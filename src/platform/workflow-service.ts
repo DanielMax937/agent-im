@@ -1450,6 +1450,9 @@ export class WorkflowService {
 
   async startTesting(taskSessionId: string, deferStopInstanceId?: string): Promise<TaskSession> {
     const taskSession = this.requireTaskSession(taskSessionId);
+    if (taskSession.workflowState === 'pre_testing') {
+      return taskSession;
+    }
     this.assertTransition(taskSession.workflowState, 'pre_testing');
     await this.stopInstancesForTask(taskSession.id, deferStopInstanceId);
 
@@ -1501,6 +1504,9 @@ export class WorkflowService {
 
   async startFeatureTesting(taskSessionId: string, deferStopInstanceId?: string): Promise<TaskSession> {
     const taskSession = this.requireTaskSession(taskSessionId);
+    if (taskSession.workflowState === 'testing') {
+      return taskSession;
+    }
     this.assertTransition(taskSession.workflowState, 'testing');
     await this.stopInstancesForTask(taskSession.id, deferStopInstanceId);
 
@@ -2111,6 +2117,12 @@ export class WorkflowService {
     // If UAT required, gate before pending_release
     if (project.requiresUat && taskSession.workflowState === 'regression_testing') {
       return this.proceedToUat(taskSessionId, deferStopInstanceId);
+    }
+
+    /** Idempotent: automation + HTTP may both call; also flush runners after deferred stopInstance (setImmediate). */
+    if (taskSession.workflowState === 'pending_release') {
+      await this.stopInstancesForTask(taskSession.id);
+      return taskSession;
     }
 
     this.assertTransition(taskSession.workflowState, 'pending_release');

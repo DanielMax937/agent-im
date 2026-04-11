@@ -186,4 +186,22 @@ describe('bridge admin status (real dirs under CTI_BASE)', () => {
     invalidateBridgePathsCache();
     assert.equal(getCtiBotDisplayName(), 'bridge-alpha');
   });
+
+  it('getBridgeStatusForApi is running when only slave.* is effective (CTI_SLAVE_BRIDGE status shape)', () => {
+    ensureBridgeHome('bridge-slave-only', base);
+    const home = getCtiHomeForBridgeSlug('bridge-slave-only');
+    const fakePid = process.pid;
+    writeRunningStatusJson(home, {
+      slave: {
+        running: true,
+        pid: fakePid,
+        startedAt: new Date().toISOString(),
+      },
+    });
+    const disk = readBridgeDaemonDiskStatus(home);
+    assert.equal(disk.effectiveRunning, false, 'top-level master not running');
+    assert.equal(disk.slave?.effectiveRunning, true, 'slave slot should be effective');
+    const emb = getBridgeStatusForApi(home);
+    assert.equal(emb.running, true, 'API should treat slave-up as bridge running');
+  });
 });

@@ -15,8 +15,11 @@ import { getLogger } from './logger';
 
 import { sseEvent } from './sse-utils';
 import { applySubprocessProxyPolicyForRuntime } from './lib/proxy-env';
+import { reportProviderError, runProviderAsync, safeClose, safeEnqueue } from './provider-stream-safety';
 
 const llmProviderLog = getLogger().child({ scope: 'llm-provider' });
+
+const CLAUDE_SDK_STREAM_LOG = 'claude-sdk';
 
 // ── Environment isolation ──
 
@@ -534,7 +537,8 @@ export class SDKLLMProvider implements LLMProvider {
 
     return new ReadableStream({
       start(controller) {
-        (async () => {
+        runProviderAsync(controller, CLAUDE_SDK_STREAM_LOG, async () => {
+          const emit = (chunk: string) => safeEnqueue(controller, chunk, CLAUDE_SDK_STREAM_LOG);
           // Ring-buffer for recent stderr output (max 4 KB)
           const MAX_STDERR = 4096;
           let stderrBuf = '';
@@ -604,7 +608,7 @@ export class SDKLLMProvider implements LLMProvider {
                   }
 
                   // Emit permission_request SSE event for the bridge
-                  controller.enqueue(
+                  emit(
                     sseEvent('permission_request', {
                       permissionRequestId: opts.toolUseID,
                       toolName,
@@ -646,7 +650,7 @@ export class SDKLLMProvider implements LLMProvider {
               handleMessage(msg, controller, state, handleOpts);
             }
 
-            controller.close();
+            safeClose(controller, CLAUDE_SDK_STREAM_LOG);
           } catch (err) {
             const message = err instanceof Error ? err.message : String(err);
             const isTransportExit = message.includes('process exited with code');
@@ -661,7 +665,7 @@ export class SDKLLMProvider implements LLMProvider {
                 { stderrTail: stderrBuf.trim().slice(-500) || undefined },
                 'Claude CLI exited after successful result (non-zero exit is normal teardown; turn already completed)',
               );
-              controller.close();
+              safeClose(controller, CLAUDE_SDK_STREAM_LOG);
               return;
             }
 
@@ -679,8 +683,8 @@ export class SDKLLMProvider implements LLMProvider {
             // a normal response that crashed before result would be silently
             // presented as if it succeeded.
             if (state.lastAssistantText && classifyAuthError(state.lastAssistantText)) {
-              controller.enqueue(sseEvent('text', state.lastAssistantText));
-              controller.close();
+              emit(sseEvent('text', state.lastAssistantText));
+              safeClose(controller, CLAUDE_SDK_STREAM_LOG);
               return;
             }
 
@@ -716,10 +720,10 @@ export class SDKLLMProvider implements LLMProvider {
               userMessage = message;
             }
 
-            controller.enqueue(sseEvent('error', userMessage));
-            controller.close();
+            emit(sseEvent('error', userMessage));
+            safeClose(controller, CLAUDE_SDK_STREAM_LOG);
           }
-        })();
+        });
       },
     });
   }
@@ -732,6 +736,20 @@ export function handleMessage(
   state: StreamState,
   opts?: { disableLlmStreaming?: boolean },
 ): void {
+  try {
+    handleMessageInner(msg, controller, state, opts);
+  } catch (err) {
+    reportProviderError(controller, err, CLAUDE_SDK_STREAM_LOG);
+  }
+}
+
+function handleMessageInner(
+  msg: SDKMessage,
+  controller: ReadableStreamDefaultController<string>,
+  state: StreamState,
+  opts?: { disableLlmStreaming?: boolean },
+): void {
+  const emit = (chunk: string) => safeEnqueue(controller, chunk, CLAUDE_SDK_STREAM_LOG);
   switch (msg.type) {
     case 'stream_event': {
       const event = msg.event;
@@ -741,14 +759,14 @@ export function handleMessage(
       ) {
         if (opts?.disableLlmStreaming) break;
         // Emit delta text — the bridge accumulates on its side
-        controller.enqueue(sseEvent('text', event.delta.text));
+        emit(sseEvent('text', event.delta.text));
         state.hasStreamedText = true;
       }
       if (
         event.type === 'content_block_start' &&
         event.content_block.type === 'tool_use'
       ) {
-        controller.enqueue(
+        emit(
           sseEvent('tool_use', {
             id: event.content_block.id,
             name: event.content_block.name,
@@ -777,11 +795,11 @@ export function handleMessage(
               state.lastAssistantText += (state.lastAssistantText ? '\n' : '') + block.text;
             } else if (block.type === 'tool_use') {
               if (pendingText && !state.hasStreamedText) {
-                controller.enqueue(sseEvent('text', pendingText));
+                emit(sseEvent('text', pendingText));
                 state.hasStreamedText = true;
                 pendingText = '';
               }
-              controller.enqueue(
+              emit(
                 sseEvent('tool_use', {
                   id: block.id,
                   name: block.name,
@@ -791,7 +809,7 @@ export function handleMessage(
             }
           }
           if (pendingText && !state.hasStreamedText) {
-            controller.enqueue(sseEvent('text', pendingText));
+            emit(sseEvent('text', pendingText));
             state.hasStreamedText = true;
           }
           break;
@@ -800,7 +818,7 @@ export function handleMessage(
           if (block.type === 'text' && block.text) {
             state.lastAssistantText += (state.lastAssistantText ? '\n' : '') + block.text;
           } else if (block.type === 'tool_use') {
-            controller.enqueue(
+            emit(
               sseEvent('tool_use', {
                 id: block.id,
                 name: block.name,
@@ -823,7 +841,7 @@ export function handleMessage(
             const text = typeof rb.content === 'string'
               ? rb.content
               : JSON.stringify(rb.content ?? '');
-            controller.enqueue(
+            emit(
               sseEvent('tool_result', {
                 tool_use_id: rb.tool_use_id,
                 content: text,
@@ -847,10 +865,10 @@ export function handleMessage(
         // Error: line. Surface the assistant text once here as the canonical
         // user-facing body for that error turn.
         if (msg.is_error && !state.hasStreamedText && state.lastAssistantText.trim()) {
-          controller.enqueue(sseEvent('text', state.lastAssistantText.trim()));
+          emit(sseEvent('text', state.lastAssistantText.trim()));
           state.hasStreamedText = true;
         }
-        controller.enqueue(
+        emit(
           sseEvent('result', {
             session_id: msg.session_id,
             is_error: msg.is_error,
@@ -872,14 +890,14 @@ export function handleMessage(
           'errors' in msg && Array.isArray(msg.errors)
             ? msg.errors.join('; ')
             : 'Unknown error';
-        controller.enqueue(sseEvent('error', errors));
+        emit(sseEvent('error', errors));
       }
       break;
     }
 
     case 'system': {
       if (msg.subtype === 'init') {
-        controller.enqueue(
+        emit(
           sseEvent('status', {
             session_id: msg.session_id,
             model: msg.model,

@@ -1,4 +1,6 @@
 import { spawn } from 'node:child_process';
+import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 
 const PATH_SEP = process.platform === 'win32' ? ';' : ':';
@@ -13,16 +15,82 @@ function prependPathDir(env: NodeJS.ProcessEnv, dir: string): void {
   env.PATH = parts.length ? `${dir}${PATH_SEP}${parts.join(PATH_SEP)}` : dir;
 }
 
+/** Lazily resolved absolute path to `git` (or `git` / `git.exe` as fallback). */
+let cachedGitExecutable: string | undefined;
+
+function fileIsRunnableGit(absPath: string): boolean {
+  if (!fs.existsSync(absPath)) return false;
+  if (process.platform === 'win32') {
+    const lower = absPath.toLowerCase();
+    return lower.endsWith('.exe') || lower.endsWith('.cmd');
+  }
+  try {
+    fs.accessSync(absPath, fs.constants.F_OK | fs.constants.X_OK);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 /**
- * Child env for git. Optional `CTI_GIT_EXECUTABLE` → prepend that file's directory to `PATH`.
+ * Resolves the git binary for `spawn`. PM2 / GUI-launched Node often lack the same `PATH` as an
+ * interactive shell (e.g. Homebrew, asdf shims only in `.zshrc`). Prefer `CTI_GIT_EXECUTABLE`,
+ * then well-known install locations, then fall back to `git` so a correct `PATH` still works.
+ */
+function resolveGitExecutable(): string {
+  if (cachedGitExecutable !== undefined) {
+    return cachedGitExecutable;
+  }
+
+  const candidates: string[] = [];
+  const envGit = process.env.CTI_GIT_EXECUTABLE?.trim();
+  if (envGit) {
+    candidates.push(path.resolve(envGit));
+  }
+
+  const home = os.homedir();
+  if (home) {
+    candidates.push(
+      path.join(home, '.asdf', 'shims', 'git'),
+      path.join(home, '.local', 'bin', 'git'),
+    );
+  }
+
+  if (process.platform === 'win32') {
+    const pf = process.env.ProgramFiles;
+    if (pf) {
+      candidates.push(path.join(pf, 'Git', 'cmd', 'git.exe'), path.join(pf, 'Git', 'bin', 'git.exe'));
+    }
+    const local = process.env.LOCALAPPDATA;
+    if (local) {
+      candidates.push(path.join(local, 'Programs', 'Git', 'cmd', 'git.exe'));
+    }
+  } else {
+    candidates.push('/opt/homebrew/bin/git', '/usr/local/bin/git', '/usr/bin/git');
+  }
+
+  for (const c of candidates) {
+    if (!c) continue;
+    if (fileIsRunnableGit(c)) {
+      cachedGitExecutable = c;
+      return c;
+    }
+  }
+
+  cachedGitExecutable = 'git';
+  return 'git';
+}
+
+/**
+ * Child env for git. Prepends the resolved git's directory to `PATH` when known.
  * On macOS, merge standard dirs at the front (deduped) so subprocesses behave like a login shell.
  */
 function envForPlatformCli(): NodeJS.ProcessEnv {
   const env = { ...process.env };
 
-  const gitExe = process.env.CTI_GIT_EXECUTABLE?.trim();
-  if (gitExe && (gitExe.includes('/') || gitExe.includes('\\'))) {
-    prependPathDir(env, path.dirname(path.resolve(gitExe)));
+  const resolved = resolveGitExecutable();
+  if (resolved !== 'git' && (resolved.includes('/') || resolved.includes('\\'))) {
+    prependPathDir(env, path.dirname(path.resolve(resolved)));
   }
 
   if (process.platform === 'darwin') {
@@ -64,8 +132,9 @@ export interface CommandRunner {
 
 class ShellCommandRunner implements CommandRunner {
   async run(command: string, args: string[], cwd: string, allowedExitCodes: number[] = [0]): Promise<CommandResult> {
+    const exe = command === 'git' ? resolveGitExecutable() : command;
     return new Promise<CommandResult>((resolve, reject) => {
-      const child = spawn(command, args, {
+      const child = spawn(exe, args, {
         cwd,
         env: envForPlatformCli(),
         stdio: ['ignore', 'pipe', 'pipe'],
@@ -85,7 +154,7 @@ class ShellCommandRunner implements CommandRunner {
         const exitCode = code ?? 1;
         const result = { stdout, stderr, exitCode };
         if (!allowedExitCodes.includes(exitCode)) {
-          reject(new Error(`${command} ${args.join(' ')} failed (${exitCode}): ${stderr || stdout}`));
+          reject(new Error(`${exe} ${args.join(' ')} failed (${exitCode}): ${stderr || stdout}`));
           return;
         }
         resolve(result);
@@ -225,17 +294,17 @@ export class GitService {
   /**
    * Checkout local branch tracking `origin/<branch>` (e.g. main/master) after fetch.
    * Used for final regression testing on the integration branch in the main repo clone.
+   *
+   * Always aligns the working tree to **`origin/<branch>`** (workflow-owned clone): **no** `pull --ff-only`,
+   * which fails when untracked files or races leave the tree non-FF. `checkout -B` + `clean -fd` matches
+   * remote exactly and removes untracked noise (E2E markers, CI artifacts).
    */
   async checkoutOriginTrackingBranch(repoPath: string, branch: string): Promise<CheckoutOriginTrackingBranchResult> {
     const dirtyEntries = await this.getWorkingTreeStatus(repoPath);
     await this.runGit(repoPath, ['fetch', 'origin', branch]);
-    await this.runGit(repoPath, ['checkout', branch]);
-    if (dirtyEntries.length > 0) {
-      await this.runGit(repoPath, ['reset', '--hard', `origin/${branch}`]);
-      await this.runGit(repoPath, ['clean', '-fd']);
-    } else {
-      await this.runGit(repoPath, ['pull', '--ff-only', 'origin', branch]);
-    }
+    /** `-f` overwrites local tracked changes; `-B` resets the branch tip to match `origin/<branch>`. */
+    await this.runGit(repoPath, ['checkout', '-f', '-B', branch, `origin/${branch}`]);
+    await this.runGit(repoPath, ['clean', '-fd']);
     return { discardedEntries: dirtyEntries };
   }
 

@@ -30,4 +30,7 @@ command -v node &>/dev/null && echo "node=$(command -v node) $(node -v 2>/dev/nu
 command -v npm &>/dev/null && echo "npm=$(command -v npm) $(npm -v 2>/dev/null)" || echo "npm: NOT FOUND"
 command -v pm2 &>/dev/null && echo "pm2=$(command -v pm2)" || echo "pm2: NOT FOUND (will use node_modules/.bin if present)"
 
+unset CTI_HOME
+export CTI_HOME=
+
 exec "$REPO_ROOT/scripts/start-bg-and-bridge-mndzhev9-b35729a5.sh"

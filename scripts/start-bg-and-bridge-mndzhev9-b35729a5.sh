@@ -15,6 +15,9 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$REPO_ROOT"
 
+unset CTI_HOME
+export CTI_HOME=
+
 PORT="${PORT:-3300}"
 BASE_URL="${BASE_URL:-http://127.0.0.1:$PORT}"
 BRIDGE_SLUG="${BRIDGE_SLUG:-bridge-mndzhev9-b35729a5}"

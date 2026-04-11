@@ -282,6 +282,8 @@ export default function AdminPage() {
   const [baselineBridgeConfigs, setBaselineBridgeConfigs] = useState<Record<string, AdminConfig> | null>(null);
   /** Per-bridge accordion: expanded unless explicitly set to false (default expanded). */
   const [bridgePanelExpanded, setBridgePanelExpanded] = useState<Record<string, boolean>>({});
+  /** While start/stop POST is in flight for a slug — disables buttons before poll sees status.json. */
+  const [bridgeActionPendingSlug, setBridgeActionPendingSlug] = useState<string | null>(null);
 
   const isBridgePanelExpanded = useCallback((slug: string) => bridgePanelExpanded[slug] !== false, [bridgePanelExpanded]);
 
@@ -460,6 +462,7 @@ export default function AdminPage() {
 
   const bridgeAction = async (action: 'start' | 'stop', slug: string) => {
     setMessage(null);
+    setBridgeActionPendingSlug(slug);
     try {
       const res = await fetch(`/api/bridge/${action}`, {
         method: 'POST',
@@ -473,6 +476,8 @@ export default function AdminPage() {
       setMessage(action === 'start' ? `桥接「${slug}」启动指令已发送。` : `桥接「${slug}」停止指令已发送。`);
     } catch (e) {
       setMessage(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBridgeActionPendingSlug(null);
     }
   };
 
@@ -697,10 +702,16 @@ export default function AdminPage() {
               const embB = embeddedByBridge[b];
               const dmB = daemonStatusByBridge[b];
               const autoSummary = summarizeAutoMode(cfgB, b);
-              const anyRunningB = embB?.running === true || dmB?.effectiveRunning === true;
-              const startDisabledB = bridgeActionsLocked || configLoading || anyRunningB;
+              const anyRunningB =
+                embB?.running === true ||
+                dmB?.effectiveRunning === true ||
+                dmB?.slave?.effectiveRunning === true;
+              const rowBridgeBusy = bridgeActionPendingSlug === b;
+              const startDisabledB =
+                bridgeActionsLocked || configLoading || anyRunningB || rowBridgeBusy;
               const canStopB = anyRunningB;
-              const stopDisabledB = bridgeActionsLocked || configLoading || !canStopB;
+              const stopDisabledB =
+                bridgeActionsLocked || configLoading || !canStopB || rowBridgeBusy;
               const isKanbanBridgeRow = b === KANBAN_BRIDGE_SLUG;
               return (
               <div

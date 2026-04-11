@@ -18,13 +18,16 @@ else
 fi
 
 export PORT
+# Admin `/admin` lists every bridge under CTI_BASE only when the server is not pinned by CTI_HOME.
+unset CTI_HOME
+export CTI_HOME=
 
 echo "Building (daemon + Next.js)..."
 npm run build
 
 if $PM2 describe "$APP_NAME" &>/dev/null; then
-  echo "Restarting existing PM2 app $APP_NAME..."
-  $PM2 restart "$APP_NAME" --update-env
+  echo "Restarting existing PM2 app $APP_NAME (ecosystem env, CTI_HOME cleared)..."
+  $PM2 restart ecosystem.config.cjs --update-env
 else
   echo "──────────────────────────────────────────"
   echo "  agent-im (Next.js + Kanban + bridge)"

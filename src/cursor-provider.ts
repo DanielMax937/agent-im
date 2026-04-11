@@ -24,6 +24,9 @@ import {
   CURSOR_PROVIDER_LOG_ENV_KEYS,
   formatProviderEnvKeysForLog,
 } from './llm-provider';
+import { reportProviderError, runProviderAsync, safeClose, safeEnqueue } from './provider-stream-safety';
+
+const CURSOR_LOG = 'cursor-provider';
 
 export type SpawnFn = (cmd: string, args: string[], opts: SpawnOptions) => ChildProcess;
 
@@ -234,7 +237,8 @@ export class CursorProvider implements LLMProvider {
     const self = this;
     return new ReadableStream<string>({
       start(controller) {
-        (async () => {
+        runProviderAsync(controller, CURSOR_LOG, async () => {
+          const emit = (chunk: string) => safeEnqueue(controller, chunk, CURSOR_LOG);
           let forceKillTimer: NodeJS.Timeout | null = null;
           const clearForceKillTimer = () => {
             if (!forceKillTimer) return;
@@ -348,86 +352,90 @@ export class CursorProvider implements LLMProvider {
             let turnEmitted = '';
 
             rl.on('line', (line) => {
-              if (!line.trim()) return;
-              let event: Record<string, unknown>;
-              try { event = JSON.parse(line); } catch { return; }
+              try {
+                if (!line.trim()) return;
+                let event: Record<string, unknown>;
+                try { event = JSON.parse(line); } catch { return; }
 
-              const type = event.type as string;
-              const subtype = event.subtype as string | undefined;
+                const type = event.type as string;
+                const subtype = event.subtype as string | undefined;
 
-              switch (type) {
-                case 'system': {
-                  if (subtype === 'init') {
-                    sessionId = event.session_id as string;
-                    controller.enqueue(sseEvent('status', {
-                      session_id: sessionId,
-                      model: event.model,
-                    }));
-                  }
-                  break;
-                }
-
-                case 'assistant': {
-                  const msg = event.message as Record<string, unknown> | undefined;
-                  const content = msg?.content as Array<Record<string, unknown>> | undefined;
-                  if (!content) break;
-
-                  for (const block of content) {
-                    if (block.type !== 'text' || !block.text) continue;
-                    const text = block.text as string;
-
-                    if (turnEmitted && turnEmitted === text) {
-                      // Already emitted this exact text via deltas — skip
-                      turnEmitted = '';
-                    } else {
-                      controller.enqueue(sseEvent('text', text));
-                      turnEmitted += text;
+                switch (type) {
+                  case 'system': {
+                    if (subtype === 'init') {
+                      sessionId = event.session_id as string;
+                      emit(sseEvent('status', {
+                        session_id: sessionId,
+                        model: event.model,
+                      }));
                     }
+                    break;
                   }
-                  break;
-                }
 
-                case 'tool_call': {
-                  const callId = event.call_id as string || `tool-${Date.now()}`;
-                  const toolCall = event.tool_call as Record<string, unknown> || {};
+                  case 'assistant': {
+                    const msg = event.message as Record<string, unknown> | undefined;
+                    const content = msg?.content as Array<Record<string, unknown>> | undefined;
+                    if (!content) break;
 
-                  if (subtype === 'started') {
-                    controller.enqueue(sseEvent('tool_use', {
-                      id: callId,
-                      name: extractToolName(toolCall),
-                      input: extractToolInput(toolCall),
+                    for (const block of content) {
+                      if (block.type !== 'text' || !block.text) continue;
+                      const text = block.text as string;
+
+                      if (turnEmitted && turnEmitted === text) {
+                        // Already emitted this exact text via deltas — skip
+                        turnEmitted = '';
+                      } else {
+                        emit(sseEvent('text', text));
+                        turnEmitted += text;
+                      }
+                    }
+                    break;
+                  }
+
+                  case 'tool_call': {
+                    const callId = event.call_id as string || `tool-${Date.now()}`;
+                    const toolCall = event.tool_call as Record<string, unknown> || {};
+
+                    if (subtype === 'started') {
+                      emit(sseEvent('tool_use', {
+                        id: callId,
+                        name: extractToolName(toolCall),
+                        input: extractToolInput(toolCall),
+                      }));
+                    } else if (subtype === 'completed') {
+                      const { content, isError } = extractToolResult(toolCall);
+                      emit(sseEvent('tool_result', {
+                        tool_use_id: callId,
+                        content,
+                        is_error: isError,
+                      }));
+                    }
+                    break;
+                  }
+
+                  case 'result': {
+                    sawResult = true;
+                    const usage = event.usage as Record<string, unknown> | undefined;
+                    emit(sseEvent('result', {
+                      usage: usage ? {
+                        input_tokens: usage.inputTokens ?? 0,
+                        output_tokens: usage.outputTokens ?? 0,
+                        cache_read_input_tokens: usage.cacheReadTokens ?? 0,
+                      } : undefined,
+                      ...(sessionId ? { session_id: sessionId } : {}),
                     }));
-                  } else if (subtype === 'completed') {
-                    const { content, isError } = extractToolResult(toolCall);
-                    controller.enqueue(sseEvent('tool_result', {
-                      tool_use_id: callId,
-                      content,
-                      is_error: isError,
-                    }));
+
+                    if (subtype === 'error' || event.is_error) {
+                      const errMsg = (event.result as string) || 'Agent error';
+                      emit(sseEvent('error', errMsg));
+                    }
+                    break;
                   }
-                  break;
+
+                  // thinking events — skip (internal reasoning)
                 }
-
-                case 'result': {
-                  sawResult = true;
-                  const usage = event.usage as Record<string, unknown> | undefined;
-                  controller.enqueue(sseEvent('result', {
-                    usage: usage ? {
-                      input_tokens: usage.inputTokens ?? 0,
-                      output_tokens: usage.outputTokens ?? 0,
-                      cache_read_input_tokens: usage.cacheReadTokens ?? 0,
-                    } : undefined,
-                    ...(sessionId ? { session_id: sessionId } : {}),
-                  }));
-
-                  if (subtype === 'error' || event.is_error) {
-                    const errMsg = (event.result as string) || 'Agent error';
-                    controller.enqueue(sseEvent('error', errMsg));
-                  }
-                  break;
-                }
-
-                // thinking events — skip (internal reasoning)
+              } catch (lineErr) {
+                reportProviderError(controller, lineErr, CURSOR_LOG);
               }
             });
 
@@ -445,19 +453,19 @@ export class CursorProvider implements LLMProvider {
                 }
                 if (signal) {
                   reject(new Error(
-                    `[cursor-provider] agent exited with signal ${signal}` +
+                    `[${CURSOR_LOG}] agent exited with signal ${signal}` +
                     (stderr ? `\n${stderr.slice(0, 500)}` : '')
                   ));
                   return;
                 }
                 if (code && code !== 0 && !sessionId) {
                   reject(new Error(
-                    `[cursor-provider] agent exited with code ${code}` +
+                    `[${CURSOR_LOG}] agent exited with code ${code}` +
                     (stderr ? `\n${stderr.slice(0, 500)}` : '')
                   ));
                 } else if (sessionId && !sawResult) {
                   reject(new Error(
-                    '[cursor-provider] agent exited before emitting a terminal result event' +
+                    `[${CURSOR_LOG}] agent exited before emitting a terminal result event` +
                     (stderr ? `\n${stderr.slice(0, 500)}` : '')
                   ));
                 } else {
@@ -468,7 +476,7 @@ export class CursorProvider implements LLMProvider {
                 const error = childError instanceof Error ? childError : new Error(String(childError));
                 const errSpawnArgs = (error as NodeJS.ErrnoException & { spawnargs?: unknown }).spawnargs;
                 console.error(
-                  `[cursor-provider] Child process error: launchMode=${launchMode} executable=${executable} ` +
+                  `[${CURSOR_LOG}] Child process error: launchMode=${launchMode} executable=${executable} ` +
                   `agentPath=${agentPath} cwd=${resolvedCwd} ` +
                   `cwdExists=${cwdExists} sessionId=${params.sessionId ?? '-'} sdkSessionId=${params.sdkSessionId ?? '-'} ` +
                   `code=${(error as NodeJS.ErrnoException).code ?? '-'} errno=${(error as NodeJS.ErrnoException).errno ?? '-'} ` +
@@ -479,17 +487,12 @@ export class CursorProvider implements LLMProvider {
               });
             });
 
-            controller.close();
+            safeClose(controller, CURSOR_LOG);
           } catch (err) {
             clearForceKillTimer();
-            const message = err instanceof Error ? err.message : String(err);
-            console.error('[cursor-provider] Error:', err instanceof Error ? err.stack || err.message : err);
-            try {
-              controller.enqueue(sseEvent('error', message));
-              controller.close();
-            } catch { /* already closed */ }
+            reportProviderError(controller, err, CURSOR_LOG);
           }
-        })();
+        });
       },
     });
   }
