@@ -4,6 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import {
+  buildSlaveEnvFromRunner,
   maskSecret,
   configToSettings,
   mergeConfigPatch,
@@ -532,5 +533,37 @@ describe('loadConfig/saveConfig round-trip', () => {
     );
     const loaded = loadConfig(tmpDir);
     assert.equal(loaded.autoLogStreamChunks, true);
+  });
+});
+
+describe('buildSlaveEnvFromRunner', () => {
+  it('does not force CTI_AUTO_APPROVE when the slave runner inherits bridge auto-approve', () => {
+    const env = buildSlaveEnvFromRunner(
+      { id: 'slave', runtime: 'copilot', defaultModel: 'gpt-5-mini' },
+      { id: 'bot', channel: 'telegram' },
+      {
+        runtime: 'copilot',
+        enabledChannels: ['telegram'],
+        defaultWorkDir: process.cwd(),
+        defaultMode: 'code',
+        autoApprove: true,
+      },
+    );
+    assert.equal(env.CTI_AUTO_APPROVE, undefined);
+  });
+
+  it('writes CTI_AUTO_APPROVE when the slave runner explicitly overrides it', () => {
+    const env = buildSlaveEnvFromRunner(
+      { id: 'slave', runtime: 'copilot', autoApprove: false },
+      { id: 'bot', channel: 'telegram' },
+      {
+        runtime: 'copilot',
+        enabledChannels: ['telegram'],
+        defaultWorkDir: process.cwd(),
+        defaultMode: 'code',
+        autoApprove: true,
+      },
+    );
+    assert.equal(env.CTI_AUTO_APPROVE, 'false');
   });
 });

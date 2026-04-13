@@ -605,7 +605,6 @@ export class InstanceManager {
         return resolveProvider({
           config,
           pendingPermissions,
-          autoApproveOverride: false,
           runtimeOverride: eff,
           runner,
         });

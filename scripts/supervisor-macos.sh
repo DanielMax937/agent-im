@@ -5,68 +5,103 @@
 LAUNCHD_LABEL="com.claude-to-im.bridge"
 PLIST_DIR="$HOME/Library/LaunchAgents"
 PLIST_FILE="$PLIST_DIR/$LAUNCHD_LABEL.plist"
+ZSH_ENV_CACHE=""
 
 # ── launchd helpers ──
+
+plist_escape() {
+  local s="${1:-}"
+  s="${s//&/&amp;}"
+  s="${s//</&lt;}"
+  s="${s//>/&gt;}"
+  printf '%s' "$s"
+}
+
+should_forward_shell_env_var() {
+  case "${1:-}" in
+    HOME|PATH|USER|LOGNAME|SHELL|LANG|TMPDIR|TEMP|TMP|TERM|COLORTERM|LC_ALL|LC_CTYPE|NODE_EXTRA_CA_CERTS|SSH_AUTH_SOCK|XDG_CONFIG_HOME|XDG_DATA_HOME|XDG_CACHE_HOME)
+      return 0
+      ;;
+    OPENAI_*|ANTHROPIC_*|CODEX_*|CURSOR_*|GITHUB_*|GH_*|COPILOT_*|HTTP_PROXY|HTTPS_PROXY|ALL_PROXY|NO_PROXY|http_proxy|https_proxy|all_proxy|no_proxy)
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+load_zsh_startup_env() {
+  if [ -n "$ZSH_ENV_CACHE" ]; then
+    printf '%s\n' "$ZSH_ENV_CACHE"
+    return
+  fi
+
+  if ! command -v zsh >/dev/null 2>&1; then
+    return
+  fi
+
+  ZSH_ENV_CACHE="$(
+    env -i \
+      HOME="$HOME" \
+      USER="${USER:-}" \
+      LOGNAME="${LOGNAME:-${USER:-}}" \
+      SHELL="${SHELL:-/bin/zsh}" \
+      PATH="${PATH:-/usr/bin:/bin:/usr/sbin:/sbin}" \
+      TERM="${TERM:-xterm-256color}" \
+      zsh -lic 'command env' 2>/dev/null || true
+  )"
+  printf '%s\n' "$ZSH_ENV_CACHE"
+}
 
 # Collect env vars that should be forwarded into the plist.
 # We honour clean_env() logic by reading *after* clean_env runs.
 build_env_dict() {
   local indent="            "
   local dict=""
+  local seen=$'\n'
 
-  # Always forward basics
-  for var in HOME PATH USER SHELL LANG TMPDIR; do
-    local val="${!var:-}"
-    [ -z "$val" ] && continue
-    dict+="${indent}<key>${var}</key>\n${indent}<string>${val}</string>\n"
+  append_env_var() {
+    local name="$1"
+    local val="$2"
+    [ -n "$name" ] || return 0
+    [ -n "$val" ] || return 0
+    case "$seen" in
+      *$'\n'"$name"$'\n'*) return 0 ;;
+    esac
+    seen+="${name}"$'\n'
+    dict+="${indent}<key>$(plist_escape "$name")</key>\n${indent}<string>$(plist_escape "$val")</string>\n"
+  }
+
+  # Forward current process basics first.
+  for var in HOME PATH USER LOGNAME SHELL LANG TMPDIR TEMP TMP TERM COLORTERM LC_ALL LC_CTYPE NODE_EXTRA_CA_CERTS SSH_AUTH_SOCK XDG_CONFIG_HOME XDG_DATA_HOME XDG_CACHE_HOME; do
+    append_env_var "$var" "${!var:-}"
   done
 
-  # Forward CTI_* vars
+  # Merge provider/auth env from zsh startup files (`~/.zprofile`, `~/.zshrc`) as fallback.
+  while IFS= read -r line; do
+    [[ "$line" == *=* ]] || continue
+    local name="${line%%=*}"
+    local val="${line#*=}"
+    should_forward_shell_env_var "$name" || continue
+    append_env_var "$name" "$val"
+  done < <(load_zsh_startup_env)
+
+  # Merge provider/auth env from the current process environment. This is intentionally
+  # runtime-agnostic because one bridge may host multiple runner runtimes.
   while IFS='=' read -r name val; do
-    case "$name" in CTI_*)
-      dict+="${indent}<key>${name}</key>\n${indent}<string>${val}</string>\n"
-      ;; esac
+    should_forward_shell_env_var "$name" || continue
+    append_env_var "$name" "$val"
   done < <(env)
 
-  # Forward runtime-specific API keys
-  local runtime
-  runtime=$(grep "^CTI_RUNTIME=" "$CTI_HOME/config.env" 2>/dev/null | head -1 | cut -d= -f2- | tr -d "'" | tr -d '"' || true)
-  runtime="${runtime:-claude}"
-
-  local use_login
-  use_login=$(grep "^CTI_CODEX_USE_LOGIN=" "$CTI_HOME/config.env" 2>/dev/null | head -1 | cut -d= -f2- | tr -d "'" | tr -d '"' || true)
-
-  case "$runtime" in
-    codex|auto)
-      if [ "${use_login:-}" != "true" ]; then
-        for var in OPENAI_API_KEY CODEX_API_KEY CTI_CODEX_API_KEY CTI_CODEX_BASE_URL; do
-          local val="${!var:-}"
-          [ -z "$val" ] && continue
-          dict+="${indent}<key>${var}</key>\n${indent}<string>${val}</string>\n"
-        done
-      fi
-      ;;
-  esac
-  case "$runtime" in
-    cursor|auto)
-      for var in CURSOR_API_KEY CTI_CURSOR_API_KEY CTI_CURSOR_BASE_URL; do
-        local val="${!var:-}"
-        [ -z "$val" ] && continue
-        dict+="${indent}<key>${var}</key>\n${indent}<string>${val}</string>\n"
-      done
-      ;;
-  esac
-  case "$runtime" in
-    claude|auto)
-      # Auto-forward all ANTHROPIC_* env vars (sourced from config.env by daemon.sh).
-      # Third-party API providers need these to reach the CLI subprocess.
-      while IFS='=' read -r name val; do
-        case "$name" in ANTHROPIC_*)
-          dict+="${indent}<key>${name}</key>\n${indent}<string>${val}</string>\n"
-          ;; esac
-      done < <(env)
-      ;;
-  esac
+  # Forward CTI_* vars last so bridge/config values always win over shell defaults.
+  while IFS='=' read -r name val; do
+    case "$name" in
+      CTI_*)
+        dict+="${indent}<key>$(plist_escape "$name")</key>\n${indent}<string>$(plist_escape "$val")</string>\n"
+        ;;
+    esac
+  done < <(env)
 
   echo -e "$dict"
 }

@@ -1232,7 +1232,15 @@ async function drivePublicTaskToPendingRelease(ctx, opts) {
   } else if (!reg.ok) {
     throw new Error(reg.text);
   }
-  const prg = await pollTaskState(IM, taskId, 'regression_testing', 300000);
+  /** If GitHub mergeability was still computing, the server may leave the task in review — retry start-regression. */
+  let prg = await pollTaskState(IM, taskId, 'regression_testing', 300000);
+  for (let retry = 0; !prg.ok && retry < 20; retry++) {
+    const snap = await fetchJson(IM, `/api/tasks/${encodeURIComponent(taskId)}`);
+    if (snap.data?.workflowState !== 'review') break;
+    await fetchJson(IM, `/api/workflows/tasks/${taskId}/start-regression`, { method: 'POST' });
+    await new Promise((r) => setTimeout(r, 3000));
+    prg = await pollTaskState(IM, taskId, 'regression_testing', 120000);
+  }
   if (recordOk) {
     ok(
       'G1',
@@ -1387,14 +1395,22 @@ async function runSection11Cl4Cl5Cl6(ctx) {
 
 /** When no closed task exists, drive one public task to closed so B4 can assert block on closed. */
 export async function ensureClosedTaskExistsForB4(ctx) {
-  const { IM, fetchJson, pollTaskState } = ctx;
+  const { IM, fetchJson, pollTaskState, RUN } = ctx;
   const list = await fetchJson(IM, '/api/tasks');
+  if (!list.ok) {
+    console.error(
+      '[ensureClosedTaskExistsForB4] GET /api/tasks failed — cannot check for closed tasks:',
+      list.status,
+      list.text?.slice(0, 500),
+    );
+  }
   if (list.ok && Array.isArray(list.data) && list.data.some((t) => t?.workflowState === 'closed')) return;
+  const runId = RUN ?? 'unknown';
   try {
     const r = await drivePublicTaskToPendingRelease(ctx, {
       repoSlug: 'b4seed',
       projectIdSuffix: 'b4seed',
-      issueId: `B4SEED-${RUN}`,
+      issueId: `B4SEED-${runId}`,
       taskTitle: 'B4 seed closed',
       coverageCommand: '',
       requiresUat: false,
@@ -1409,8 +1425,13 @@ export async function ensureClosedTaskExistsForB4(ctx) {
     } catch {
       /* ignore */
     }
-  } catch {
-    /* B4 will FAIL if still no closed task */
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    console.error(
+      '[ensureClosedTaskExistsForB4] seed failed (no closed task will be created; B4 may FAIL):',
+      msg,
+    );
+    if (e instanceof Error && e.stack) console.error(e.stack);
   }
 }
 

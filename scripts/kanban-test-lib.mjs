@@ -218,10 +218,12 @@ export async function cdsPost(cdsBase, endpoint, body = {}) {
   return { ok: r.ok, status: r.status, data, text };
 }
 
-export async function getFirstRunnerId(imBase) {
+export async function getPreferredRunnerId(imBase) {
   const r = await fetchJson(imBase, '/api/platform/runners');
   if (!r.ok || !r.data?.runners?.length) return null;
-  return r.data.runners[0].id;
+  const preferred = (process.env.KANBAN_E2E_RUNNER_ID || 'rt-5').trim();
+  const matched = r.data.runners.find((runner) => runner.id === preferred);
+  return matched?.id || null;
 }
 
 export async function applyKanbanRunners(imBase, projectId, runnerId) {

@@ -1,7 +1,11 @@
 import { beforeEach, describe, it } from 'node:test';
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 
 import { InstanceManager } from '../platform/instance-manager';
+import { PendingPermissions } from '../permission-gateway';
 import { sseEvent } from '../sse-utils';
 import {
   createProject,
@@ -16,6 +20,52 @@ describe('InstanceManager', () => {
   beforeEach(() => {
     resetTestPlatformDir();
     InstanceManager.resetForTests();
+  });
+
+  it('inherits bridge auto-approve for runners that do not override it', async () => {
+    const prevHome = process.env.CTI_HOME;
+    const prevBot = process.env.CTI_BOT_NAME;
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), 'cti-kanban-auto-approve-'));
+    fs.writeFileSync(
+      path.join(home, 'config.env'),
+      [
+        'CTI_RUNTIME=copilot',
+        'CTI_AUTO_APPROVE=true',
+        'CTI_RUNNERS=[{"id":"rt-5","runtime":"copilot","defaultModel":"gpt-5-mini"}]',
+        'CTI_DEFAULT_RUNNER=rt-5',
+        '',
+      ].join('\n'),
+      'utf-8',
+    );
+    process.env.CTI_HOME = home;
+    delete process.env.CTI_BOT_NAME;
+
+    try {
+      const { store, instance } = createStoreFixture();
+      store.upsertAgentInstance({
+        ...instance,
+        runtime: 'copilot',
+        runtimeProfileId: 'rt-5',
+      });
+      const manager = InstanceManager.getInstance({ store });
+      const provider = await (manager as unknown as {
+        providerFactory: (instance: typeof instance, pendingPermissions: PendingPermissions) => Promise<unknown>;
+      }).providerFactory(
+        {
+          ...instance,
+          runtime: 'copilot',
+          runtimeProfileId: 'rt-5',
+        },
+        new PendingPermissions(),
+      );
+      assert.equal((provider as { autoApprove?: boolean }).autoApprove, true);
+    } finally {
+      InstanceManager.resetForTests();
+      if (prevHome === undefined) delete process.env.CTI_HOME;
+      else process.env.CTI_HOME = prevHome;
+      if (prevBot === undefined) delete process.env.CTI_BOT_NAME;
+      else process.env.CTI_BOT_NAME = prevBot;
+    }
   });
 
   function createStoreFixture() {

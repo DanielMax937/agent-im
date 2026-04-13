@@ -34,6 +34,10 @@ function freshState(): StreamState {
   return { hasReceivedResult: false, hasStreamedText: false, lastAssistantText: '' };
 }
 
+function makeProcessEnv(values: Record<string, string>): NodeJS.ProcessEnv {
+  return { NODE_ENV: 'test', ...values };
+}
+
 // ── classifyAuthError ──
 
 describe('classifyAuthError', () => {
@@ -160,37 +164,37 @@ describe('isNonClaudeModel', () => {
 
 describe('buildClaudeRunnerEnvSnapshotForLog', () => {
   it('includes ANTHROPIC_* masked and leaves ANTHROPIC_BASE_URL unmasked', () => {
-    const snap = buildClaudeRunnerEnvSnapshotForLog({
+    const snap = buildClaudeRunnerEnvSnapshotForLog(makeProcessEnv({
       ANTHROPIC_API_KEY: 'sk-ant-api03-longsecret',
       ANTHROPIC_BASE_URL: 'https://api.anthropic.com',
       ANTHROPIC_AUTH_TOKEN: 'tok',
-    });
+    }));
     assert.equal(snap.ANTHROPIC_BASE_URL, 'https://api.anthropic.com');
     assert.match(snap.ANTHROPIC_API_KEY, /^\*+cret$/);
     assert.equal(snap.ANTHROPIC_AUTH_TOKEN, '****');
   });
 
   it('includes CTI_CLAUDE_CODE_EXECUTABLE path and CTI_*CLAUDE* keys', () => {
-    const snap = buildClaudeRunnerEnvSnapshotForLog({
+    const snap = buildClaudeRunnerEnvSnapshotForLog(makeProcessEnv({
       CTI_CLAUDE_CODE_EXECUTABLE: '/opt/bin/claude',
       CTI_FOO_CLAUDE_BAR: 'secret',
-    });
+    }));
     assert.equal(snap.CTI_CLAUDE_CODE_EXECUTABLE, '/opt/bin/claude');
     assert.match(snap.CTI_FOO_CLAUDE_BAR, /^\*+cret$/);
   });
 
   it('includes proxy vars masked', () => {
-    const snap = buildClaudeRunnerEnvSnapshotForLog({
+    const snap = buildClaudeRunnerEnvSnapshotForLog(makeProcessEnv({
       HTTPS_PROXY: 'http://user:pass@proxy:8080',
-    });
+    }));
     assert.ok(snap.HTTPS_PROXY!.endsWith('8080'));
     assert.ok(snap.HTTPS_PROXY!.startsWith('*'));
   });
 
   it('includes CTI_PROXY masked', () => {
-    const snap = buildClaudeRunnerEnvSnapshotForLog({
+    const snap = buildClaudeRunnerEnvSnapshotForLog(makeProcessEnv({
       CTI_PROXY: 'http://127.0.0.1:7890',
-    });
+    }));
     assert.ok(snap.CTI_PROXY!.endsWith('7890'));
     assert.ok(snap.CTI_PROXY!.startsWith('*'));
   });
@@ -199,12 +203,12 @@ describe('buildClaudeRunnerEnvSnapshotForLog', () => {
 describe('formatProviderEnvKeysForLog / maskEnvValueForProviderLog', () => {
   it('masks secrets and leaves base URLs plain', () => {
     const line = formatProviderEnvKeysForLog(
-      {
+      makeProcessEnv({
         CTI_PROXY: 'http://p:8080',
         CTI_CURSOR_BASE_URL: 'https://api.example.com',
         CTI_CURSOR_API_KEY: 'sk-long-secret',
         CTI_RUNTIME: 'cursor',
-      },
+      }),
       [...CURSOR_PROVIDER_LOG_ENV_KEYS],
     );
     assert.match(line, /CTI_CURSOR_BASE_URL=https:\/\/api\.example\.com/);
@@ -291,6 +295,79 @@ describe('buildSubprocessEnvForRuntime', () => {
       else process.env.ANTHROPIC_API_KEY = prevApiKey;
       if (prevAuthToken === undefined) delete process.env.ANTHROPIC_AUTH_TOKEN;
       else process.env.ANTHROPIC_AUTH_TOKEN = prevAuthToken;
+    }
+  });
+
+  it('forces HTTP_PROXY for Cursor subprocess env', () => {
+    const prevIso = process.env.CTI_ENV_ISOLATION;
+    const prevRt = process.env.CTI_RUNTIME;
+    const prevHttpProxy = process.env.HTTP_PROXY;
+    const prevCtiProxy = process.env.CTI_PROXY;
+    process.env.CTI_ENV_ISOLATION = 'inherit';
+    process.env.CTI_RUNTIME = 'cursor';
+    process.env.HTTP_PROXY = 'http://parent:1';
+    process.env.CTI_PROXY = 'http://cti:2';
+    try {
+      const env = buildSubprocessEnvForRuntime({ runtime: 'cursor' });
+      assert.equal(env.HTTP_PROXY, 'http://cti:2');
+    } finally {
+      if (prevIso === undefined) delete process.env.CTI_ENV_ISOLATION;
+      else process.env.CTI_ENV_ISOLATION = prevIso;
+      if (prevRt === undefined) delete process.env.CTI_RUNTIME;
+      else process.env.CTI_RUNTIME = prevRt;
+      if (prevHttpProxy === undefined) delete process.env.HTTP_PROXY;
+      else process.env.HTTP_PROXY = prevHttpProxy;
+      if (prevCtiProxy === undefined) delete process.env.CTI_PROXY;
+      else process.env.CTI_PROXY = prevCtiProxy;
+    }
+  });
+
+  it('forces HTTP_PROXY for Codex subprocess env in login mode', () => {
+    const prevIso = process.env.CTI_ENV_ISOLATION;
+    const prevRt = process.env.CTI_RUNTIME;
+    const prevHttpProxy = process.env.HTTP_PROXY;
+    const prevCtiProxy = process.env.CTI_PROXY;
+    process.env.CTI_ENV_ISOLATION = 'inherit';
+    process.env.CTI_RUNTIME = 'codex';
+    process.env.HTTP_PROXY = 'http://parent:1';
+    process.env.CTI_PROXY = 'http://cti:2';
+    try {
+      const env = buildSubprocessEnvForRuntime({ runtime: 'codex', useLogin: true });
+      assert.equal(env.HTTP_PROXY, 'http://cti:2');
+    } finally {
+      if (prevIso === undefined) delete process.env.CTI_ENV_ISOLATION;
+      else process.env.CTI_ENV_ISOLATION = prevIso;
+      if (prevRt === undefined) delete process.env.CTI_RUNTIME;
+      else process.env.CTI_RUNTIME = prevRt;
+      if (prevHttpProxy === undefined) delete process.env.HTTP_PROXY;
+      else process.env.HTTP_PROXY = prevHttpProxy;
+      if (prevCtiProxy === undefined) delete process.env.CTI_PROXY;
+      else process.env.CTI_PROXY = prevCtiProxy;
+    }
+  });
+
+  it('unsets HTTP_PROXY for Codex subprocess env without login mode', () => {
+    const prevIso = process.env.CTI_ENV_ISOLATION;
+    const prevRt = process.env.CTI_RUNTIME;
+    const prevHttpProxy = process.env.HTTP_PROXY;
+    const prevCtiProxy = process.env.CTI_PROXY;
+    process.env.CTI_ENV_ISOLATION = 'inherit';
+    process.env.CTI_RUNTIME = 'codex';
+    process.env.HTTP_PROXY = 'http://parent:1';
+    process.env.CTI_PROXY = 'http://cti:2';
+    try {
+      const env = buildSubprocessEnvForRuntime({ runtime: 'codex', useLogin: false });
+      assert.equal(env.HTTP_PROXY, undefined);
+      assert.equal(env.CTI_PROXY, 'http://cti:2');
+    } finally {
+      if (prevIso === undefined) delete process.env.CTI_ENV_ISOLATION;
+      else process.env.CTI_ENV_ISOLATION = prevIso;
+      if (prevRt === undefined) delete process.env.CTI_RUNTIME;
+      else process.env.CTI_RUNTIME = prevRt;
+      if (prevHttpProxy === undefined) delete process.env.HTTP_PROXY;
+      else process.env.HTTP_PROXY = prevHttpProxy;
+      if (prevCtiProxy === undefined) delete process.env.CTI_PROXY;
+      else process.env.CTI_PROXY = prevCtiProxy;
     }
   });
 });

@@ -4,7 +4,6 @@ import test from 'node:test';
 import {
   applyStandardProxyEnvFromCtiProxy,
   applySubprocessProxyPolicyForRuntime,
-  getCursorAgentLaunchMode,
   unsetStandardProxyEnv,
 } from '../lib/proxy-env';
 
@@ -75,15 +74,30 @@ test('applySubprocessProxyPolicyForRuntime copilot forces CTI_PROXY into HTTP_PR
   assert.equal(env.HTTP_PROXY, 'http://127.0.0.1:1087');
 });
 
-test('getCursorAgentLaunchMode reads CTI_CURSOR_AGENT_LAUNCH', () => {
-  const prev = process.env.CTI_CURSOR_AGENT_LAUNCH;
-  try {
-    delete process.env.CTI_CURSOR_AGENT_LAUNCH;
-    assert.equal(getCursorAgentLaunchMode(), 'standard');
-    process.env.CTI_CURSOR_AGENT_LAUNCH = 'proxychains';
-    assert.equal(getCursorAgentLaunchMode(), 'proxychains');
-  } finally {
-    if (prev === undefined) delete process.env.CTI_CURSOR_AGENT_LAUNCH;
-    else process.env.CTI_CURSOR_AGENT_LAUNCH = prev;
-  }
+test('applySubprocessProxyPolicyForRuntime cursor forces CTI_PROXY into HTTP_PROXY', () => {
+  const env: Record<string, string | undefined> = {
+    CTI_PROXY: 'http://127.0.0.1:1087',
+    HTTP_PROXY: 'http://old:1',
+  };
+  applySubprocessProxyPolicyForRuntime(env, 'cursor');
+  assert.equal(env.HTTP_PROXY, 'http://127.0.0.1:1087');
+});
+
+test('applySubprocessProxyPolicyForRuntime codex forces CTI_PROXY into HTTP_PROXY in login mode', () => {
+  const env: Record<string, string | undefined> = {
+    CTI_PROXY: 'http://127.0.0.1:1087',
+    HTTP_PROXY: 'http://old:1',
+  };
+  applySubprocessProxyPolicyForRuntime(env, 'codex', { useLogin: true });
+  assert.equal(env.HTTP_PROXY, 'http://127.0.0.1:1087');
+});
+
+test('applySubprocessProxyPolicyForRuntime codex unsets inherited HTTP_PROXY without login mode', () => {
+  const env: Record<string, string | undefined> = {
+    CTI_PROXY: 'http://127.0.0.1:1087',
+    HTTP_PROXY: 'http://old:1',
+  };
+  applySubprocessProxyPolicyForRuntime(env, 'codex', { useLogin: false });
+  assert.equal(env.HTTP_PROXY, undefined);
+  assert.equal(env.CTI_PROXY, 'http://127.0.0.1:1087');
 });

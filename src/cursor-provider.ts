@@ -9,15 +9,12 @@
  * the `agent` CLI has its own protocol (not wire-compatible with `codex exec`).
  */
 
-import { execFileSync, spawn, type ChildProcess, type SpawnOptions } from 'node:child_process';
+import { spawn, type ChildProcess, type SpawnOptions } from 'node:child_process';
 import fs from 'node:fs';
-import os from 'node:os';
-import path from 'node:path';
 import { createInterface } from 'node:readline';
 
 import type { LLMProvider, StreamChatParams } from './lib/bridge/host';
 import { sseEvent } from './sse-utils';
-import { getCursorAgentLaunchMode, type CursorAgentLaunchMode } from './lib/proxy-env';
 import {
   buildSubprocessEnvForRuntime,
   mergeRunnerSubprocessEnv,
@@ -32,67 +29,6 @@ export type SpawnFn = (cmd: string, args: string[], opts: SpawnOptions) => Child
 
 function resolveAgentPath(explicit?: string): string {
   return explicit?.trim() || process.env.CTI_CURSOR_EXECUTABLE || 'agent';
-}
-
-/**
- * How the Cursor `agent` binary is started (no shell — zsh aliases do not apply).
- * - `standard` (default): `spawn(agentPath, argv…)` — same as invoking `~/.local/bin/agent` when it is on PATH.
- * - `proxychains`: `spawn(proxychainsBin, [realpath(agent), …argv])` — matches a typical zsh wrapper
- *   `proxychains4 "$(realpath "$HOME/.local/bin/agent")" …`.
- */
-export type { CursorAgentLaunchMode };
-
-function cursorAgentLaunchMode(): CursorAgentLaunchMode {
-  const raw = (process.env.CTI_CURSOR_AGENT_LAUNCH || '').trim().toLowerCase();
-  if (raw && raw !== 'standard' && raw !== 'proxychains') {
-    console.warn(
-      `[cursor-provider] CTI_CURSOR_AGENT_LAUNCH=${JSON.stringify(process.env.CTI_CURSOR_AGENT_LAUNCH)} ` +
-        'is not standard|proxychains; using standard',
-    );
-  }
-  return getCursorAgentLaunchMode();
-}
-
-/**
- * Resolve a PATH-style name (e.g. `agent`) or relative path to a concrete file for realpath.
- */
-export function resolveCursorAgentExecutablePath(agentPath: string): string {
-  const trimmed = agentPath.trim();
-  if (path.isAbsolute(trimmed)) return trimmed;
-  if (!trimmed.includes(path.sep)) {
-    const homeBin = path.join(os.homedir(), '.local', 'bin', trimmed);
-    if (fs.existsSync(homeBin)) return homeBin;
-    try {
-      return execFileSync('which', [trimmed], { encoding: 'utf8' }).trim();
-    } catch {
-      throw new Error(
-        `[cursor-provider] Cannot resolve Cursor agent executable "${trimmed}" to a filesystem path ` +
-          `(needed for CTI_CURSOR_AGENT_LAUNCH=proxychains). Set CTI_CURSOR_EXECUTABLE to an absolute path, ` +
-          `or install ${homeBin}.`,
-      );
-    }
-  }
-  return path.resolve(process.cwd(), trimmed);
-}
-
-function proxychainsExecutable(): string {
-  return (process.env.CTI_PROXYCHAINS_EXECUTABLE || 'proxychains4').trim() || 'proxychains4';
-}
-
-/**
- * Returns [executable, argv] for spawn. In proxychains mode, argv[0] is the resolved agent binary.
- */
-export function resolveCursorAgentSpawn(
-  agentPath: string,
-  agentArgs: string[],
-): { executable: string; args: string[]; launchMode: CursorAgentLaunchMode } {
-  const launchMode = cursorAgentLaunchMode();
-  if (launchMode === 'standard') {
-    return { executable: agentPath, args: agentArgs, launchMode };
-  }
-  const resolved = fs.realpathSync(resolveCursorAgentExecutablePath(agentPath));
-  const wrap = proxychainsExecutable();
-  return { executable: wrap, args: [resolved, ...agentArgs], launchMode };
 }
 
 export interface CursorProviderOptions {
@@ -281,8 +217,6 @@ export class CursorProvider implements LLMProvider {
 
             agentArgs.push('--', params.prompt);
 
-            const { executable, args: spawnArgv, launchMode } = resolveCursorAgentSpawn(agentPath, agentArgs);
-
             const env = mergeRunnerSubprocessEnv(
               buildSubprocessEnvForRuntime({ runtime: 'cursor' }),
               { subprocessEnv: self.subprocessEnv },
@@ -301,7 +235,7 @@ export class CursorProvider implements LLMProvider {
             }
 
             console.error(
-              `[cursor-provider] Launching agent: launchMode=${launchMode} executable=${executable} ` +
+              `[cursor-provider] Launching agent: executable=${agentPath} ` +
               `agentPath=${agentPath} cwd=${resolvedCwd} cwdExists=${cwdExists} ` +
               `autoApprove=${self.autoApprove} sessionId=${params.sessionId ?? '-'} sdkSessionId=${params.sdkSessionId ?? '-'} ` +
               `params.model=${params.model ?? '-'} effectiveModel=${model ?? '-'} permissionMode=${params.permissionMode ?? '-'} ` +
@@ -310,7 +244,7 @@ export class CursorProvider implements LLMProvider {
 
             let child: ChildProcess;
             try {
-              child = self.spawnFn(executable, spawnArgv, {
+              child = self.spawnFn(agentPath, agentArgs, {
                 env,
                 cwd: resolvedCwd,
                 stdio: ['pipe', 'pipe', 'pipe'],
@@ -318,7 +252,7 @@ export class CursorProvider implements LLMProvider {
             } catch (spawnError) {
               const error = spawnError instanceof Error ? spawnError : new Error(String(spawnError));
               console.error(
-                `[cursor-provider] Spawn failed before process start: launchMode=${launchMode} executable=${executable} ` +
+                `[cursor-provider] Spawn failed before process start: executable=${agentPath} ` +
                 `agentPath=${agentPath} cwd=${resolvedCwd} ` +
                 `cwdExists=${cwdExists} sessionId=${params.sessionId ?? '-'} sdkSessionId=${params.sdkSessionId ?? '-'} ` +
                 `code=${(error as NodeJS.ErrnoException).code ?? '-'} message=${error.message}`
@@ -476,12 +410,12 @@ export class CursorProvider implements LLMProvider {
                 const error = childError instanceof Error ? childError : new Error(String(childError));
                 const errSpawnArgs = (error as NodeJS.ErrnoException & { spawnargs?: unknown }).spawnargs;
                 console.error(
-                  `[${CURSOR_LOG}] Child process error: launchMode=${launchMode} executable=${executable} ` +
+                  `[${CURSOR_LOG}] Child process error: executable=${agentPath} ` +
                   `agentPath=${agentPath} cwd=${resolvedCwd} ` +
                   `cwdExists=${cwdExists} sessionId=${params.sessionId ?? '-'} sdkSessionId=${params.sdkSessionId ?? '-'} ` +
                   `code=${(error as NodeJS.ErrnoException).code ?? '-'} errno=${(error as NodeJS.ErrnoException).errno ?? '-'} ` +
                   `syscall=${(error as NodeJS.ErrnoException).syscall ?? '-'} path=${(error as NodeJS.ErrnoException).path ?? '-'} ` +
-                  `spawnargs=${JSON.stringify(errSpawnArgs ?? spawnArgv)}`
+                  `spawnargs=${JSON.stringify(errSpawnArgs ?? agentArgs)}`
                 );
                 reject(error);
               });

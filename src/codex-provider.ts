@@ -151,7 +151,7 @@ export class CodexProvider implements LLMProvider {
         : process.env.CTI_CODEX_USE_LOGIN === 'true';
 
     const mergedEnv = mergeRunnerSubprocessEnv(
-      buildSubprocessEnvForRuntime({ runtime: 'codex' }),
+      buildSubprocessEnvForRuntime({ runtime: 'codex', useLogin }),
       this.cfg.subprocessEnv ? { subprocessEnv: this.cfg.subprocessEnv } : undefined,
     );
 

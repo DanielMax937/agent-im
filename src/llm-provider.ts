@@ -166,7 +166,7 @@ export function buildSubprocessEnvForRuntime(
     }
   }
 
-  applySubprocessProxyPolicyForRuntime(out, runtime);
+  applySubprocessProxyPolicyForRuntime(out, runtime, { useLogin });
   return out;
 }
 
@@ -265,8 +265,6 @@ export const CURSOR_PROVIDER_LOG_ENV_KEYS = [
   'CTI_CURSOR_BASE_URL',
   'CTI_CURSOR_API_KEY',
   'CTI_CURSOR_EXECUTABLE',
-  'CTI_CURSOR_AGENT_LAUNCH',
-  'CTI_PROXYCHAINS_EXECUTABLE',
   'CURSOR_API_KEY',
   'OPENAI_API_KEY',
 ] as const;

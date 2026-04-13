@@ -1214,6 +1214,19 @@ async function handleCommand(
       if (!rawArg) {
         const eff = effectiveRunnerProfileId(binding, store);
         const effMeta = profiles.find((p) => p.id === eff);
+        getLogger().info(
+          {
+            event: 'runner_command_list',
+            channelType: binding.channelType,
+            chatId: binding.chatId,
+            bindingId: binding.id,
+            bindingRunnerProfileId: binding.runnerProfileId ?? null,
+            effectiveRunnerProfileId: eff,
+            storeDefaultRunnerProfileId: storeDefault ?? null,
+            availableRunnerIds: profiles.map((p) => p.id),
+          },
+          '[bridge] /runner: listed runners for chat',
+        );
         const lines: string[] = [
           '<b>Runners (this chat)</b>',
           '',
@@ -1254,9 +1267,23 @@ async function handleCommand(
         router.updateBinding(binding.id, { runnerProfileId: undefined });
         const updated = router.resolve(msg.address);
         const effAfter = effectiveRunnerProfileId(updated, store);
+        const recreated = effBefore !== effAfter;
         if (effBefore !== effAfter) {
           router.recreateBindingSession(updated);
         }
+        getLogger().info(
+          {
+            event: 'runner_command_reset',
+            channelType: updated.channelType,
+            chatId: updated.chatId,
+            bindingId: updated.id,
+            previousEffectiveRunnerProfileId: effBefore,
+            nextEffectiveRunnerProfileId: effAfter,
+            recreatedSession: recreated,
+            codepilotSessionId: updated.codepilotSessionId,
+          },
+          '[bridge] /runner: reset chat runner to default',
+        );
         response = [
           `Runner reset to server default (effective profile: <code>${escapeHtml(effAfter)}</code>).`,
           effBefore !== effAfter
@@ -1282,9 +1309,24 @@ async function handleCommand(
       router.updateBinding(binding.id, { runnerProfileId: matched.id });
       const updatedRunner = router.resolve(msg.address);
       const effAfter = effectiveRunnerProfileId(updatedRunner, store);
+      const recreated = effBefore !== effAfter;
       if (effBefore !== effAfter) {
         router.recreateBindingSession(updatedRunner);
       }
+      getLogger().info(
+        {
+          event: 'runner_command_switch',
+          channelType: updatedRunner.channelType,
+          chatId: updatedRunner.chatId,
+          bindingId: updatedRunner.id,
+          requestedRunnerProfileId: matched.id,
+          previousEffectiveRunnerProfileId: effBefore,
+          nextEffectiveRunnerProfileId: effAfter,
+          recreatedSession: recreated,
+          codepilotSessionId: updatedRunner.codepilotSessionId,
+        },
+        '[bridge] /runner: updated chat runner',
+      );
       response = [
         '<b>Runner updated</b>',
         '',

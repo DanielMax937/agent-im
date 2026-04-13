@@ -930,7 +930,7 @@ export function imLlmKeyPrefix(config: Config, channelType: string): string {
   if (!config.imBot) return "__legacy__";
   const p = parseImBaseAndInstanceId(channelType);
   if (!p) return "__legacy__";
-  return `${p.base}:${p.instanceId}`;
+  return `${p.base}:${getImBotInstanceId()}`;
 }
 
 /** One provider per `(keyPrefix, runner.id)` — one bridge process hosts one bot (`imBot`). */
@@ -945,9 +945,17 @@ export function collectImLlmBuildEntries(
     return out;
   }
   const spec = config.imBot;
-  const keyPrefix = `${spec.channel}:${getImBotInstanceId()}`;
-  for (const r of normalizeRunnersForInstance(spec, config)) {
-    out.push({ keyPrefix, runner: r });
+  const channels = new Set<ImInstanceChannel>();
+  channels.add(spec.channel);
+  for (const ch of config.enabledChannels) {
+    if (IM_BASE_CHANNEL_SET.has(ch)) channels.add(ch as ImInstanceChannel);
+  }
+  const runners = normalizeRunnersForInstance(spec, config);
+  for (const channel of channels) {
+    const keyPrefix = `${channel}:${getImBotInstanceId()}`;
+    for (const r of runners) {
+      out.push({ keyPrefix, runner: r });
+    }
   }
   return out;
 }

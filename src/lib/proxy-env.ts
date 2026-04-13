@@ -28,20 +28,6 @@ export function unsetStandardProxyEnv(env: Record<string, string | undefined>): 
   }
 }
 
-/**
- * How Cursor `agent` is launched — must match `cursor-provider` / `.env` `CTI_CURSOR_AGENT_LAUNCH`.
- * - `standard`: subprocess should mirror `CTI_PROXY` into HTTP(S)_PROXY when those are empty.
- * - `proxychains`: proxy is injected by proxychains; clear HTTP*_PROXY so Node does not double-proxy.
- */
-export type CursorAgentLaunchMode = 'standard' | 'proxychains';
-
-export function getCursorAgentLaunchMode(): CursorAgentLaunchMode {
-  const raw = (process.env.CTI_CURSOR_AGENT_LAUNCH || '').trim().toLowerCase();
-  if (!raw || raw === 'standard') return 'standard';
-  if (raw === 'proxychains') return 'proxychains';
-  return 'standard';
-}
-
 export function applyStandardProxyEnvFromCtiProxy(
   env: Record<string, string | undefined>,
   options?: { force?: boolean },
@@ -61,19 +47,22 @@ export function applyStandardProxyEnvFromCtiProxy(
 export function applySubprocessProxyPolicyForRuntime(
   env: Record<string, string | undefined>,
   runtime: SubprocessRuntimeKind,
+  options?: { useLogin?: boolean },
 ): void {
   switch (runtime) {
     case 'claude':
-    case 'codex':
     case 'auto':
       unsetStandardProxyEnv(env);
       break;
-    case 'cursor':
-      if (getCursorAgentLaunchMode() === 'standard') {
-        applyStandardProxyEnvFromCtiProxy(env);
+    case 'codex':
+      if (options?.useLogin) {
+        applyStandardProxyEnvFromCtiProxy(env, { force: true });
       } else {
         unsetStandardProxyEnv(env);
       }
+      break;
+    case 'cursor':
+      applyStandardProxyEnvFromCtiProxy(env, { force: true });
       break;
     case 'copilot':
       applyStandardProxyEnvFromCtiProxy(env, { force: true });

@@ -10,7 +10,7 @@ import {
   fetchJson,
   ensureOutDir,
   postProject,
-  getFirstRunnerId,
+  getPreferredRunnerId,
   applyKanbanRunners,
   pollTaskState,
   writeCase,
@@ -37,9 +37,10 @@ async function main() {
     process.exit(1);
   }
 
-  const runnerId = await getFirstRunnerId(IM);
+  const expected = (process.env.KANBAN_E2E_RUNNER_ID || 'rt-5').trim();
+  const runnerId = await getPreferredRunnerId(IM);
   if (!runnerId) {
-    console.error('No platform runner: configure CTI_RUNNERS / GET /api/platform/runners');
+    console.error(`Required platform runner "${expected}" not found in GET /api/platform/runners`);
     process.exit(1);
   }
 

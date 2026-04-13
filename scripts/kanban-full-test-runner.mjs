@@ -5,7 +5,7 @@
  * Prerequisites:
  *   - agent-im listening (default http://127.0.0.1:3300)
  *   - gh auth login; GITHUB_TOKEN / gh token for SCM
- *   - At least one platform runner: GET /api/platform/runners (applied to all Kanban lanes per project)
+ *   - Platform runner `rt-5` exists (override with KANBAN_E2E_RUNNER_ID)
  *
  * Env:
  *   AGENT_IM_BASE_URL       default http://127.0.0.1:3300
@@ -46,7 +46,7 @@ import {
   projectBody,
   fetchJson,
   cdsPost,
-  getFirstRunnerId,
+  getPreferredRunnerId,
   applyKanbanRunners,
   postProject,
   writeCase,
@@ -91,8 +91,9 @@ function ok(id, pass, body) {
 }
 
 async function requireRunner() {
-  const rid = await getFirstRunnerId(IM);
-  if (!rid) throw new Error('No platform runner: configure CTI_RUNNERS / GET /api/platform/runners');
+  const expected = (process.env.KANBAN_E2E_RUNNER_ID || 'rt-5').trim();
+  const rid = await getPreferredRunnerId(IM);
+  if (!rid) throw new Error(`Required platform runner "${expected}" not found in GET /api/platform/runners`);
   return rid;
 }
 
