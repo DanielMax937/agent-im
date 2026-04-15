@@ -37,6 +37,9 @@ import { GitService } from './git-service';
 import { assertValidLocalRepositoryPath } from './repository-path';
 import { InstanceManager } from './instance-manager';
 import { isScmMergeNotMergeableError, type PullRequestRef, type ScmClient } from './scm-client';
+import { deployVercelFromLocalBranch, pollVercelDeploymentSuccesses, rememberVercelDeploymentBranch } from './vercel-cli';
+import { ensureVercelGitConnection, ensureVercelProjectLinked } from './vercel-cli';
+import { ensureBootstrappedWorkspace, parseBootstrapProjectWorkflowInput } from './project-bootstrap';
 import type {
   AgentInstanceRecord,
   AgentRole,
@@ -54,6 +57,7 @@ import type {
   TaskSession,
   TaskWorkflowState,
 } from './types';
+import type { RunnerConfig } from '../config-shared';
 
 /**
  * Upstream dependency tasks must reach one of these columns before downstream cards may leave
@@ -247,6 +251,10 @@ export interface WorkflowServiceDeps {
 
 export class WorkflowService {
   constructor(private readonly deps: WorkflowServiceDeps) {}
+
+  private availableRunners(): RunnerConfig[] {
+    return normalizeRunnersWithProcessEnvOverride(loadKanbanPlatformConfig());
+  }
 
   /**
    * Append a manual note to the task (API / UI). Does not change workflow state.
@@ -781,6 +789,192 @@ export class WorkflowService {
       updatedAt: now(),
     };
     return this.deps.store.upsertSprint(sprint);
+  }
+
+  async bootstrapProjectFromRequirement(input: unknown): Promise<{
+    project: Project;
+    sprint: Sprint;
+    tasks: TaskSession[];
+    assignedTasks: TaskSession[];
+    warnings: string[];
+  }> {
+    const prepared = parseBootstrapProjectWorkflowInput(input, this.availableRunners());
+    const workspace = await ensureBootstrappedWorkspace(prepared);
+    let project: Project = {
+      ...prepared.project,
+      repository: {
+        ...prepared.project.repository,
+        remoteUrl: workspace.remoteUrl,
+        localPath: workspace.localPath,
+        scmProject: workspace.scmProject,
+      },
+      updatedAt: now(),
+    };
+
+    const warnings: string[] = [];
+    const existingProject = this.deps.store.getProject(project.id);
+    if (existingProject) {
+      project = this.deps.store.upsertProject({
+        ...existingProject,
+        ...project,
+        repository: project.repository,
+        kanbanRoleRunners: project.kanbanRoleRunners,
+        deployment: {
+          ...existingProject.deployment,
+          ...project.deployment,
+        },
+        updatedAt: now(),
+      });
+    } else {
+      if (project.deployment?.enabled !== false) {
+        const linked = await ensureVercelProjectLinked(project);
+        project = {
+          ...project,
+          ...(linked ? { deployment: linked } : {}),
+        };
+        await ensureVercelGitConnection(project);
+      }
+      project = this.deps.store.upsertProject(project);
+    }
+
+    let sprint = this.deps.store
+      .listSprints(project.id)
+      .find((item) => item.status === 'active' && item.name.trim() === prepared.sprintName.trim()) ?? null;
+    if (!sprint) {
+      try {
+        sprint = await this.startSprint({
+          projectId: project.id,
+          sprintName: prepared.sprintName,
+          baseBranch: project.repository.baseBranch,
+        });
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        if (/Vercel|productionBranch|Invalid request/i.test(message)) {
+          const sprintBranchName = `${project.repository.sprintBranchPrefix}${slugify(prepared.sprintName)}`;
+          sprint = this.deps.store.upsertSprint({
+            id: crypto.randomUUID(),
+            projectId: project.id,
+            name: prepared.sprintName,
+            branchName: sprintBranchName,
+            baseBranch: project.repository.baseBranch,
+            status: 'active',
+            taskIds: [],
+            startedAt: now(),
+            createdAt: now(),
+            updatedAt: now(),
+          });
+          warnings.push(`Sprint created without preparing Vercel deployment metadata: ${message}`);
+        } else {
+          throw error;
+        }
+      }
+    }
+
+    const existingSprintTasks = this.deps.store.listTaskSessions(project.id).filter((task) => task.sprintId === sprint.id);
+    if (existingSprintTasks.length > 0) {
+      throw new Error(`Sprint ${sprint.name} already has tasks; refusing to create duplicates`);
+    }
+
+    const plan = prepared.taskPlan
+      ? prepared.taskPlan
+      : (await this.previewBatchTasksFromSpec({
+          projectId: project.id,
+          sprintId: sprint.id,
+          rawText: [
+            `Project: ${project.name}`,
+            `Sprint: ${sprint.name}`,
+            '',
+            'Requirement:',
+            prepared.requirement,
+          ].join('\n'),
+        })).tasks;
+
+    const created = await this.createTasksFromBatchPlan({
+      projectId: project.id,
+      sprintId: sprint.id,
+      tasks: plan,
+    });
+
+    const assignedTasks: TaskSession[] = [];
+    if (prepared.assignTasks) {
+      for (const task of created.created) {
+        assignedTasks.push(
+          await this.assignTask({
+            projectId: project.id,
+            sprintId: sprint.id,
+            taskSessionId: task.id,
+            issueId: task.issueId,
+            kanbanAgent: 'agent-dev',
+          }),
+        );
+      }
+    }
+
+    return {
+      project: this.requireProject(project.id),
+      sprint,
+      tasks: created.created.map((task) => this.requireTaskSession(task.id)),
+      assignedTasks,
+      warnings,
+    };
+  }
+
+  async deploySprint(sprintId: string): Promise<{
+    sprint: Sprint;
+    deployment: {
+      id: string;
+      projectName: string;
+      branchName: string;
+      url: string;
+      target?: string;
+      readyState?: string;
+      aliases: string[];
+    };
+  }> {
+    const sprint = this.requireSprint(sprintId);
+    const project = this.requireProject(sprint.projectId);
+    this.assertProjectLocalRepositoryPath(project);
+
+    if (project.deployment?.enabled === false) {
+      throw new Error(`Deployment is disabled for project ${project.id}`);
+    }
+
+    const repoPath = project.repository.localPath;
+    await this.deps.gitService.fetchOrigin(repoPath);
+    await this.deps.gitService.checkoutOriginTrackingBranch(repoPath, sprint.branchName);
+
+    const deployment = await deployVercelFromLocalBranch(
+      {
+        ...project,
+      },
+      {
+        branchName: sprint.branchName,
+        meta: {
+          ctiProjectId: project.id,
+          ctiSprintId: sprint.id,
+          ctiSprintName: slugify(sprint.name),
+          ctiDeploySource: 'kanban-sprint',
+        },
+      },
+    );
+
+    this.deps.store.upsertProject({
+      ...project,
+      deployment: {
+        ...project.deployment,
+        lastNotifiedDeploymentId: deployment.id,
+      },
+      updatedAt: now(),
+    });
+
+    return { sprint, deployment };
+  }
+
+  async pollVercelDeployments(): Promise<void> {
+    const nextProjects = await pollVercelDeploymentSuccesses(this.deps.store.listProjects());
+    for (const project of nextProjects) {
+      this.deps.store.upsertProject(project);
+    }
   }
 
   /** Create a task in **todo** (no branch, no runner). */
@@ -1752,6 +1946,27 @@ export class WorkflowService {
     const remoteRef = `origin/${mergeTarget}`;
     const baselineSha = await this.deps.gitService.resolveRefSha(repoPath, remoteRef);
 
+    if (project.deployment?.enabled !== false) {
+      try {
+        const deployment = await rememberVercelDeploymentBranch(project, mergeTarget);
+        this.deps.store.upsertProject({
+          ...project,
+          ...(deployment ? { deployment } : {}),
+          updatedAt: now(),
+        });
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        getKanbanLogger().warn(
+          { err: error, taskSessionId: taskSession.id, projectId: project.id, mergeTarget },
+          'Failed to update Vercel production branch after review merge',
+        );
+        await this.appendWorkflowComment(
+          taskSession.id,
+          `Merged into ${mergeTarget}, but could not update Vercel production branch automatically: ${message.slice(0, 400)}`,
+        );
+      }
+    }
+
     // Private repos: skip AI agent, set self-host-runner lane, wait for CI webhook.
     if (project.isPrivate) {
       const webhookUrl = `/api/workflows/tasks/${taskSession.id}/ci-result`;
@@ -2572,6 +2787,25 @@ export class WorkflowService {
     }
     this.deps.store.removeTaskSession(taskSessionId);
     await this.processDeveloperAssignmentQueue(sprint.id);
+  }
+
+  /**
+   * Bulk-delete tasks via the in-process workflow service so the store-backed
+   * Kanban status snapshot stays consistent immediately after the API returns.
+   */
+  async deleteTasks(filters?: {
+    projectId?: string;
+    sprintId?: string;
+  }): Promise<{ deletedTaskCount: number }> {
+    const tasks = this.deps.store
+      .listTaskSessions(filters?.projectId)
+      .filter((task) => !filters?.sprintId || task.sprintId === filters.sprintId);
+
+    for (const task of tasks) {
+      await this.deleteTask(task.id);
+    }
+
+    return { deletedTaskCount: tasks.length };
   }
 
   /**

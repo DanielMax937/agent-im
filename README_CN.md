@@ -1,265 +1,297 @@
-# Claude-to-IM Skill
+# agent-im
 
-将 Claude Code / Codex 桥接到 IM 平台 —— 在 Telegram、Discord、飞书或 QQ 中与 AI 编程代理对话。
+面向研发团队的 AI 工程工作流平台，融合 Kanban 编排、自动化 agent 接力执行，以及 IM 原生协作。
 
 [English](README.md)
 
-> **想要桌面图形界面？** 试试 [CodePilot](https://github.com/op7418/CodePilot) —— 一个功能完整的桌面应用，提供可视化聊天界面、会话管理、文件树预览、权限控制等。本 Skill 从 CodePilot 的 IM 桥接模块中提取而来，适合偏好轻量级纯 CLI 方案的用户。
+## 产品定位
 
----
+`agent-im` 不只是一个 IM bridge，也不只是一个 Kanban 面板。
 
-## 工作原理
+它更准确的定位是一个 **以任务为单位运行的 AI 交付平台**：
 
-本 Skill 运行一个后台守护进程，将你的 IM 机器人连接到 Claude Code 或 Codex 会话。来自 IM 的消息被转发给 AI 编程代理，响应（包括工具调用、权限请求、流式预览）会发回到聊天中。
+- **Kanban 是执行层**：任务状态变化会触发真实的执行，而不是只改一列状态
+- **Auto 是工作流自动推进**：开发、评审、测试 agent 会按阶段接力
+- **IM 是协作界面**：Telegram、Discord、飞书/Lark、QQ 成为审批、跟进、追踪的操作台
+- **Git / PR 流程仍是主干**：分支、评审、测试、合并、发布都围绕现有仓库流程展开
 
+一句话描述：
+
+> 让 AI 像工程团队成员一样，在看板里接任务、在代码仓库里执行、在 IM 里协作汇报。
+
+## 它解决什么问题
+
+传统任务工具大多只负责“记录工作”。
+
+`agent-im` 的目标是把任务真正 **往前推进**。
+
+当任务被创建并分配后，平台可以：
+
+- 创建 Sprint 分支和任务分支
+- 拉起开发 agent 开始执行
+- 进入评审流并自动切换 reviewer
+- 进入测试和回归测试
+- 将失败反馈打回开发队列
+- 在任务关闭后停止相关实例
+
+## 当前能力
+
+这个产品目前由三套能力组成，并且已经打通：
+
+1. **Kanban 工作流引擎**
+   支持 `Todo -> In Progress -> Review -> Testing -> Closed` 主流程，也支持 `pre_testing`、`regression_testing`、`pending_uat`、`pending_release`、`blocked` 等中间状态。
+
+2. **Agent 自动执行层**
+   按任务阶段调起不同角色的运行器：
+   - developer
+   - reviewer
+   - tester
+
+3. **IM bridge 与审批层**
+   连接 Telegram、Discord、飞书/Lark、QQ，让人类在消息界面中分配工作、审批工具调用、查看进展、接收异常和结果。
+
+## 核心价值
+
+这个项目最重要的不是“能在 IM 里和 AI 聊天”，而是：
+
+**把 AI 接进真实的软件交付流程。**
+
+也就是说，它不是聊天机器人外壳，而是一层任务驱动的执行系统，连接：
+
+- 任务
+- Git 仓库
+- 分支
+- PR / MR
+- 测试
+- 人工审批
+- IM 协作
+
+## 整体架构
+
+```text
+Web UI / IM channels
+        |
+        v
+Next.js platform server
+  - workflow APIs
+  - approval APIs
+  - project / sprint / task queries
+        |
+        v
+Platform services
+  - WorkflowService
+  - InstanceManager
+  - GitService / SCM client
+  - platform persistence
+        |
+        v
+Claude / Codex / Cursor / Copilot runtimes
 ```
-你 (Telegram/Discord/飞书/QQ)
-  ↕ Bot API
-后台守护进程 (Node.js)
-  ↕ Claude Agent SDK 或 Codex SDK（通过 CTI_RUNTIME 配置）
-Claude Code / Codex → 读写你的代码库
-```
 
-## 功能特点
+主要入口包括：
 
-- **五大 IM 平台** — Telegram、Discord、飞书、QQ、Agent（自对话循环），可任意组合启用
-- **交互式配置** — 引导式向导逐步收集 token，附带详细获取说明
-- **权限控制** — 工具调用需要在聊天中通过内联按钮（Telegram/Discord）或文本 `/perm` 命令（飞书/QQ）明确批准
-- **流式预览** — 实时查看 Claude 的输出（Telegram 和 Discord 支持）
-- **会话持久化** — 对话在守护进程重启后保留
-- **密钥保护** — token 以 `chmod 600` 存储，日志中自动脱敏
-- **无需编写代码** — 安装 Skill 后运行 `/claude-to-im setup` 即可
+- **Web UI**
+  - `/admin`：桥接与运行器配置
+  - `/projects`：项目管理
+  - `/board`：任务看板
+  - `/board/monitor`：lane / turn 监控
+- **HTTP API**
+  - 项目、Sprint、任务、实例、审批、覆盖率、bridge 管理接口
+- **独立 bridge daemon**
+  - 负责 IM 适配器和持久化聊天会话
 
-## 前置要求
+## 产品能力拆解
 
-- **Node.js >= 20**
-- **Claude Code CLI**（`CTI_RUNTIME=claude` 或 `auto` 时需要）— 已安装并完成认证（`claude` 命令可用）
-- **Codex CLI**（`CTI_RUNTIME=codex` 或 `auto` 时需要）— `npm install -g @openai/codex`。鉴权：运行 `codex auth login`，或设置 `OPENAI_API_KEY`（可选，API 模式）
+### 1. Kanban 不只是展示，而是执行
 
-## 安装
+项目定义：
 
-### npx skills（推荐）
+- 仓库位置
+- 分支策略
+- SCM 提供商
+- lane 到 runner 的映射
+- 可选部署、覆盖率、UAT 要求
 
-```bash
-npx skills add op7418/Claude-to-IM-skill
-```
+每个 Sprint / Task 会形成可持久化的执行上下文，包含：
 
-### Git 克隆
+- workflow state
+- branch / worktree
+- conversation history
+- approval queue
+- per-task message queue
+- active agent instances
 
-```bash
-git clone https://github.com/op7418/Claude-to-IM-skill.git ~/.claude/skills/claude-to-im
-```
+### 2. 多 agent 自动接力
 
-将仓库直接克隆到个人 Skills 目录，Claude Code 会自动发现。
+平台会根据状态驱动不同角色执行：
 
-### 符号链接方式
+- **开发 lane**：从任务分配开始，在任务分支上工作
+- **评审 lane**：提交 review 后接管
+- **测试 lane**：先验证任务分支，再验证合并后的集成分支
+- **补偿 / 回流机制**：测试失败或评审打回时，将问题重新送回开发
+- **升级 lane**：多轮 review pushback 后，可切换到更高阶 runner
 
-如果你想把仓库放在其他位置（比如方便开发）：
+### 3. IM 原生协作
 
-```bash
-git clone https://github.com/op7418/Claude-to-IM-skill.git ~/code/Claude-to-IM-skill
-mkdir -p ~/.claude/skills
-ln -s ~/code/Claude-to-IM-skill ~/.claude/skills/claude-to-im
-```
+bridge 层当前支持：
 
-### Codex
+- Telegram
+- Discord
+- 飞书 / Lark
+- QQ
+- 基于 Redis 的 autonomous / hybrid channel
 
-如果你使用 [Codex](https://github.com/openai/codex)，直接克隆到 Codex skills 目录：
+人在 IM 中可以：
 
-```bash
-git clone https://github.com/op7418/Claude-to-IM-skill.git ~/.codex/skills/claude-to-im
-```
+- 直接与运行中的 runtime 对话
+- 接收流式输出
+- 批准或拒绝工具调用
+- 查看工作流进展
+- 接收评审、测试、失败回流通知
 
-或使用提供的安装脚本，自动安装依赖并构建：
+### 4. 统一运行时抽象
 
-```bash
-# 克隆并安装（复制模式）
-git clone https://github.com/op7418/Claude-to-IM-skill.git ~/code/Claude-to-IM-skill
-bash ~/code/Claude-to-IM-skill/scripts/install-codex.sh
+平台可以在同一套任务模型下切换不同后端：
 
-# 或使用符号链接模式（方便开发）
-bash ~/code/Claude-to-IM-skill/scripts/install-codex.sh --link
-```
+- Claude
+- Codex
+- Cursor
+- Copilot
 
-### 验证安装
+这意味着 runner 选择是项目配置问题，而不是产品分叉问题。
 
-**Claude Code：** 启动新会话，输入 `/` 应能看到 `claude-to-im`。也可以问 Claude："What skills are available?"
+## 典型工作流
 
-**Codex：** 启动新会话，说 "claude-to-im setup" 或 "启动桥接"，Codex 会识别 Skill 并运行配置向导。
+1. 创建一个项目，并指向本地 Git 仓库。
+2. 从基础分支启动一个 Sprint。
+3. 创建或分配一个任务。
+4. 平台创建任务分支，并拉起开发 lane。
+5. 提交后自动进入 review 流程。
+6. 测试和回归测试按顺序推进。
+7. 失败则回流开发；成功则进入发布/关闭。
+
+## API 概览
+
+代表性接口：
+
+- `GET /health`
+- `GET /api/projects`
+- `GET /api/sprints`
+- `GET /api/tasks`
+- `GET /api/instances`
+- `GET /api/approvals`
+- `GET /api/bridge/status`
+- `POST /api/projects`
+- `POST /api/workflows/sprints/start`
+- `POST /api/workflows/tasks/create`
+- `POST /api/workflows/tasks/assign`
+- `POST /api/workflows/tasks/:taskSessionId/submit-review`
+- `POST /api/workflows/tasks/:taskSessionId/start-testing`
+- `POST /api/workflows/tasks/:taskSessionId/testing/fail`
+- `POST /api/workflows/tasks/:taskSessionId/close`
+- `POST /api/bridge/start`
+- `POST /api/bridge/stop`
+
+完整接口文档见：[docs/API.md](docs/API.md)
 
 ## 快速开始
 
-### 1. 配置
+### 前置要求
 
-```
-/claude-to-im setup
-```
+- Node.js `>=22.5.0`
+- 一个希望由平台操作的本地 Git 仓库
+- 至少安装并配置一种 runtime：
+  - Claude CLI / Claude Agent SDK 流程
+  - Codex CLI / SDK
+  - 如有使用，也可以接入 Cursor 或 Copilot runner
 
-向导会引导你完成以下步骤：
+### 安装依赖
 
-1. **选择渠道** — 选择 Telegram、Discord、飞书、QQ，或任意组合
-2. **输入凭据** — 向导会详细说明如何获取每个 token、需要开启哪些设置、授予哪些权限
-3. **设置默认值** — 工作目录、模型、模式
-4. **验证** — 立即通过平台 API 验证 token 有效性
-
-### 2. 启动
-
-```
-/claude-to-im start
+```bash
+npm install
 ```
 
-守护进程在后台启动。关闭终端后仍会继续运行。
+### 启动 Web 平台
 
-### 3. 开始聊天
-
-打开 IM 应用，给你的机器人发消息，Claude Code 会回复。
-
-当 Claude 需要使用工具（编辑文件、运行命令）时，聊天中会弹出带有 **允许** / **拒绝** 按钮的权限请求（Telegram/Discord），或文本 `/perm` 命令提示（飞书/QQ）。
-
-## 命令列表
-
-所有命令在 Claude Code 或 Codex 中执行：
-
-| Claude Code | Codex（自然语言） | 说明 |
-|---|---|---|
-| `/claude-to-im setup` | "claude-to-im setup" / "配置" | 交互式配置向导 |
-| `/claude-to-im start` | "start bridge" / "启动桥接" | 启动桥接守护进程 |
-| `/claude-to-im stop` | "stop bridge" / "停止桥接" | 停止守护进程 |
-| `/claude-to-im status` | "bridge status" / "状态" | 查看运行状态 |
-| `/claude-to-im logs` | "查看日志" | 查看最近 50 行日志 |
-| `/claude-to-im logs 200` | "logs 200" | 查看最近 200 行日志 |
-| `/claude-to-im reconfigure` | "reconfigure" / "修改配置" | 交互式修改配置 |
-| `/claude-to-im doctor` | "doctor" / "诊断" | 诊断问题 |
-
-## 平台配置指南
-
-`setup` 向导会在每一步提供内联指引，以下是概要：
-
-### Telegram
-
-1. 在 Telegram 中搜索 `@BotFather` → 发送 `/newbot` → 按提示操作
-2. 复制 bot token（格式：`123456789:AABbCc...`）
-3. 建议：`/setprivacy` → Disable（用于群组）
-4. 获取 User ID：给 `@userinfobot` 发消息
-
-### Discord
-
-1. 前往 [Discord 开发者门户](https://discord.com/developers/applications) → 新建应用
-2. Bot 标签页 → Reset Token → 复制 token
-3. 在 Privileged Gateway Intents 下开启 **Message Content Intent**
-4. OAuth2 → URL Generator → scope 选 `bot` → 权限选 Send Messages、Read Message History、View Channels → 复制邀请链接
-
-### 飞书 / Lark
-
-1. 前往[飞书开放平台](https://open.feishu.cn/app)（或 [Lark](https://open.larksuite.com/app)）
-2. 创建自建应用 → 获取 App ID 和 App Secret
-3. **批量添加权限**：进入"权限管理" → 使用批量配置添加所有必需权限（`setup` 向导提供完整 JSON）
-4. 在"添加应用能力"中启用机器人
-5. **事件与回调**：选择**长连接**作为事件订阅方式 → 添加 `im.message.receive_v1` 事件
-6. **发布**：进入"版本管理与发布" → 创建版本 → 提交审核 → 在管理后台审核通过
-7. **注意**：版本审核通过并发布后机器人才能使用
-
-### QQ
-
-> QQ 目前仅支持 **C2C 私聊**（沙箱接入）。不支持群聊/频道、内联权限按钮、流式预览。权限确认使用文本 `/perm ...` 命令。仅支持图片入站（不支持图片回复）。
-
-1. 前往 [QQ 机器人 OpenClaw](https://q.qq.com/qqbot/openclaw)
-2. 创建或选择已有 QQ 机器人 → 获取 **App ID** 和 **App Secret**（仅需这两个必填项）
-3. 配置沙箱接入，用 QQ 扫码添加机器人
-4. `CTI_QQ_ALLOWED_USERS` 填写 `user_openid`（不是 QQ 号）— 可先留空
-5. 如果底层 provider 不支持图片输入，设置 `CTI_QQ_IMAGE_ENABLED=false`
-
-### Hybrid 自动模式 / Slave Execution Report（可选）
-
-使用 Telegram + Redis 混合自动模式时，可在 `config.env` 中配置（详见 `config.env.example`）：
-
-- **`CTI_SLAVE_REPORT_MASTER_EVAL_KEEP_LAST`**：在 Slave 报告的 Session context **展示**中保留最近几轮 `Master evaluation`。**代码默认 1**（未设置该变量时）；**`0`** = 不截断、显示全部；设为 **`2`** 等可多看历史。
-- **`CTI_SLAVE_REPORT_GOAL`**：可选，固定报告标题中的 canonical goal 行。
-
-说明：滚动区里若仍出现「默认 **2** 轮」等字样，多为 **历史 Master evaluation 叠字**，不代表当前代码默认；部署新构建并重启 bridge 后，新报告应对齐 **默认 1 轮**（除非显式配置了更大值或 `0`）。
-
-## 架构
-
-```
-~/.claude-to-im/
-├── config.env             ← 凭据与配置 (chmod 600)
-├── data/                  ← 持久化 JSON 存储
-│   ├── sessions.json
-│   ├── bindings.json
-│   ├── permissions.json
-│   └── messages/          ← 按会话分文件的消息历史
-├── logs/
-│   └── bridge.log         ← 自动轮转，密钥脱敏
-└── runtime/
-    ├── bridge.pid          ← 守护进程 PID 文件
-    └── status.json         ← 当前状态
+```bash
+npm run dev
 ```
 
-**如何查看日志文件**（`CTI_HOME` 解析、`bridge.log` 与 `bridge-daemon.log`、命令行 `tail`/`grep`、`/api/bridge/logs`）：见 **[docs/LOGS.md](docs/LOGS.md)**。
+默认本地入口：
 
-### 核心组件
+- Web UI：`http://127.0.0.1:3000`
+- 健康检查：`http://127.0.0.1:3000/health`
 
-| 组件 | 职责 |
+### 启动独立 bridge daemon
+
+```bash
+npm run dev:bridge
+```
+
+### 构建
+
+```bash
+npm run build
+```
+
+### 测试
+
+```bash
+npm test
+npm run typecheck
+```
+
+## 数据与持久化
+
+Bridge 数据保存在 `~/.claude-to-im/...` 下，主要包含：
+
+- IM sessions
+- bindings
+- permissions
+- messages
+- logs
+- runtime status
+
+平台数据单独存储，主要持久化：
+
+- projects
+- sprints
+- task sessions
+- agent instances
+- task queues
+- approvals
+- monitor rows
+
+## 关键文件
+
+| 文件 | 作用 |
 |---|---|
-| `src/main.ts` | 守护进程入口，组装依赖注入，启动 bridge |
-| `src/config.ts` | 加载/保存 `config.env`，映射为 bridge 设置 |
-| `src/store.ts` | JSON 文件 BridgeStore（30 个方法，写穿缓存） |
-| `src/llm-provider.ts` | Claude Agent SDK `query()` → SSE 流 |
-| `src/codex-provider.ts` | Codex SDK `runStreamed()` → SSE 流 |
-| `src/sse-utils.ts` | 共享的 SSE 格式化辅助函数 |
-| `src/permission-gateway.ts` | 异步桥接：SDK `canUseTool` ↔ IM 按钮 |
-| `src/logger.ts` | 密钥脱敏的文件日志，支持轮转 |
-| `scripts/daemon.sh` | 进程管理（start/stop/status/logs） |
-| `scripts/doctor.sh` | 诊断检查 |
-| `SKILL.md` | Claude Code Skill 定义文件 |
-
-### 权限流程
-
-```
-1. Claude 想使用工具（如编辑文件）
-2. SDK 调用 canUseTool() → LLMProvider 发射 permission_request SSE 事件
-3. Bridge 在 IM 聊天中发送内联按钮：[允许] [拒绝]
-4. canUseTool() 阻塞等待用户响应（5 分钟超时）
-5. 用户点击允许 → Bridge 解除权限等待
-6. SDK 继续执行工具 → 结果流式发回 IM
-```
-
-## 故障排查
-
-运行诊断：
-
-```
-/claude-to-im doctor
-```
-
-检查项目：Node.js 版本、配置文件是否存在及权限、token 有效性（实时 API 调用）、日志目录、PID 文件一致性、最近的错误。
-
-| 问题 | 解决方案 |
-|---|---|
-| `Bridge 无法启动` | 运行 `doctor`，检查 Node 版本和日志 |
-| `收不到消息` | 用 `doctor` 验证 token，检查允许用户配置 |
-| `权限超时` | 用户 5 分钟内未响应，工具调用自动拒绝 |
-| `PID 文件残留` | 运行 `stop` 再 `start`，脚本会自动清理 |
-
-详见 [references/troubleshooting.md](references/troubleshooting.md)。
+| `src/main.ts` | 独立 bridge daemon 入口 |
+| `src/platform/app.ts` | 平台共享 HTTP 路由 |
+| `src/platform/container.ts` | store、runtime、workflow 服务装配 |
+| `src/platform/workflow-service.ts` | Kanban 工作流状态机 |
+| `src/platform/instance-manager.ts` | runtime 实例生命周期管理 |
+| `src/platform/json-platform-store.ts` | 平台持久化层 |
+| `src/lib/bridge/bridge-manager.ts` | IM bridge 编排核心 |
+| `src/app/page.tsx` | Next.js 首页 |
 
 ## 安全
 
-- 所有凭据存储在 `~/.claude-to-im/config.env`，权限 `chmod 600`
-- 日志输出中 token 自动脱敏（基于正则匹配）
-- 允许用户/频道/服务器列表限制谁可以与机器人交互
-- 守护进程是本地进程，没有入站网络监听
-- 详见 [SECURITY.md](SECURITY.md) 了解威胁模型和应急响应
+- 凭据保留在本地
+- 日志写入前会做密钥脱敏
+- 工具权限可以保持显式审批
+- 每个任务的队列相互隔离
+- 不同 runtime 后端通过统一工作流层接入
 
-## 开发
+详见：[SECURITY.md](SECURITY.md)
 
-```bash
-npm install        # 安装依赖
-npm run dev        # 开发模式运行
-npm run typecheck  # 类型检查
-npm test           # 运行测试
-npm run build      # 构建打包
-```
+## 相关文档
+
+- [项目理解 / 代码导览](docs/PROJECT-UNDERSTANDING.md)
+- [HTTP API](docs/API.md)
+- [日志位置与查看方式](docs/LOGS.md)
+- [Bridge 架构](src/lib/bridge/ARCHITECTURE.md)
+- [安全说明](SECURITY.md)
 
 ## 许可
 

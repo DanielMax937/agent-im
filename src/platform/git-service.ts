@@ -259,6 +259,27 @@ export interface CommitChangesInput {
 export class GitService {
   constructor(private readonly runner: CommandRunner = new ShellCommandRunner()) {}
 
+  private async clearStaleWorktreePath(repoPath: string, worktreePath: string): Promise<void> {
+    const wt = worktreePath.trim();
+    if (!wt || !fs.existsSync(wt)) return;
+
+    try {
+      await this.runGit(repoPath, ['worktree', 'remove', '--force', wt], [0, 128]);
+    } catch {
+      // Fall through to filesystem cleanup below.
+    }
+
+    if (fs.existsSync(wt)) {
+      fs.rmSync(wt, { recursive: true, force: true });
+    }
+
+    try {
+      await this.runGit(repoPath, ['worktree', 'prune'], [0, 128]);
+    } catch {
+      // Best-effort cleanup only.
+    }
+  }
+
   async createSprintBranch(input: CreateBranchInput): Promise<string> {
     await this.runGit(input.repoPath, ['fetch', 'origin', input.baseBranch]);
     await this.runGit(input.repoPath, ['checkout', input.baseBranch]);
@@ -287,6 +308,7 @@ export class GitService {
     worktreePath: string;
     branchName: string;
   }): Promise<void> {
+    await this.clearStaleWorktreePath(input.repoPath, input.worktreePath);
     await this.runGit(input.repoPath, ['fetch', 'origin']);
     await this.runGit(input.repoPath, [
       'worktree',

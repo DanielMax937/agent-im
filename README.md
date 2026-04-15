@@ -1,24 +1,56 @@
 # agent-im
 
-Agentic Auto Kanban / DevOps platform built on top of the original IM bridge.
+AI engineering workflow platform with Kanban orchestration, automated agent handoffs, and IM-native collaboration.
 
 [中文文档](README_CN.md)
 
----
+## Product positioning
 
-## What it is now
+`agent-im` is not just an IM bridge and not just a Kanban board.
 
-`agent-im` is no longer only a chat bridge for Claude Code / Codex. It now acts as a lightweight **agentic auto kanban system**:
+It is a **task-driven AI delivery platform**:
 
-- **Next.js web server** for APIs and UI entry pages
-- **Pino logging** with secret masking
-- **Sprint / Task / Session / Agent Instance** persistence
-- **Agentic workflow orchestration** for `Todo -> In Progress -> Review -> Testing -> Closed`
-- **Per-task message queues** drive agent execution (local Kanban; optional Telegram fan-out)
-- **Runtime abstraction** for Claude, Codex, and Cursor
-- **IM bridge** for Telegram / Discord / Feishu / QQ
+- **Kanban is the execution layer**: task state changes trigger real work, not just UI updates
+- **Auto mode is workflow automation**: developer, reviewer, and tester agents hand off work across the delivery pipeline
+- **IM is the collaboration surface**: Telegram, Discord, Feishu/Lark, and QQ become operating consoles for approvals, follow-up, and visibility
+- **Git and PR flow stay first-class**: branches, review, testing, merge, and release remain grounded in the existing repo workflow
 
-The result is a hybrid platform:
+One-line description:
+
+> Let AI work like an engineering team member: pick up tasks from the board, execute in the repository, and collaborate through IM.
+
+## What it does
+
+The current product combines three subsystems into one platform:
+
+1. **Kanban workflow engine**
+   Moves tasks through `Todo -> In Progress -> Review -> Testing -> Closed`, with additional gates such as `pre_testing`, `regression_testing`, `pending_uat`, `pending_release`, and `blocked`.
+
+2. **Agentic auto execution**
+   Starts the right runtime and role for each task stage:
+   - developer
+   - reviewer
+   - tester
+
+3. **IM bridge and approvals**
+   Connects Telegram, Discord, Feishu/Lark, and QQ so humans can assign work, approve tool usage, inspect progress, and intervene when needed.
+
+## Core value
+
+Traditional task tools only track work.
+
+`agent-im` is built to **push work forward**.
+
+Once a task is created and assigned, the platform can:
+
+- create sprint and task branches
+- start a developer agent on the task
+- submit work into review
+- start reviewer and tester lanes automatically
+- push failed testing feedback back into the developer queue
+- stop all related instances after the task is closed
+
+## Architecture
 
 ```text
 Web UI / IM channels
@@ -27,237 +59,135 @@ Web UI / IM channels
 Next.js platform server
   - workflow APIs
   - approval APIs
-  - sprint/task queries
+  - project / sprint / task queries
         |
         v
 Platform services
   - WorkflowService
   - InstanceManager
   - GitService / SCM client
+  - platform persistence
         |
         v
-Claude / Codex / Cursor runtimes
+Claude / Codex / Cursor / Copilot runtimes
 ```
 
-## Core concepts
+Main platform surfaces:
 
-### Project
+- **Web UI**
+  - `/admin`: bridge and runtime config
+  - `/projects`: project management
+  - `/board`: Kanban board
+  - `/board/monitor`: lane / turn monitoring
+- **HTTP APIs**
+  - project, sprint, task, instance, approval, coverage, and bridge APIs
+- **Standalone bridge daemon**
+  - runs IM adapters and persistent chat sessions
 
-Defines the Git repository, branch rules, and available agent profiles.
+## Product capabilities
 
-Example fields:
+### 1. Kanban as execution
 
-- `remoteUrl`
-- `localPath`
-- `baseBranch`
-- `sprintBranchPrefix`
-- `taskBranchPrefix`
-- `scmProvider`
+Projects define:
 
-### Sprint
+- repository location
+- branch strategy
+- SCM provider
+- lane-to-runner mapping
+- optional deploy / coverage / UAT requirements
 
-Represents an iteration branch, usually:
-
-- `master -> feature/<sprint-name>`
-
-### Task Session
-
-Maps one Kanban issue id to one persistent task context:
+Sprints and tasks become durable execution records with:
 
 - workflow state
-- runtime
-- branch name
+- branch / worktree context
 - conversation history
 - approval queue
-- task queue
+- per-task message queue
+- active agent instances
 
-### Agent Instance
+### 2. Automated multi-agent workflow
 
-Represents one runtime + role bound to one task:
+The platform orchestrates role-specific execution:
 
-- `runtime`: `claude` / `codex` / `cursor`
-- `role`: `developer` / `reviewer` / `tester`
-- `taskId`
+- **Developer lane** starts from assignment and works on the task branch
+- **Reviewer lane** takes over after review submission
+- **Tester lane** validates the task branch and later the merged integration branch
+- **Compensation / rework loop** routes failures back to development
+- **Escalation lane** can hand repeated review pushback to a senior runner profile
 
-## Agentic auto kanban flow
+### 3. IM-native operations
 
-The platform implements an automated kanban pipeline:
-
-1. **Sprint start**
-   - API creates `feature/<sprint-name>` from `master`
-
-2. **Task assignment**
-   - API creates `dev/<task-id>` from the sprint branch
-   - a developer agent instance starts for the task
-
-3. **Review**
-   - after task submission, the platform commits, pushes, and creates a PR / MR
-   - a reviewer agent starts automatically
-
-4. **Testing**
-   - a tester agent runs after review
-
-5. **Compensation**
-   - if tests fail, logs are pushed back into the original developer queue
-   - workflow returns to `in_progress`
-
-6. **Close**
-   - all related instances are stopped after the task closes
-
-## Latest server architecture
-
-### Next.js app router
-
-The web surface now runs on **Next.js**:
-
-- homepage: `/`
-- health: `/health`
-- API catch-all: `/api/[[...slug]]`
-
-Important files:
-
-| File | Role |
-|---|---|
-| `src/app/page.tsx` | Landing page for the platform |
-| `src/app/health/route.ts` | Health endpoint |
-| `src/app/api/[[...slug]]/route.ts` | Next.js API entrypoint |
-| `src/platform/container.ts` | Lazy singleton bootstrap for stores, runtime, and workflow services |
-| `src/platform/app.ts` | Native `Request -> Response` platform router shared by Next.js and tests |
-
-### Pino logging
-
-The logger now uses **Pino** and writes structured logs to:
-
-```text
-~/.claude-to-im/logs/bridge.log
-```
-
-Properties:
-
-- secret masking for tokens / bearer headers
-- `console.log / warn / error` forwarding into Pino
-- shared logger for daemon and Next.js server
-
-For **where files live**, **`CTI_HOME`**, **`bridge.log` vs `bridge-daemon.log`**, shell **`tail`**, **`grep` / `jq`**, and the **`/api/bridge/logs`** endpoint, see **[docs/LOGS.md](docs/LOGS.md)**.
-
-## Platform APIs
-
-### Query APIs
-
-- `GET /health`
-- `GET /api/structure`
-- `GET /api/projects`
-- `GET /api/projects/:projectId`
-- `GET /api/sprints`
-- `GET /api/sprints/:sprintId`
-- `GET /api/tasks`
-- `GET /api/tasks/:taskSessionId`
-- `GET /api/instances`
-- `GET /api/instances/:instanceId`
-- `GET /api/approvals`
-- `GET /api/approvals/:approvalId`
-- `GET /api/bridge/status`
-
-### Mutation APIs
-
-- `POST /api/projects`
-- `POST /api/workflows/sprints/start`
-- `POST /api/workflows/tasks/assign`
-- `POST /api/workflows/tasks/:taskSessionId/submit-review`
-- `POST /api/workflows/tasks/:taskSessionId/start-testing`
-- `POST /api/workflows/tasks/:taskSessionId/testing/fail`
-- `POST /api/workflows/tasks/:taskSessionId/close`
-- `POST /api/approvals/:approvalId`
-- `POST /api/instances/reconcile`
-- `POST /api/instances/:instanceId/start`
-- `POST /api/instances/:instanceId/stop`
-- `POST /api/bridge/:action`
-
-## Sprint walkthrough example
-
-Create a project:
-
-```bash
-curl -s -X POST http://127.0.0.1:3001/api/projects \
-  -H 'Content-Type: application/json' \
-  --data '{
-    "id":"demo-project",
-    "name":"Demo Project",
-    "repository":{
-      "remoteUrl":"file:///tmp/demo/origin.git",
-      "localPath":"/tmp/demo/repo",
-      "baseBranch":"master",
-      "sprintBranchPrefix":"feature/",
-      "taskBranchPrefix":"dev/",
-      "scmProvider":"github",
-      "scmProject":"demo/agent-im",
-      "scmTokenEnvVar":"GITHUB_TOKEN"
-    },
-    "agents":[],
-    "createdAt":"2026-03-16T00:00:00.000Z",
-    "updatedAt":"2026-03-16T00:00:00.000Z"
-  }'
-```
-
-Start a sprint:
-
-```bash
-curl -s -X POST http://127.0.0.1:3001/api/workflows/sprints/start \
-  -H 'Content-Type: application/json' \
-  --data '{"projectId":"demo-project","sprintName":"Sprint Alpha"}'
-```
-
-Expected result:
-
-- sprint record is persisted
-- Git creates / checks out `feature/sprint-alpha`
-
-## Local Kanban execution
-
-Agents read **workflow events and the per-task queue** (assign, review handoff, tester feedback). Optional **Telegram** (`CTI_KANBAN_TELEGRAM_*`) mirrors conversation lines and approval notices; there is no external issue tracker integration.
-
-## IM bridge
-
-Use the bridge when you want direct chat-based access to the runtime:
+The bridge layer supports:
 
 - Telegram
 - Discord
 - Feishu / Lark
 - QQ
-- Agent loop / Redis-based autonomous channel
+- Redis-based autonomous / hybrid channels
 
-The bridge manager, channel adapters, permission flow, and session persistence remain part of the codebase.
+Humans can use IM to:
 
-### Hybrid auto mode / Slave Execution Report (optional)
+- talk directly to a runtime
+- receive streaming output
+- approve or deny tool usage
+- inspect workflow progress
+- receive review / test / failure updates
 
-Telegram + Redis hybrid mode stores a rolling **session summary** and renders `## Slave Execution Report` for the master model. **Display-only** truncation of stacked `Master evaluation:` lines in Session context uses **`CTI_SLAVE_REPORT_MASTER_EVAL_KEEP_LAST`**: the code default is **1** round (omit the variable to use it). Set **`0`** to disable truncation (show all). Optional **`CTI_SLAVE_REPORT_GOAL`** pins the canonical goal line. See `config.env.example`. Older pasted Session context may still say “default **2** rounds” from historical Master evaluations — that is **stacked history**, not the current default.
+### 4. Runtime abstraction
 
-## Data layout
+The platform can run different providers behind the same workflow model:
 
-```text
-~/.claude-to-im/
-├── config.env
-├── config.slave.env
-├── data/
-│   ├── sessions.json
-│   ├── bindings.json
-│   ├── permissions.json
-│   ├── platform/
-│   │   ├── projects.json
-│   │   ├── sprints.json
-│   │   ├── task_sessions.json
-│   │   ├── agent_instances.json
-│   │   ├── queues.json
-│   │   └── approvals.json
-│   └── messages/
-├── logs/
-│   └── bridge.log
-└── runtime/
-    ├── bridge.pid
-    └── status.json
-```
+- Claude
+- Codex
+- Cursor
+- Copilot
 
-## Development
+This makes runner selection a project / lane concern instead of a product fork.
+
+## Typical workflow
+
+1. Create a project pointing at a local Git repository.
+2. Start a sprint from the base branch.
+3. Create or assign a task.
+4. The platform creates a task branch and starts the developer lane.
+5. Submission moves the task into review and opens the review flow.
+6. Testing and regression testing run in sequence.
+7. Failures loop back into development; successful work moves toward release and close.
+
+## API overview
+
+Representative endpoints:
+
+- `GET /health`
+- `GET /api/projects`
+- `GET /api/sprints`
+- `GET /api/tasks`
+- `GET /api/instances`
+- `GET /api/approvals`
+- `GET /api/bridge/status`
+- `POST /api/projects`
+- `POST /api/workflows/sprints/start`
+- `POST /api/workflows/tasks/create`
+- `POST /api/workflows/tasks/assign`
+- `POST /api/workflows/tasks/:taskSessionId/submit-review`
+- `POST /api/workflows/tasks/:taskSessionId/start-testing`
+- `POST /api/workflows/tasks/:taskSessionId/testing/fail`
+- `POST /api/workflows/tasks/:taskSessionId/close`
+- `POST /api/bridge/start`
+- `POST /api/bridge/stop`
+
+Detailed API documentation: [docs/API.md](docs/API.md)
+
+## Quick start
+
+### Requirements
+
+- Node.js `>=22.5.0`
+- a local Git repository you want the platform to operate on
+- at least one runtime installed and authenticated when needed:
+  - Claude CLI / Claude Agent SDK flow
+  - Codex CLI / SDK
+  - Cursor or Copilot runner setups if used
 
 ### Install
 
@@ -265,13 +195,18 @@ Telegram + Redis hybrid mode stores a rolling **session summary** and renders `#
 npm install
 ```
 
-### Run Next.js web server
+### Run the web platform
 
 ```bash
 npm run dev
 ```
 
-### Run standalone bridge daemon
+Default local surface:
+
+- web UI: `http://127.0.0.1:3000`
+- health: `http://127.0.0.1:3000/health`
+
+### Run the standalone bridge daemon
 
 ```bash
 npm run dev:bridge
@@ -290,31 +225,56 @@ npm test
 npm run typecheck
 ```
 
+## Data and persistence
+
+Bridge data lives under `~/.claude-to-im/...` and stores:
+
+- IM sessions
+- bindings
+- permissions
+- messages
+- logs
+- runtime status
+
+Platform data is stored separately and persists:
+
+- projects
+- sprints
+- task sessions
+- agent instances
+- task queues
+- approvals
+- monitor rows
+
 ## Key files
 
 | File | Role |
 |---|---|
 | `src/main.ts` | Standalone bridge daemon entrypoint |
-| `src/platform/container.ts` | Shared platform bootstrap |
-| `src/platform/workflow-service.ts` | Sprint/task state machine |
+| `src/platform/app.ts` | Shared HTTP router for the platform |
+| `src/platform/container.ts` | Bootstrap for stores, runtime, and workflow services |
+| `src/platform/workflow-service.ts` | Kanban workflow state machine |
 | `src/platform/instance-manager.ts` | Runtime instance lifecycle |
 | `src/platform/json-platform-store.ts` | Platform persistence |
-| `src/logger.ts` | Pino logger with secret masking |
-| `src/app/page.tsx` | Next.js platform landing page |
+| `src/lib/bridge/bridge-manager.ts` | IM bridge orchestration |
+| `src/app/page.tsx` | Next.js landing page |
 
 ## Security
 
-- credentials stay under `~/.claude-to-im/config.env`
-- logs are masked before writing
-- approvals remain explicit
+- credentials remain local
+- logs mask secrets before writing
+- approvals can stay explicit
 - task queues are isolated per task
-- runtime abstraction keeps Claude / Codex / Cursor pluggable
+- runtime backends remain pluggable behind the same workflow layer
+
+More: [SECURITY.md](SECURITY.md)
 
 ## Related docs
 
-- [API / host reference](references/api.md)
-- [Bridge architecture notes](src/lib/bridge/ARCHITECTURE.md)
-- [Multi-instance guide](docs/agent-multi-instance.md)
+- [Product / codebase understanding](docs/PROJECT-UNDERSTANDING.md)
+- [HTTP API](docs/API.md)
+- [Log locations and inspection](docs/LOGS.md)
+- [Bridge architecture](src/lib/bridge/ARCHITECTURE.md)
 - [Security](SECURITY.md)
 
 ## License

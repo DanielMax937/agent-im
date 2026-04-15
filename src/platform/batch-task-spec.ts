@@ -187,6 +187,40 @@ export function normalizeBatchTaskPlan(raw: unknown): BatchTaskPlanItem[] {
   return out;
 }
 
+function normalizeBatchTaskPlanLoose(raw: unknown): BatchTaskPlanItem[] {
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) {
+    throw new Error('Expected JSON object with a "tasks" array');
+  }
+  const tasks = (raw as Record<string, unknown>).tasks;
+  if (!Array.isArray(tasks) || tasks.length === 0) {
+    throw new Error('tasks must be a non-empty array');
+  }
+  return tasks.map((row, i) => {
+    if (typeof row !== 'object' || row === null) {
+      throw new Error(`tasks[${i}] must be an object`);
+    }
+    const o = row as Record<string, unknown>;
+    const title = typeof o.title === 'string' ? o.title.trim() : '';
+    if (!title) {
+      throw new Error(`tasks[${i}].title is required`);
+    }
+    const depsRaw = o.dependsOnIndices;
+    if (depsRaw === undefined) {
+      return { title, dependsOnIndices: [] };
+    }
+    if (!Array.isArray(depsRaw)) {
+      throw new Error(`tasks[${i}].dependsOnIndices must be an array of numbers`);
+    }
+    const dependsOnIndices = depsRaw.map((x, j) => {
+      if (typeof x !== 'number' || !Number.isInteger(x)) {
+        throw new Error(`tasks[${i}].dependsOnIndices[${j}] must be an integer`);
+      }
+      return x;
+    });
+    return { title, dependsOnIndices };
+  });
+}
+
 function batchSpecTimeoutMs(): number {
   const raw = process.env.CTI_KANBAN_BATCH_SPEC_TIMEOUT_MS;
   if (raw === undefined || raw === '') return 180_000;
@@ -196,7 +230,11 @@ function batchSpecTimeoutMs(): number {
 }
 
 const BATCH_SPEC_SYSTEM = [
-  'You are a senior developer (高级开发 / Codex lane) planning Kanban work items.',
+  'You are a product manager planning Kanban work items for implementation.',
+  'Focus only on concrete user-facing functionality, pages, flows, and feature slices.',
+  'Do not break work down by low-level technical architecture, infrastructure, refactors, abstractions, schemas, edge-case handling, or acceptance criteria.',
+  'Those implementation details, boundary cases, and verification rules belong to the developer/reviewer/tester lanes later.',
+  'Each task should describe a visible product capability or page-level deliverable that a dev lane can implement.',
   'Hard rule: your entire message must be ONE JSON object. No other characters before or after.',
   'Do NOT use Markdown: no ## headings, no **bold**, no bullet lines, no numbered lists outside JSON, no ``` fences.',
   'Required shape: {"tasks":[{"title":"<string>","dependsOnIndices":[<ints>]}, ...]}',
@@ -210,12 +248,29 @@ const BATCH_SPEC_SYSTEM = [
 
 /** Second pass when the model returns prose/Markdown instead of JSON. */
 const BATCH_SPEC_REPAIR_SYSTEM = [
-  'You convert planning text into exactly one JSON object for a Kanban batch import.',
+  'You convert product planning text into exactly one JSON object for a Kanban batch import.',
   'Reply with ONLY valid JSON. First character must be {. Last character must be }.',
   'No Markdown, no code fences, no explanations, no labels before or after the JSON.',
   'Shape: {"tasks":[{"title":"string","dependsOnIndices":number[]}]}',
+  'Keep tasks focused on pages, user flows, and visible features. Do not add technical implementation subtasks, edge-case subtasks, or acceptance/QA subtasks unless they are themselves user-facing features.',
   'dependsOnIndices: task index 0 uses []. Later tasks only reference earlier indices (0 .. i-1).',
   'Preserve every real dependency from the source: if item j must wait on item i (i<j), include i in tasks[j].dependsOnIndices.',
+].join('\n');
+
+/** Third pass: validate / repair dependency graph after a syntactically valid plan already exists. */
+const BATCH_SPEC_DEPENDENCY_REVIEW_SYSTEM = [
+  'You review and repair a Kanban task plan JSON object.',
+  'Reply with ONLY one valid JSON object. First character must be {. Last character must be }.',
+  'Shape: {"tasks":[{"title":"string","dependsOnIndices":number[]}]}',
+  'Keep task titles unchanged unless absolutely required to clarify an existing task.',
+  'Primary goal: repair dependency correctness.',
+  'Rules:',
+  '- dependsOnIndices may contain only unique integers pointing to earlier tasks.',
+  '- Remove self-dependencies, forward references, invalid indices, and duplicates.',
+  '- Add any missing earlier-task dependency that is clearly required by the task titles or requirement text.',
+  '- Keep independent tasks with [].',
+  '- Do not add or remove tasks unless the input is irreparably malformed; prefer minimal edits.',
+  '- Preserve topological order: every dependency must point backward.',
 ].join('\n');
 
 /** When not `0`, also mirror batch-spec dumps to stdout (Next dev terminal). Bridge log always receives structured lines when this runs. */
@@ -296,6 +351,49 @@ function normalizeFromAssistantTextOrThrow(text: string): BatchTaskPlanItem[] {
   return normalizeBatchTaskPlan(json);
 }
 
+function normalizeLooseFromAssistantTextOrThrow(text: string): BatchTaskPlanItem[] {
+  const json = extractJsonObjectFromAssistantText(text);
+  return normalizeBatchTaskPlanLoose(json);
+}
+
+async function repairBatchTaskPlanDependencies(params: {
+  provider: LLMProvider;
+  workingDirectory: string;
+  rawText: string;
+  tasks: BatchTaskPlanItem[];
+}): Promise<BatchTaskPlanItem[]> {
+  const reviewUserPrompt = [
+    'Review this task plan for dependency correctness and repair it if needed.',
+    'Validate that every dependsOnIndices entry points only to earlier tasks and that obvious missing blockers are included.',
+    'Return the repaired JSON object only.',
+    '',
+    'Original requirement/spec:',
+    '---',
+    params.rawText.trim().slice(0, 20_000),
+    '---',
+    '',
+    'Candidate task plan JSON:',
+    JSON.stringify({ tasks: params.tasks }),
+  ].join('\n');
+
+  const pass = await runBatchSpecLlmPass({
+    provider: params.provider,
+    workingDirectory: params.workingDirectory,
+    systemPrompt: BATCH_SPEC_DEPENDENCY_REVIEW_SYSTEM,
+    userPrompt: reviewUserPrompt,
+    sessionId: `batch-spec-dependency-review-${Date.now()}`,
+    phase: 'batch-spec preview pass 3 (dependency review)',
+  });
+
+  try {
+    return normalizeFromAssistantTextOrThrow(pass.text);
+  } catch (e) {
+    const preview = pass.text.length > 500 ? `${pass.text.slice(0, 500)}…` : pass.text;
+    const base = e instanceof Error ? e.message : String(e);
+    throw new Error(`${base} — dependency review output preview: ${preview}`);
+  }
+}
+
 /**
  * LLM call(s): pasted spec → validated task plan (高级开发 / codex runner).
  * If the first reply is prose/Markdown, a second pass asks the model to emit JSON only.
@@ -334,9 +432,25 @@ export async function runBatchTaskSpecLlm(params: {
   });
 
   try {
-    return normalizeFromAssistantTextOrThrow(pass1.text);
+    const plan = normalizeFromAssistantTextOrThrow(pass1.text);
+    return await repairBatchTaskPlanDependencies({
+      provider: params.provider,
+      workingDirectory: params.workingDirectory,
+      rawText: raw,
+      tasks: plan,
+    });
   } catch {
-    /* fall through to repair pass */
+    try {
+      const loosePlan = normalizeLooseFromAssistantTextOrThrow(pass1.text);
+      return await repairBatchTaskPlanDependencies({
+        provider: params.provider,
+        workingDirectory: params.workingDirectory,
+        rawText: raw,
+        tasks: loosePlan,
+      });
+    } catch {
+      /* fall through to repair pass */
+    }
   }
 
   const repairUserPrompt = [
@@ -361,8 +475,25 @@ export async function runBatchTaskSpecLlm(params: {
   });
 
   try {
-    return normalizeFromAssistantTextOrThrow(pass2.text);
+    const plan = normalizeFromAssistantTextOrThrow(pass2.text);
+    return await repairBatchTaskPlanDependencies({
+      provider: params.provider,
+      workingDirectory: params.workingDirectory,
+      rawText: raw,
+      tasks: plan,
+    });
   } catch (e) {
+    try {
+      const loosePlan = normalizeLooseFromAssistantTextOrThrow(pass2.text);
+      return await repairBatchTaskPlanDependencies({
+        provider: params.provider,
+        workingDirectory: params.workingDirectory,
+        rawText: raw,
+        tasks: loosePlan,
+      });
+    } catch {
+      /* fall through to final error */
+    }
     const preview = pass2.text.length > 500 ? `${pass2.text.slice(0, 500)}…` : pass2.text;
     const base = e instanceof Error ? e.message : String(e);
     throw new Error(`${base} — model output preview: ${preview}`);

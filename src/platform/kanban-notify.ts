@@ -140,29 +140,36 @@ export async function notifyKanbanTelegram(message: string): Promise<void> {
   if (!token || !chatId) return;
 
   return enqueueKanbanTelegramSend(async () => {
-    const url = `https://api.telegram.org/bot${token}/sendMessage`;
-    const body: Record<string, unknown> = {
-      chat_id: chatId,
-      text: normalizeTelegramOutboundText(message).slice(0, 4000),
-      disable_web_page_preview: true,
-    };
-    const thread = process.env.CTI_KANBAN_TELEGRAM_MESSAGE_THREAD_ID?.trim();
-    if (thread && /^\d+$/.test(thread)) {
-      body.message_thread_id = Number(thread);
-    }
+    try {
+      const url = `https://api.telegram.org/bot${token}/sendMessage`;
+      const body: Record<string, unknown> = {
+        chat_id: chatId,
+        text: normalizeTelegramOutboundText(message).slice(0, 4000),
+        disable_web_page_preview: true,
+      };
+      const thread = process.env.CTI_KANBAN_TELEGRAM_MESSAGE_THREAD_ID?.trim();
+      if (thread && /^\d+$/.test(thread)) {
+        body.message_thread_id = Number(thread);
+      }
 
-    const dispatcher = kanbanTelegramDispatcher();
-    const res = await fetch(url, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify(body),
-      ...(dispatcher ? { dispatcher } : {}),
-    });
-    if (!res.ok) {
-      const t = await res.text();
+      const dispatcher = kanbanTelegramDispatcher();
+      const res = await fetch(url, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(body),
+        ...(dispatcher ? { dispatcher } : {}),
+      });
+      if (!res.ok) {
+        const t = await res.text();
+        getKanbanLogger().warn(
+          { httpStatus: res.status, bodyPreview: t.slice(0, 800) },
+          'Kanban Telegram sendMessage failed',
+        );
+      }
+    } catch (error) {
       getKanbanLogger().warn(
-        { httpStatus: res.status, bodyPreview: t.slice(0, 800) },
-        'Kanban Telegram sendMessage failed',
+        { err: error, messagePreview: message.slice(0, 240) },
+        'Kanban Telegram sendMessage threw; continuing without blocking workflow',
       );
     }
   });
@@ -232,19 +239,26 @@ export async function notifyKanbanTelegramToolApproval(params: {
   }
 
   return enqueueKanbanTelegramSend(async () => {
-    const dispatcher = kanbanTelegramDispatcher();
-    const url = `https://api.telegram.org/bot${token}/sendMessage`;
-    const res = await fetch(url, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify(payload),
-      ...(dispatcher ? { dispatcher } : {}),
-    });
-    if (!res.ok) {
-      const t = await res.text();
+    try {
+      const dispatcher = kanbanTelegramDispatcher();
+      const url = `https://api.telegram.org/bot${token}/sendMessage`;
+      const res = await fetch(url, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(payload),
+        ...(dispatcher ? { dispatcher } : {}),
+      });
+      if (!res.ok) {
+        const t = await res.text();
+        getKanbanLogger().warn(
+          { httpStatus: res.status, bodyPreview: t.slice(0, 800) },
+          'Kanban Telegram tool approval sendMessage failed',
+        );
+      }
+    } catch (error) {
       getKanbanLogger().warn(
-        { httpStatus: res.status, bodyPreview: t.slice(0, 800) },
-        'Kanban Telegram tool approval sendMessage failed',
+        { err: error, issueId, permissionRequestId },
+        'Kanban Telegram tool approval sendMessage threw; continuing without blocking workflow',
       );
     }
   });

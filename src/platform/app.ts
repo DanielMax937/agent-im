@@ -38,6 +38,7 @@ import type {
 import { defaultSkillLinesForLane } from './kanban-agents';
 import { listSkillCatalogEntries } from './skill-catalog';
 import { parseBoardBrainstormChatInput } from './board-brainstorm';
+import { ensureVercelGitConnection, ensureVercelProjectLinked } from './vercel-cli';
 import {
   answerKanbanTelegramCallbackQuery,
   parseKanbanPermCallbackData,
@@ -178,6 +179,8 @@ export interface PlatformStoreApi {
 
 export interface WorkflowServiceApi {
   startSprint(input: unknown): Promise<Sprint>;
+  deploySprint(sprintId: string): Promise<unknown>;
+  bootstrapProjectFromRequirement(input: unknown): Promise<unknown>;
   createTask(input: unknown): Promise<TaskSession>;
   assignTask(input: unknown): Promise<TaskSession>;
   submitTaskForReview(input: {
@@ -207,6 +210,7 @@ export interface WorkflowServiceApi {
   ): Promise<TaskSession>;
   syncReviewCommentToPrAndTask(taskSessionId: string, body: string): Promise<void>;
   deleteTask(taskSessionId: string): Promise<void>;
+  deleteTasks(filters?: { projectId?: string; sprintId?: string }): Promise<{ deletedTaskCount: number }>;
   resolveApproval(approvalId: string, input: unknown): boolean;
   getKanbanStatus(): unknown;
   ensureAgentInstance(
@@ -759,7 +763,16 @@ export function createPlatformApp(options: CreatePlatformAppOptions): PlatformAp
       }
 
       if (request.method === 'POST' && pathname === '/api/projects') {
-        return jsonResponse(options.store.upsertProject(await readRequestBody<Project>(request)), 201);
+        const incoming = await readRequestBody<Project>(request);
+        const deployment = incoming.deployment ? await ensureVercelProjectLinked(incoming) : undefined;
+        const project = {
+          ...incoming,
+          ...(deployment ? { deployment } : {}),
+        };
+        if (incoming.deployment && project.deployment?.enabled !== false) {
+          await ensureVercelGitConnection(project);
+        }
+        return jsonResponse(options.store.upsertProject(project), 201);
       }
 
       if (request.method === 'DELETE' && projectParams) {
@@ -776,12 +789,37 @@ export function createPlatformApp(options: CreatePlatformAppOptions): PlatformAp
           201,
         );
       }
+      const sprintDeployParams = matchPath('/api/workflows/sprints/:sprintId/deploy', pathname);
+      if (request.method === 'POST' && sprintDeployParams) {
+        return jsonResponse(await options.workflowService.deploySprint(sprintDeployParams.sprintId), 200);
+      }
+
+      if (request.method === 'POST' && pathname === '/api/workflows/projects/bootstrap') {
+        try {
+          return jsonResponse(
+            await options.workflowService.bootstrapProjectFromRequirement(await readRequestBody<unknown>(request)),
+            201,
+          );
+        } catch (e) {
+          return jsonResponse({ error: e instanceof Error ? e.message : String(e) }, 400);
+        }
+      }
 
       if (request.method === 'POST' && pathname === '/api/workflows/tasks/create') {
         return jsonResponse(
           await options.workflowService.createTask(await readRequestBody<unknown>(request)),
           201,
         );
+      }
+
+      if (request.method === 'DELETE' && pathname === '/api/workflows/tasks') {
+        try {
+          const projectId = searchParams.get('projectId')?.trim() || undefined;
+          const sprintId = searchParams.get('sprintId')?.trim() || undefined;
+          return jsonResponse(await options.workflowService.deleteTasks({ projectId, sprintId }));
+        } catch (e) {
+          return jsonResponse({ error: e instanceof Error ? e.message : String(e) }, 400);
+        }
       }
 
       if (request.method === 'POST' && pathname === '/api/workflows/tasks/batch-spec/preview') {

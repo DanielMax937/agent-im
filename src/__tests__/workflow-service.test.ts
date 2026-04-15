@@ -21,6 +21,9 @@ import {
 describe('WorkflowService', () => {
   beforeEach(() => {
     resetTestPlatformDir();
+    delete process.env.CTI_KANBAN_TELEGRAM_BOT_TOKEN;
+    delete process.env.CTI_KANBAN_TELEGRAM_CHAT_ID;
+    delete process.env.CTI_KANBAN_TELEGRAM_PROXY;
   });
 
   function createHarness() {
@@ -123,6 +126,26 @@ describe('WorkflowService', () => {
     assert.equal(taskSession.branchName, 'dev/issue-101');
     assert.deepEqual(instanceManager.started, [`developer:${taskSession.id}`]);
     assert.deepEqual(gitService.calls, ['createTaskWorktree']);
+  });
+
+  it('does not block developer startup when Telegram notification delivery fails', async () => {
+    process.env.CTI_KANBAN_TELEGRAM_BOT_TOKEN = 'test-token';
+    process.env.CTI_KANBAN_TELEGRAM_CHAT_ID = '123456';
+    process.env.CTI_KANBAN_TELEGRAM_PROXY = 'http://127.0.0.1:9';
+
+    const { workflowService, project, store, instanceManager } = createHarness();
+    const sprint = createSprint(store, project.id);
+
+    const taskSession = await workflowService.assignTask({
+      projectId: project.id,
+      sprintId: sprint.id,
+      issueId: 'ISSUE-NOTIFY-FAIL',
+      title: 'Continue even if Telegram is down',
+      runtime: 'cursor',
+    });
+
+    assert.equal(taskSession.workflowState, 'in_progress');
+    assert.deepEqual(instanceManager.started, [`developer:${taskSession.id}`]);
   });
 
   it('submits a task for review, pushes the branch, and starts a reviewer agent', async () => {
@@ -697,6 +720,30 @@ describe('WorkflowService', () => {
     assert.equal(store.getTaskSession(task.id), null);
     const sp = store.getSprint(sprint.id)!;
     assert.ok(!sp.taskIds.includes(task.id));
+  });
+
+  it('deleteTasks removes every matching task from the in-memory store', async () => {
+    const { workflowService, project, store } = createHarness();
+    const sprintA = createSprint(store, project.id, { id: 'sprint-a' });
+    const sprintB = createSprint(store, project.id, { id: 'sprint-b', name: 'Sprint B' });
+    const taskA = await workflowService.createTask({
+      projectId: project.id,
+      sprintId: sprintA.id,
+      issueId: 'ISSUE-A',
+      title: 'Task A',
+    });
+    await workflowService.createTask({
+      projectId: project.id,
+      sprintId: sprintB.id,
+      issueId: 'ISSUE-B',
+      title: 'Task B',
+    });
+
+    const result = await workflowService.deleteTasks({ projectId: project.id, sprintId: sprintA.id });
+
+    assert.equal(result.deletedTaskCount, 1);
+    assert.equal(store.getTaskSession(taskA.id), null);
+    assert.equal(store.listTaskSessions(project.id).length, 1);
   });
 
   it('resumeKanbanAfterRestart moves regression task to pending_release when last reply has PROCEED_TO_RELEASE or legacy CLOSE', async () => {

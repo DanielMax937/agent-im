@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useState } from 'react';
 
-import type { Project, ProjectAgentProfile, ProjectRepository } from '../../platform/types';
+import type { Project, ProjectAgentProfile, ProjectDeploymentConfig, ProjectRepository } from '../../platform/types';
 import { LOCAL_REPOSITORY_PATH_HINT, looksLikeRemoteRepositoryUrl } from '../../platform/repository-path';
 
 const PROJECT_ID_RE = /^[a-zA-Z0-9_-]+$/;
@@ -13,6 +13,10 @@ type FormState = {
   owner: string;
   issueIdPrefix: string;
   isPrivate: boolean;
+  deploymentEnabled: boolean;
+  deploymentVercelProjectName: string;
+  deploymentVercelScope: string;
+  deploymentNotifyTelegram: boolean;
   remoteUrl: string;
   localPath: string;
   baseBranch: string;
@@ -32,6 +36,10 @@ function emptyForm(): FormState {
     owner: '',
     issueIdPrefix: '',
     isPrivate: false,
+    deploymentEnabled: true,
+    deploymentVercelProjectName: '',
+    deploymentVercelScope: '',
+    deploymentNotifyTelegram: true,
     remoteUrl: '',
     localPath: '',
     baseBranch: 'main',
@@ -47,12 +55,17 @@ function emptyForm(): FormState {
 
 function projectToForm(p: Project): FormState {
   const r = p.repository;
+  const d = p.deployment;
   return {
     id: p.id,
     name: p.name,
     owner: p.owner ?? '',
     issueIdPrefix: p.issueIdPrefix ?? '',
     isPrivate: p.isPrivate ?? false,
+    deploymentEnabled: d?.enabled !== false,
+    deploymentVercelProjectName: d?.vercelProjectName ?? p.id,
+    deploymentVercelScope: d?.vercelScope ?? '',
+    deploymentNotifyTelegram: d?.notifyTelegram !== false,
     remoteUrl: r.remoteUrl,
     localPath: r.localPath,
     baseBranch: r.baseBranch,
@@ -93,6 +106,14 @@ function buildProjectPayload(form: FormState, existing: Project | null): Project
   const agents = parseAgentsJson(form.agentsJson);
   const ownerTrim = form.owner.trim();
   const prefixTrim = form.issueIdPrefix.trim();
+  const deployment: ProjectDeploymentConfig = {
+    enabled: form.deploymentEnabled,
+  };
+  const deploymentVercelProjectName = form.deploymentVercelProjectName.trim();
+  const deploymentVercelScope = form.deploymentVercelScope.trim();
+  if (deploymentVercelProjectName) deployment.vercelProjectName = deploymentVercelProjectName;
+  if (deploymentVercelScope) deployment.vercelScope = deploymentVercelScope;
+  if (!form.deploymentNotifyTelegram) deployment.notifyTelegram = false;
 
   return {
     id: form.id.trim(),
@@ -103,6 +124,7 @@ function buildProjectPayload(form: FormState, existing: Project | null): Project
     ...(existing?.kanbanRoleRunners ? { kanbanRoleRunners: existing.kanbanRoleRunners } : {}),
     ...(existing?.kanbanRoleMembers ? { kanbanRoleMembers: existing.kanbanRoleMembers } : {}),
     repository: repo,
+    deployment,
     agents,
     createdAt: existing?.createdAt ?? iso,
     updatedAt: iso,
@@ -278,6 +300,9 @@ export default function ProjectsPage() {
                       {(p as { isPrivate?: boolean }).isPrivate ? (
                         <span style={{ marginLeft: 6, fontSize: '0.75rem', color: '#94a3b8' }} title="私有仓库 — Self-Hosted Runner CI">🔒</span>
                       ) : null}
+                      {p.deployment?.enabled !== false ? (
+                        <span style={{ marginLeft: 6, fontSize: '0.75rem', color: '#94a3b8' }} title="启用自动部署 workflow 约束">deploy</span>
+                      ) : null}
                     </td>
                     <td>
                       <div className="ui-actions">
@@ -451,6 +476,45 @@ export default function ProjectsPage() {
                 启用后，回归测试阶段不启动 AI agent，改为等待 GitHub Actions self-hosted runner webhook 回调
               </span>
             </span>
+          </label>
+          <label style={{ gridColumn: '1 / -1', display: 'flex', alignItems: 'center', gap: '0.5rem', cursor: 'pointer' }}>
+            <input
+              type="checkbox"
+              checked={form.deploymentEnabled}
+              onChange={(e) => setForm((f) => ({ ...f, deploymentEnabled: e.target.checked }))}
+            />
+            <span>
+              合并后自动部署要求
+              <span className="ui-muted" style={{ fontSize: '0.78rem', marginLeft: '0.5rem' }}>
+                默认开启。开启后，平台会在项目创建和 sprint 启动时配置 Vercel；合并并 push 到当前迭代分支后，由 Vercel 自动构建，平台侧轮询成功结果并发送 Telegram 通知
+              </span>
+            </span>
+          </label>
+          <label>
+            Vercel 项目名
+            <input
+              className="ui-input"
+              value={form.deploymentVercelProjectName}
+              onChange={(e) => setForm((f) => ({ ...f, deploymentVercelProjectName: e.target.value }))}
+              placeholder="默认使用项目 ID"
+            />
+          </label>
+          <label>
+            Vercel Scope（可选）
+            <input
+              className="ui-input"
+              value={form.deploymentVercelScope}
+              onChange={(e) => setForm((f) => ({ ...f, deploymentVercelScope: e.target.value }))}
+              placeholder="team-slug"
+            />
+          </label>
+          <label style={{ gridColumn: '1 / -1', display: 'flex', alignItems: 'center', gap: '0.5rem', cursor: 'pointer' }}>
+            <input
+              type="checkbox"
+              checked={form.deploymentNotifyTelegram}
+              onChange={(e) => setForm((f) => ({ ...f, deploymentNotifyTelegram: e.target.checked }))}
+            />
+            <span>Vercel 部署成功后发送 Telegram 通知</span>
           </label>
           <label style={{ gridColumn: '1 / -1' }}>
             Agent 配置（JSON 数组，可选）

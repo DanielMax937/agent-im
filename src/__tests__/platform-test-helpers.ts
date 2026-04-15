@@ -260,6 +260,12 @@ export function createProject(store: JsonPlatformStore, overrides: Partial<Proje
     },
     // Disable coverage command in tests to avoid running real npm test.
     coverageCommand: overrides.coverageCommand ?? '',
+    deployment:
+      overrides.deployment !== undefined
+        ? overrides.deployment
+        : {
+            enabled: false,
+          },
     agents: overrides.agents ?? DEFAULT_TEST_PROJECT_AGENTS,
     kanbanRoleRunners:
       overrides.kanbanRoleRunners !== undefined ? overrides.kanbanRoleRunners : { ...TEST_KANBAN_LANE_RUNNER_IDS },

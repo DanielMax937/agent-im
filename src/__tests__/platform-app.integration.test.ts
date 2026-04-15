@@ -1,5 +1,8 @@
 import { beforeEach, describe, it } from 'node:test';
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 
 import { CompensationService } from '../platform/compensation-service';
 import { createPlatformApp } from '../platform/app';
@@ -115,6 +118,47 @@ describe('Platform app integration', () => {
     }
   });
 
+  it('DELETE /api/workflows/tasks removes tasks from the same in-process status snapshot', async () => {
+    const { app, store } = createHarness();
+    const project = createProject(store);
+    const sprint = createSprint(store, project.id);
+    createTaskSession(store, project.id, sprint.id, {
+      id: 'task-session-a',
+      taskId: 'ISSUE-1',
+      issueId: 'ISSUE-1',
+      workflowState: 'todo',
+      messageQueueKey: 'task:ISSUE-1:inbox',
+      approvalQueueKey: 'task:ISSUE-1:approvals',
+    });
+    createTaskSession(store, project.id, sprint.id, {
+      id: 'task-session-b',
+      taskId: 'ISSUE-2',
+      issueId: 'ISSUE-2',
+      workflowState: 'in_progress',
+      messageQueueKey: 'task:ISSUE-2:inbox',
+      approvalQueueKey: 'task:ISSUE-2:approvals',
+    });
+
+    const server = await startHttpApp(app);
+    try {
+      const before = await fetchJson(server.baseUrl, '/api/kanban/status');
+      assert.equal((before.body as { tasksByState: { todo: number; in_progress: number } }).tasksByState.todo, 1);
+      assert.equal((before.body as { tasksByState: { todo: number; in_progress: number } }).tasksByState.in_progress, 1);
+
+      const deleted = await fetchJson(server.baseUrl, `/api/workflows/tasks?projectId=${project.id}`, {
+        method: 'DELETE',
+      });
+      assert.equal(deleted.status, 200);
+      assert.equal((deleted.body as { deletedTaskCount: number }).deletedTaskCount, 2);
+
+      const after = await fetchJson(server.baseUrl, '/api/kanban/status');
+      assert.equal((after.body as { tasksByState: { todo: number; in_progress: number } }).tasksByState.todo, 0);
+      assert.equal((after.body as { tasksByState: { todo: number; in_progress: number } }).tasksByState.in_progress, 0);
+    } finally {
+      await server.close();
+    }
+  });
+
   it('rejects duplicate active sprint name on POST /api/sprints', async () => {
     const { app, store } = createHarness();
     const project = createProject(store);
@@ -174,6 +218,75 @@ describe('Platform app integration', () => {
       assert.equal((response.body as { id: string }).id, 'project-2');
     } finally {
       await server.close();
+    }
+  });
+
+  it('bootstraps a project, sprint, tasks, and default lane runners from a requirement', async () => {
+    const { app, store } = createHarness();
+    const repoPath = fs.mkdtempSync(path.join(os.tmpdir(), 'cti-bootstrap-test-'));
+    const server = await startHttpApp(app);
+    try {
+      const response = await fetchJson(server.baseUrl, '/api/workflows/projects/bootstrap', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          requirement: 'Build a jackpot-style web game with lobby, spin flow, and result history.',
+          projectName: 'Jackpot Game',
+          sprintName: 'MVP Sprint',
+          repository: {
+            localPath: repoPath,
+            remoteUrl: 'git@github.com:example/jackpot-game.git',
+            scmProject: 'example/jackpot-game',
+            baseBranch: 'main',
+            sprintBranchPrefix: 'feature/',
+            taskBranchPrefix: 'task/',
+          },
+          deployment: {
+            enabled: false,
+          },
+          scaffoldProject: false,
+          createGitHubRepo: false,
+          taskPlan: [
+            { title: 'Set up jackpot game shell', dependsOnIndices: [] },
+            { title: 'Implement spin and payout logic', dependsOnIndices: [0] },
+          ],
+        }),
+      });
+
+      assert.equal(response.status, 201);
+      const body = response.body as {
+        project: { id: string; kanbanRoleRunners?: Record<string, string> };
+        sprint: { projectId: string; name: string };
+        tasks: Array<{ issueId: string }>;
+        assignedTasks: Array<{ workflowState: string }>;
+        warnings: string[];
+      };
+      assert.equal(body.project.id, 'jackpot-game');
+      assert.equal(body.sprint.projectId, 'jackpot-game');
+      assert.equal(body.sprint.name, 'MVP Sprint');
+      assert.equal(body.tasks.length, 2);
+      assert.equal(body.assignedTasks.length, 2);
+      assert.equal(body.assignedTasks[0]?.workflowState, 'in_progress');
+      assert.equal(body.assignedTasks[1]?.workflowState, 'pending_start');
+      assert.deepEqual(body.warnings, []);
+
+      const project = store.getProject('jackpot-game');
+      assert.ok(project);
+      assert.ok(project?.kanbanRoleRunners?.['agent-dev']);
+      assert.ok(project?.kanbanRoleRunners?.['pre-tester']);
+      assert.ok(project?.kanbanRoleRunners?.['codex-senior']);
+      assert.ok(project?.kanbanRoleRunners?.['claude-review']);
+      assert.ok(project?.kanbanRoleRunners?.['copilot-test']);
+
+      const sprints = store.listSprints('jackpot-game');
+      assert.equal(sprints.length, 1);
+      const tasks = store.listTaskSessions('jackpot-game');
+      assert.equal(tasks.length, 2);
+      assert.equal(tasks[0]?.workflowState, 'in_progress');
+      assert.equal(tasks[1]?.workflowState, 'pending_start');
+    } finally {
+      await server.close();
+      fs.rmSync(repoPath, { recursive: true, force: true });
     }
   });
 

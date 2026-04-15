@@ -77,6 +77,31 @@ export interface ProjectRepository {
 }
 
 /**
+ * Optional per-project auto-deploy contract for Kanban developer lane prompts.
+ *
+ * When `enabled !== false`, the developer lane must preserve or create a GitHub Actions workflow
+ * that deploys with Vercel CLI after merges land on the configured integration branch and notifies
+ * Telegram on success.
+ */
+export interface ProjectDeploymentConfig {
+  /** Defaults to `true` when omitted. Set `false` to disable deploy automation requirements. */
+  enabled?: boolean;
+  /** Vercel project name. Defaults to the Kanban project id when omitted. */
+  vercelProjectName?: string;
+  /** Optional Vercel team / scope slug used by `vercel project add` and `vercel link`. */
+  vercelScope?: string;
+ /** Optional IDs resolved from `.vercel/project.json` after linking. */
+  vercelProjectId?: string;
+  vercelOrgId?: string;
+  /** The sprint / integration branch that Kanban expects to deploy from the local repo via Vercel CLI. */
+  productionBranch?: string;
+  /** Whether successful Vercel production deployments should send Telegram notifications. Defaults to true. */
+  notifyTelegram?: boolean;
+  /** Last successful Vercel production deployment id already notified to Telegram. */
+  lastNotifiedDeploymentId?: string;
+}
+
+/**
  * Per-project unit-test coverage record. Coverage is the total lines percentage (0–100) from
  * coverage/coverage-summary.json. Only updated when the new value is higher than the stored value.
  */
@@ -123,6 +148,8 @@ export interface Project {
    */
   kanbanLaneSkills?: Partial<Record<KanbanAgentKind, string[]>>;
   repository: ProjectRepository;
+  /** Project-level deploy automation contract for GitHub workflow generation. Defaults to enabled when omitted. */
+  deployment?: ProjectDeploymentConfig;
   /**
    * Shell command to run unit tests and produce coverage output.
    * Defaults to `npm test -- --coverage --coverageReporters=json-summary`.

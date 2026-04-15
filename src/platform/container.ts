@@ -102,6 +102,18 @@ async function createPlatformContainer(): Promise<PlatformContainer> {
     logger.info({ ms: queuePollMs }, 'Kanban developer queue poll enabled');
   }
 
+  const vercelPollRaw = process.env.CTI_KANBAN_VERCEL_POLL_MS ?? '30000';
+  const vercelPollMs = parseInt(vercelPollRaw, 10);
+  if (Number.isFinite(vercelPollMs) && vercelPollMs > 0) {
+    const interval = setInterval(() => {
+      void workflowService.pollVercelDeployments().catch((err) => {
+        logger.warn({ err }, 'Kanban Vercel deployment poll failed');
+      });
+    }, vercelPollMs);
+    if (typeof interval.unref === 'function') interval.unref();
+    logger.info({ ms: vercelPollMs }, 'Kanban Vercel deployment poll enabled');
+  }
+
   logger.info('Initialized Next.js platform container');
 
   return {
