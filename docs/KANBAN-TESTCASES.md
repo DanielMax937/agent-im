@@ -41,6 +41,31 @@
 
 ---
 
+## 如何通过 Board 与 Monitor 确认 Task 进度与定位卡住点
+
+说明（快速检查清单）：
+
+- 在 /board（UI）观察卡片所在列与状态（workflowState）：todo → in_progress → pre_testing → testing → review → regression_testing → pending_release → closed。若卡在某列，记下 taskId 与项目。
+- 调用 GET /api/tasks/:taskSessionId 查看详细字段：workflowState、workingDirectory、messageQueueKey、conversationHistory、historyComments。
+- 调用 GET /api/instances 并筛选 taskSessionId：检查每个 instance 的 status（running/stopped）、role、startedAt/stoppedAt、generating 字段。若所有实例均 stopped，则 agent 未在运行。
+- 调用 GET /api/kanban/monitor?taskSessionId=... 或 ?taskId=...：判断是否有 rows。关键字段：sourceAgent、targetAgent、sourceAgentResponse、targetAgentPrompt。常见提示词：
+  - "Regression failed" / "coverage-summary" / "coverage report not produced" → 覆盖率未生成（排查测试脚本或 coverage 输出路径）。
+  - "KANBAN_ACTION:REJECT_REVIEW" / "CI" / "Remote CI" → PR 或 CI 问题（查看 PR 状态与远端 CI）。
+  - 包含覆盖率文件路径（coverage/coverage-summary.json）或错误堆栈 → 定位具体失败点。
+- 若 monitor 有数据但 UI 无更新：检查 bridge/runner 连接（/api/bridge/logs 或 logs/launchd-agent-*.log），并确认服务在运行（GET /health）。
+- 若工作目录存在（workingDirectory），进入该目录查看 run.log、coverage 目录或 .kanban-e2e-*.txt 标记文件以获取本地 runner 输出。
+
+定位判定示例：
+- monitor rows 包含 "coverage-summary.json: MISSING" → 测试未产生覆盖率文件（修改 package.json 测试命令或添加 nyc/jest --coverage）。
+- monitor rows 包含 "CI 等待" 或 "Webhook URL" → 私有仓使用 self-host-runner，需等待外部 CI 回调（查看 /api/tasks/:id historyComments 中的 ci-result 路径）。
+
+以下为诊断命令示例（替换 <id>）：
+
+- curl -sS http://localhost:3300/api/tasks/<id> | jq '.'
+- curl -sS "http://localhost:3300/api/instances" | jq '.[] | select(.taskSessionId=="<id>")'
+- curl -sS "http://localhost:3300/api/kanban/monitor?taskSessionId=<id>" | jq '.rows | length, .rows[0:5]'
+- curl -sS "http://localhost:3300/api/bridge/logs?lines=200" | jq '.text'
+
 ## 0. 前置条件
 
 | # | 用例 | 步骤 | 期望 |
