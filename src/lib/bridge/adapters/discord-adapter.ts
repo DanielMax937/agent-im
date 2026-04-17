@@ -364,6 +364,30 @@ export class DiscordAdapter extends BaseChannelAdapter {
         .addStringOption((o: any) =>
           o.setName('permission_id').setDescription('Permission ID').setRequired(true),
         ),
+      new SlashCommandBuilder()
+        .setName('rednote')
+        .setDescription('Enqueue blog2media Rednote job')
+        .addStringOption((o: any) =>
+          o.setName('url').setDescription('Source URL (optional; omit for auto-pick)').setRequired(false),
+        ),
+      new SlashCommandBuilder()
+        .setName('medium')
+        .setDescription('Enqueue blog2media Medium job')
+        .addStringOption((o: any) =>
+          o.setName('url').setDescription('Article URL (optional; omit for auto-pick)').setRequired(false),
+        ),
+      new SlashCommandBuilder()
+        .setName('article_zh')
+        .setDescription('Run article-writer (中文 饭统戴老板, auto + research)')
+        .addStringOption((o: any) =>
+          o.setName('topic').setDescription('Article topic (required)').setRequired(true),
+        ),
+      new SlashCommandBuilder()
+        .setName('article_en')
+        .setDescription('Run article-writer (English Brian Potter, auto + research)')
+        .addStringOption((o: any) =>
+          o.setName('topic').setDescription('Article topic (required)').setRequired(true),
+        ),
       new SlashCommandBuilder().setName('help').setDescription('Show available commands'),
     ];
     /* eslint-enable @typescript-eslint/no-explicit-any */
@@ -420,6 +444,22 @@ export class DiscordAdapter extends BaseChannelAdapter {
         const action = opts.getString('action', true);
         const permId = opts.getString('permission_id', true);
         return `/perm ${action} ${permId}`;
+      }
+      case 'rednote': {
+        const url = opts.getString('url')?.trim();
+        return url ? `/rednote ${url}` : '/rednote';
+      }
+      case 'medium': {
+        const url = opts.getString('url')?.trim();
+        return url ? `/medium ${url}` : '/medium';
+      }
+      case 'article_zh': {
+        const topic = opts.getString('topic', true);
+        return `/article_zh ${topic}`;
+      }
+      case 'article_en': {
+        const topic = opts.getString('topic', true);
+        return `/article_en ${topic}`;
       }
       case 'start':
       case 'autostop':

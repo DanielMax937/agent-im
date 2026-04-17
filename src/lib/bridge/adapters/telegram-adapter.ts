@@ -1091,6 +1091,10 @@ export class TelegramAdapter extends BaseChannelAdapter {
         { command: 'status', description: 'Show current session status' },
         { command: 'sessions', description: 'List recent sessions' },
         { command: 'stop', description: 'Stop current task' },
+        { command: 'rednote', description: 'blog2media Rednote job (optional URL)' },
+        { command: 'medium', description: 'blog2media Medium job (optional URL)' },
+        { command: 'article_zh', description: 'article-writer zh 饭统戴老板 auto' },
+        { command: 'article_en', description: 'article-writer en Brian Potter auto' },
         { command: 'help', description: 'Show available commands' },
       ],
     });
