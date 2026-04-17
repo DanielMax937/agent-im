@@ -48,6 +48,11 @@ import {
 } from './im-instance-settings';
 import { isHybridAutoModeEnabled, readAutoModeSettings } from './redis-local-transport';
 import { loadConfig, normalizeRunnersForChannelType, resolveAutoRedisBridgeSlug } from '../../config';
+import {
+  postBlog2mediaJob,
+  spawnArticleWriterFromBot,
+  validateOptionalHttpUrlForIntegration,
+} from './im-integration-commands';
 import { startSlaveProcess, stopSlaveProcess } from './slave-process';
 const GLOBAL_KEY = '__bridge_manager__';
 
@@ -1092,6 +1097,10 @@ async function handleCommand(
         '/sessions - List recent sessions',
         '/stop - Stop current session',
         '/perm allow|allow_session|deny &lt;id&gt; - Respond to permission',
+        '/rednote [url] - Enqueue blog2media Rednote job (optional URL)',
+        '/medium [url] - Enqueue blog2media Medium job (optional URL)',
+        '/article_zh &lt;topic&gt; - Run article-writer (zh, 饭统戴老板, auto + research)',
+        '/article_en &lt;topic&gt; - Run article-writer (en, Brian Potter, auto + research)',
         '/help - Show this help',
       ].join('\n');
       break;
@@ -1429,6 +1438,56 @@ async function handleCommand(
       break;
     }
 
+    case '/rednote': {
+      const raw = args.trim();
+      if (raw) {
+        const v = validateOptionalHttpUrlForIntegration(raw);
+        if (!v) {
+          response =
+            'Invalid <code>url</code>. Use a full http(s) URL, or omit the argument for auto-pick.';
+          break;
+        }
+        response = await postBlog2mediaJob({ endpoint: 'rednote', url: v });
+      } else {
+        response = await postBlog2mediaJob({ endpoint: 'rednote' });
+      }
+      break;
+    }
+
+    case '/medium': {
+      const raw = args.trim();
+      if (raw) {
+        const v = validateOptionalHttpUrlForIntegration(raw);
+        if (!v) {
+          response =
+            'Invalid <code>url</code>. Use a full http(s) URL, or omit the argument for auto-pick.';
+          break;
+        }
+        response = await postBlog2mediaJob({ endpoint: 'medium', url: v });
+      } else {
+        response = await postBlog2mediaJob({ endpoint: 'medium' });
+      }
+      break;
+    }
+
+    case '/article_zh': {
+      if (!args.trim()) {
+        response = 'Usage: <code>/article_zh &lt;topic&gt;</code>';
+        break;
+      }
+      response = spawnArticleWriterFromBot({ profile: 'zh', topic: args });
+      break;
+    }
+
+    case '/article_en': {
+      if (!args.trim()) {
+        response = 'Usage: <code>/article_en &lt;topic&gt;</code>';
+        break;
+      }
+      response = spawnArticleWriterFromBot({ profile: 'en', topic: args });
+      break;
+    }
+
     case '/help':
       response = [
         '<b>CodePilot Bridge Commands</b>',
@@ -1444,6 +1503,10 @@ async function handleCommand(
         '/stop - Stop current session',
         '/perm allow|allow_session|deny &lt;id&gt; - Respond to permission request',
         '1/2/3 - Quick permission reply (Feishu/QQ, single pending)',
+        '/rednote [url] - Enqueue blog2media Rednote job (optional URL)',
+        '/medium [url] - Enqueue blog2media Medium job (optional URL)',
+        '/article_zh &lt;topic&gt; - Run article-writer (zh, 饭统戴老板, auto + research)',
+        '/article_en &lt;topic&gt; - Run article-writer (en, Brian Potter, auto + research)',
         '/help - Show this help',
       ].join('\n');
       break;

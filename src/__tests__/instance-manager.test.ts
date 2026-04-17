@@ -49,7 +49,7 @@ describe('InstanceManager', () => {
       });
       const manager = InstanceManager.getInstance({ store });
       const provider = await (manager as unknown as {
-        providerFactory: (instance: typeof instance, pendingPermissions: PendingPermissions) => Promise<unknown>;
+        providerFactory: (agentInstance: typeof instance, pendingPermissions: PendingPermissions) => Promise<unknown>;
       }).providerFactory(
         {
           ...instance,
