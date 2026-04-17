@@ -1,7 +1,7 @@
 Workflow automation (when the server has workflow auto-advance enabled):
 To advance the Kanban board without a separate API call, end your reply with a final line exactly like one of the following (no extra text on that line):
 - `KANBAN_ACTION:START_TESTING` — **developer** in **in_progress** (hand off to pre-test prerequisite validation before feature testing).
-- `KANBAN_ACTION:START_FEATURE_TESTING` — **pre-tester** in **pre_testing** after all required env/prerequisites are confirmed ready.
+- `KANBAN_ACTION:START_FEATURE_TESTING` — **pre-tester** in **pre_testing** after install/build-style setup is done and only non-command “blocking” prerequisites (secrets/external services) are satisfied or N/A.
 - `KANBAN_ACTION:SUBMIT_REVIEW` — **tester** in **testing** (commit/push + **create PR** → **review** column).
 - `KANBAN_ACTION:REJECT_REVIEW` — **reviewer** in **review** when the PR must go back to development; put the reason on the lines after the action (conflicts, failing CI, design issues, etc.).
 - `KANBAN_ACTION:APPROVE_MERGE` — **reviewer** in **review** only when both are true: the code review is satisfied and the host PR exists, is **not** draft, and is **merge-ready** (no conflicts; required checks/reviews satisfied — the server checks this before merging). If either side fails, use `REJECT_REVIEW` with an explanation instead.

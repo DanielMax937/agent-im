@@ -1216,6 +1216,23 @@ describe('WorkflowService', () => {
     assert.ok(!gitService.calls.some((c) => c.startsWith('removeTaskWorktree:')));
   });
 
+  it('refuses auto-merge when the open review PR targets the repository base branch', async () => {
+    const { workflowService, project, store, scmClient } = createHarness();
+    scmClient.mergeStatusResult = { canMerge: true, mergeTargetBranch: 'master' };
+    const sprint = createSprint(store, project.id);
+    const taskSession = createTaskSession(store, project.id, sprint.id, {
+      workflowState: 'review',
+      pullRequestNumber: 42,
+      pullRequestUrl: 'https://example.test/pr/42',
+    });
+    await assert.rejects(
+      () => workflowService.startRegressionTesting(taskSession.id),
+      /Refusing to auto-merge PR #42: host merge target "master"/,
+    );
+    assert.deepEqual(scmClient.calls, ['getPullRequestMergeStatus']);
+    assert.ok(!scmClient.calls.includes('mergePullRequest'));
+  });
+
   it('startRegressionTesting is idempotent when already regression_testing (reviewer raced before HTTP)', async () => {
     const { workflowService, project, store, scmClient } = createHarness();
     const sprint = createSprint(store, project.id);

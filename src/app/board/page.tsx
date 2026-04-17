@@ -848,9 +848,18 @@ export default function BoardPage() {
     setBusy(true);
     setError(null);
     try {
-      for (const task of selected) {
+      const lastIndexByProject = new Map<string, number>();
+      for (let i = selected.length - 1; i >= 0; i -= 1) {
+        const pid = selected[i].projectId;
+        if (!lastIndexByProject.has(pid)) lastIndexByProject.set(pid, i);
+      }
+      for (let i = 0; i < selected.length; i += 1) {
+        const task = selected[i];
+        const skipVercelRestoreAfterClose = lastIndexByProject.get(task.projectId) !== i;
         const res = await fetch(`/api/workflows/tasks/${encodeURIComponent(task.id)}/close`, {
           method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(skipVercelRestoreAfterClose ? { skipVercelRestoreAfterClose: true } : {}),
         });
         if (!res.ok) {
           let errMsg: string;

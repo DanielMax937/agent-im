@@ -34,6 +34,7 @@ import type {
   KanbanAgentKind,
   KanbanRoleMember,
   KanbanAgentTurnRecord,
+  CloseTaskOptions,
 } from './types';
 import { defaultSkillLinesForLane } from './kanban-agents';
 import { listSkillCatalogEntries } from './skill-catalog';
@@ -157,6 +158,7 @@ export interface PlatformStoreApi {
   listSprints(projectId?: string): Sprint[];
   getSprint(sprintId: string): Sprint | null;
   upsertSprint(sprint: Sprint): Sprint;
+  removeSprint(sprintId: string): { ok: true } | { ok: false; error: string };
   listTaskSessions(projectId?: string): TaskSession[];
   getTaskSession(taskSessionId: string): TaskSession | null;
   listAgentInstances(taskSessionId?: string): AgentInstanceRecord[];
@@ -196,7 +198,7 @@ export interface WorkflowServiceApi {
   refreshRegressionIfMasterAdvanced(taskSessionId: string): Promise<TaskSession>;
   rejectReview(taskSessionId: string, comment: string): Promise<TaskSession>;
   handleTestFailure(input: { taskSessionId: string; summary: string; log: string }): Promise<TaskSession>;
-  closeTask(taskSessionId: string): Promise<TaskSession>;
+  closeTask(taskSessionId: string, deferStopInstanceId?: string, options?: CloseTaskOptions): Promise<TaskSession>;
   initiateCloseAsync(taskSessionId: string): Promise<TaskSession>;
   blockTask(taskSessionId: string, reason: string): Promise<TaskSession>;
   unblockTask(taskSessionId: string): Promise<TaskSession>;
@@ -705,6 +707,14 @@ export function createPlatformApp(options: CreatePlatformAppOptions): PlatformAp
           : notFoundResponse('Sprint', sprintParams.sprintId);
       }
 
+      if (request.method === 'DELETE' && sprintParams) {
+        const result = options.store.removeSprint(sprintParams.sprintId);
+        if (!result.ok) {
+          return jsonResponse({ error: result.error }, 400);
+        }
+        return jsonResponse({ ok: true, id: sprintParams.sprintId });
+      }
+
       if (request.method === 'GET' && pathname === '/api/tasks') {
         const filterProjectId = searchParams.get('projectId')?.trim();
         const tasks = options.store.listTaskSessions(filterProjectId || undefined);
@@ -1034,8 +1044,11 @@ export function createPlatformApp(options: CreatePlatformAppOptions): PlatformAp
       const closeTaskParams = matchPath('/api/workflows/tasks/:taskSessionId/close', pathname);
       if (request.method === 'POST' && closeTaskParams) {
         try {
+          const body = await readRequestBody<{ skipVercelRestoreAfterClose?: unknown }>(request);
+          const closeOpts: CloseTaskOptions | undefined =
+            body.skipVercelRestoreAfterClose === true ? { skipVercelRestoreAfterClose: true } : undefined;
           return jsonResponse(
-            await options.workflowService.closeTask(closeTaskParams.taskSessionId),
+            await options.workflowService.closeTask(closeTaskParams.taskSessionId, undefined, closeOpts),
           );
         } catch (e) {
           return jsonResponse({ error: e instanceof Error ? e.message : String(e) }, 400);

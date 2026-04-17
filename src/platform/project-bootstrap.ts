@@ -7,6 +7,7 @@ import { promisify } from 'node:util';
 import type { RunnerConfig } from '../config-shared';
 import type { BatchTaskPlanItem } from './batch-task-spec';
 import type { KanbanAgentKind, Project, ProjectDeploymentConfig, ProjectRepository } from './types';
+import { assertVercelApiFrameworkSlug, coverageDefaultsForVercelFramework } from './vercel-project-frameworks';
 
 const execFileAsync = promisify(execFile);
 
@@ -17,7 +18,10 @@ export interface BootstrapProjectWorkflowInput {
   sprintName?: string;
   issueIdPrefix?: string;
   owner?: string;
-  framework?: 'nextjs';
+  /**
+   * Optional Vercel API `framework` slug. When set (or `deployment.vercelFramework`), skips LLM framework selection at bootstrap.
+   */
+  framework?: string;
   repository?: Partial<ProjectRepository> & {
     repoOwner?: string;
     repoName?: string;
@@ -26,6 +30,7 @@ export interface BootstrapProjectWorkflowInput {
   kanbanRoleRunners?: Partial<Record<KanbanAgentKind, string>>;
   taskPlan?: BatchTaskPlanItem[];
   createGitHubRepo?: boolean;
+  /** @deprecated Bootstrap never runs app scaffolding; ignored. */
   scaffoldProject?: boolean;
   assignTasks?: boolean;
 }
@@ -36,7 +41,6 @@ export interface PreparedBootstrapProject {
   sprintName: string;
   taskPlan?: BatchTaskPlanItem[];
   createGitHubRepo: boolean;
-  scaffoldProject: boolean;
   assignTasks: boolean;
 }
 
@@ -169,14 +173,6 @@ export function parseBootstrapProjectWorkflowInput(
   const sprintName = normalizeText(input.sprintName) || 'Sprint 1';
   const issueIdPrefix = normalizeText(input.issueIdPrefix) || inferIssueIdPrefix(projectId);
 
-  const frameworkRaw = normalizeText(input.framework);
-  const framework = frameworkRaw ? (() => {
-    if (frameworkRaw !== 'nextjs') {
-      throw new Error(`Unsupported framework: ${frameworkRaw}`);
-    }
-    return frameworkRaw;
-  })() : 'nextjs';
-
   const repositoryInput =
     typeof input.repository === 'object' && input.repository !== null && !Array.isArray(input.repository)
       ? (input.repository as Record<string, unknown>)
@@ -196,6 +192,12 @@ export function parseBootstrapProjectWorkflowInput(
     typeof input.deployment === 'object' && input.deployment !== null && !Array.isArray(input.deployment)
       ? (input.deployment as Record<string, unknown>)
       : {};
+  const deploymentEnabled = deploymentInput.enabled !== false;
+  const explicitFrameworkOverride =
+    normalizeText(deploymentInput.vercelFramework) || normalizeText(input.framework);
+  if (explicitFrameworkOverride) {
+    assertVercelApiFrameworkSlug(explicitFrameworkOverride);
+  }
 
   const explicitRunners =
     typeof input.kanbanRoleRunners === 'object' && input.kanbanRoleRunners !== null && !Array.isArray(input.kanbanRoleRunners)
@@ -223,7 +225,6 @@ export function parseBootstrapProjectWorkflowInput(
     sprintName,
     taskPlan: parseTaskPlan(input.taskPlan),
     createGitHubRepo: input.createGitHubRepo !== false,
-    scaffoldProject: input.scaffoldProject !== false,
     assignTasks: input.assignTasks !== false,
     project: {
       id: projectId,
@@ -241,36 +242,25 @@ export function parseBootstrapProjectWorkflowInput(
         scmProject,
       },
       deployment: {
-        enabled: deploymentInput.enabled !== false,
+        enabled: deploymentEnabled,
         vercelProjectName: normalizeText(deploymentInput.vercelProjectName) || projectId,
         ...(normalizeText(deploymentInput.vercelScope) ? { vercelScope: normalizeText(deploymentInput.vercelScope) } : {}),
         notifyTelegram: deploymentInput.notifyTelegram !== false,
+        ...(deploymentEnabled && explicitFrameworkOverride
+          ? { vercelFramework: explicitFrameworkOverride }
+          : {}),
       },
+      ...(explicitFrameworkOverride ? { vercelDeploymentFramework: explicitFrameworkOverride } : {}),
       agents: [],
       createdAt: now,
       updatedAt: now,
-      ...(framework === 'nextjs'
-        ? {
-            coverageCommand: 'npm test -- --coverage --coverageReporters=json-summary',
-            coverageSummaryPath: 'coverage/coverage-summary.json',
-          }
-        : {}),
+      ...(explicitFrameworkOverride ? coverageDefaultsForVercelFramework(explicitFrameworkOverride) : {}),
     },
   };
 }
 
 async function currentGitHubLogin(cwd: string): Promise<string> {
   return run('gh', ['api', 'user', '--jq', '.login'], cwd);
-}
-
-async function ensureNextJsScaffold(localPath: string): Promise<void> {
-  if (fileExists(path.join(localPath, 'package.json'))) return;
-  await fs.promises.mkdir(path.dirname(localPath), { recursive: true });
-  await run(
-    'npx',
-    ['create-next-app@latest', localPath, '--ts', '--app', '--eslint', '--src-dir', '--use-npm', '--yes'],
-    process.cwd(),
-  );
 }
 
 function gitDirPath(localPath: string): string {
@@ -358,11 +348,7 @@ export async function ensureBootstrappedWorkspace(
       ? input.project.repository.scmProject.split('/')[1]!
       : input.project.id;
   const localPath = input.project.repository.localPath;
-  if (input.scaffoldProject) {
-    await ensureNextJsScaffold(localPath);
-  } else if (!fileExists(localPath)) {
-    throw new Error(`localPath does not exist and scaffoldProject=false: ${localPath}`);
-  }
+  await fs.promises.mkdir(localPath, { recursive: true });
 
   await ensureGitRepositoryInitialized(localPath, input.project.repository.baseBranch);
 

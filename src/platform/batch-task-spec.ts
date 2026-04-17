@@ -4,6 +4,10 @@ import type { LLMProvider } from '../lib/bridge/host';
 import { getKanbanLogger } from './kanban-logger';
 import type { Project } from './types';
 import { consumeAgentStream, type StreamConsumeResult } from './stream-consumer';
+import {
+  assertVercelApiFrameworkSlug,
+  formatVercelFrameworkSlugListForLlm,
+} from './vercel-project-frameworks';
 
 /** Runner used for batch spec LLM: project’s codex-senior mapping, else first Codex runner. */
 export function pickRunnerForCodexSenior(project: Project, config: Config): RunnerConfig | undefined {
@@ -230,46 +234,62 @@ function batchSpecTimeoutMs(): number {
 }
 
 const BATCH_SPEC_SYSTEM = [
-  'You are a product manager planning Kanban work items for implementation.',
-  'Focus only on concrete user-facing functionality, pages, flows, and feature slices.',
-  'Do not break work down by low-level technical architecture, infrastructure, refactors, abstractions, schemas, edge-case handling, or acceptance criteria.',
-  'Those implementation details, boundary cases, and verification rules belong to the developer/reviewer/tester lanes later.',
-  'Each task should describe a visible product capability or page-level deliverable that a dev lane can implement.',
+  'You split a requirement into Kanban tasks that **software developers will implement in the repository** (features, screens, APIs, services, persistence, integrations—each task is a unit of coding work).',
+  'Each `title` must name a **concrete implementation deliverable** (what to build or change in code), not a process step around the work.',
+  'Strict exclusions — **do not** create tasks for: drafting or approving requirements/PRD/用户故事; test plans or standalone “write tests” / QA-only work; regression passes; UAT or sign-off gates; pure documentation; research/spikes with no shipped code; deployment/ops checklists that are not product code changes.',
+  'If the spec mentions testing, regression, or verification, **omit** separate tasks for those—the board’s dev/review/test lanes handle quality gates; your list is only implementation slices.',
+  'Do not add meta tasks like “声明需求”, “需求评审”, “补充验收标准”, “回归验证”, “联调测试计划” unless they are purely about writing application code that embodies a feature.',
   'Hard rule: your entire message must be ONE JSON object. No other characters before or after.',
   'Do NOT use Markdown: no ## headings, no **bold**, no bullet lines, no numbered lists outside JSON, no ``` fences.',
   'Required shape: {"tasks":[{"title":"<string>","dependsOnIndices":[<ints>]}, ...]}',
-  'Example (copy structure only): {"tasks":[{"title":"Add share page route","dependsOnIndices":[]},{"title":"Wire share API","dependsOnIndices":[0]}]}',
+  'Example (copy structure only): {"tasks":[{"title":"Add share page route","dependsOnIndices":[]},{"title":"Implement share API handler and persistence","dependsOnIndices":[0]}]}',
   'dependsOnIndices: 0-based indices of **earlier** tasks in the same `tasks` array that must finish before **this** task can start.',
   'Dependency rule (critical): if task B truly depends on work from task A, and A appears earlier in `tasks` at index i, then you MUST list i inside B\'s dependsOnIndices. Do not omit real dependencies; the system will create real Kanban links from this field.',
   'If tasks are parallel with no ordering constraint, use dependsOnIndices: [] for those tasks.',
   'Index 0 must use dependsOnIndices: []. For task at index i>0, only use indices from 0 to i-1.',
-  'Order tasks topologically (dependencies point backward). Titles must be concise and actionable.',
+  'Order tasks topologically (dependencies point backward). Titles must be concise and describe **what code to implement**.',
 ].join('\n');
+
+function batchSpecSystemWithFramework(vercelDeploymentFramework?: string): string {
+  const fw = vercelDeploymentFramework?.trim();
+  if (!fw) return BATCH_SPEC_SYSTEM;
+  return [
+    BATCH_SPEC_SYSTEM,
+    '',
+    `Deployment target: the repository is intended for Vercel using framework preset "${fw}". Align tasks with that stack’s typical layout, tooling, and runtime (use the conventions developers expect for this Vercel framework slug).`,
+  ].join('\n');
+}
+
+function batchSpecDependencyReviewSystemWithFramework(vercelDeploymentFramework?: string): string {
+  const fw = vercelDeploymentFramework?.trim();
+  if (!fw) return BATCH_SPEC_DEPENDENCY_REVIEW_SYSTEM;
+  return `${BATCH_SPEC_DEPENDENCY_REVIEW_SYSTEM}\n\nVercel framework preset for this repo: ${fw}. Keep tasks appropriate for that stack.`;
+}
 
 /** Second pass when the model returns prose/Markdown instead of JSON. */
 const BATCH_SPEC_REPAIR_SYSTEM = [
-  'You convert product planning text into exactly one JSON object for a Kanban batch import.',
+  'You convert planning text into exactly one JSON object for a Kanban batch import of **developer implementation tasks**.',
   'Reply with ONLY valid JSON. First character must be {. Last character must be }.',
   'No Markdown, no code fences, no explanations, no labels before or after the JSON.',
   'Shape: {"tasks":[{"title":"string","dependsOnIndices":number[]}]}',
-  'Keep tasks focused on pages, user flows, and visible features. Do not add technical implementation subtasks, edge-case subtasks, or acceptance/QA subtasks unless they are themselves user-facing features.',
+  'Each task must be something engineers **implement in code**. Drop or merge items that are only requirements docs, testing/regression/UAT gates, or other non-coding process work.',
   'dependsOnIndices: task index 0 uses []. Later tasks only reference earlier indices (0 .. i-1).',
-  'Preserve every real dependency from the source: if item j must wait on item i (i<j), include i in tasks[j].dependsOnIndices.',
+  'Preserve every real **implementation** dependency from the source: if item j must wait on item i (i<j), include i in tasks[j].dependsOnIndices.',
 ].join('\n');
 
 /** Third pass: validate / repair dependency graph after a syntactically valid plan already exists. */
 const BATCH_SPEC_DEPENDENCY_REVIEW_SYSTEM = [
-  'You review and repair a Kanban task plan JSON object.',
+  'You review and repair a Kanban task plan JSON object for **implementation (coding) work only**.',
   'Reply with ONLY one valid JSON object. First character must be {. Last character must be }.',
   'Shape: {"tasks":[{"title":"string","dependsOnIndices":number[]}]}',
-  'Keep task titles unchanged unless absolutely required to clarify an existing task.',
-  'Primary goal: repair dependency correctness.',
+  'Keep task titles unchanged unless you must fix wording so a task clearly describes code work, or you remove a non-implementation task.',
+  'Primary goals: (1) dependency correctness, (2) remove any task whose sole purpose is requirements, testing-only, regression/UAT, or other non-coding process; after removals, fix dependsOnIndices and keep valid topological order.',
   'Rules:',
   '- dependsOnIndices may contain only unique integers pointing to earlier tasks.',
   '- Remove self-dependencies, forward references, invalid indices, and duplicates.',
   '- Add any missing earlier-task dependency that is clearly required by the task titles or requirement text.',
   '- Keep independent tasks with [].',
-  '- Do not add or remove tasks unless the input is irreparably malformed; prefer minimal edits.',
+  '- Prefer minimal edits; when removing non-implementation tasks, renumber indices consistently.',
   '- Preserve topological order: every dependency must point backward.',
 ].join('\n');
 
@@ -361,9 +381,14 @@ async function repairBatchTaskPlanDependencies(params: {
   workingDirectory: string;
   rawText: string;
   tasks: BatchTaskPlanItem[];
+  vercelDeploymentFramework?: string;
 }): Promise<BatchTaskPlanItem[]> {
   const reviewUserPrompt = [
+    params.vercelDeploymentFramework?.trim()
+      ? `Vercel framework preset: ${params.vercelDeploymentFramework.trim()} (tasks must stay appropriate for that stack).`
+      : '',
     'Review this task plan for dependency correctness and repair it if needed.',
+    'Ensure every task describes **implementation work**; remove stray non-coding process tasks if any slipped in, then fix dependsOnIndices.',
     'Validate that every dependsOnIndices entry points only to earlier tasks and that obvious missing blockers are included.',
     'Return the repaired JSON object only.',
     '',
@@ -374,12 +399,14 @@ async function repairBatchTaskPlanDependencies(params: {
     '',
     'Candidate task plan JSON:',
     JSON.stringify({ tasks: params.tasks }),
-  ].join('\n');
+  ]
+    .filter(Boolean)
+    .join('\n');
 
   const pass = await runBatchSpecLlmPass({
     provider: params.provider,
     workingDirectory: params.workingDirectory,
-    systemPrompt: BATCH_SPEC_DEPENDENCY_REVIEW_SYSTEM,
+    systemPrompt: batchSpecDependencyReviewSystemWithFramework(params.vercelDeploymentFramework),
     userPrompt: reviewUserPrompt,
     sessionId: `batch-spec-dependency-review-${Date.now()}`,
     phase: 'batch-spec preview pass 3 (dependency review)',
@@ -402,6 +429,8 @@ export async function runBatchTaskSpecLlm(params: {
   provider: LLMProvider;
   workingDirectory: string;
   rawText: string;
+  /** Vercel `framework` slug for this project — included in prompts so tasks match the stack. */
+  vercelDeploymentFramework?: string;
 }): Promise<BatchTaskPlanItem[]> {
   const raw = params.rawText.trim();
   if (!raw) {
@@ -409,7 +438,12 @@ export async function runBatchTaskSpecLlm(params: {
   }
 
   const userPrompt = [
-    'Break the following pasted content into Kanban tasks. For each task you MUST set dependsOnIndices:',
+    params.vercelDeploymentFramework?.trim()
+      ? `Vercel framework preset for this repository: ${params.vercelDeploymentFramework.trim()}.`
+      : '',
+    'Break the following pasted content into Kanban tasks for **coding implementation** only (features and code changes developers will ship).',
+    'Do not create separate tasks for declaring requirements, writing test-only plans, regression verification, UAT, or similar non-implementation work.',
+    'For each task you MUST set dependsOnIndices:',
     '- List the 0-based indices of earlier tasks this task cannot start until those are done.',
     '- If the spec implies a chain or blocking order, reflect it in dependsOnIndices (do not leave dependencies implicit).',
     '- Independent work uses dependsOnIndices: [].',
@@ -419,13 +453,15 @@ export async function runBatchTaskSpecLlm(params: {
     '---',
     '',
     'Output constraint: your entire reply must be that single JSON object only. First character {. Last character }.',
-  ].join('\n');
+  ]
+    .filter(Boolean)
+    .join('\n');
 
   const t0 = Date.now();
   const pass1 = await runBatchSpecLlmPass({
     provider: params.provider,
     workingDirectory: params.workingDirectory,
-    systemPrompt: BATCH_SPEC_SYSTEM,
+    systemPrompt: batchSpecSystemWithFramework(params.vercelDeploymentFramework),
     userPrompt,
     sessionId: `batch-spec-${t0}`,
     phase: 'batch-spec preview pass 1',
@@ -438,6 +474,7 @@ export async function runBatchTaskSpecLlm(params: {
       workingDirectory: params.workingDirectory,
       rawText: raw,
       tasks: plan,
+      vercelDeploymentFramework: params.vercelDeploymentFramework,
     });
   } catch {
     try {
@@ -447,6 +484,7 @@ export async function runBatchTaskSpecLlm(params: {
         workingDirectory: params.workingDirectory,
         rawText: raw,
         tasks: loosePlan,
+        vercelDeploymentFramework: params.vercelDeploymentFramework,
       });
     } catch {
       /* fall through to repair pass */
@@ -455,7 +493,8 @@ export async function runBatchTaskSpecLlm(params: {
 
   const repairUserPrompt = [
     'The previous assistant reply was not valid JSON (it may have been Markdown or prose).',
-    'Extract the work items and any "blocks / depends on / after" relationships from the text below.',
+    'Extract **implementation (code) work items** and any "blocks / depends on / after" relationships from the text below.',
+    'Skip items that are only requirements, testing/regression/UAT, or other non-coding process steps.',
     'Encode dependencies ONLY via dependsOnIndices on each task (earlier task index i for blocker i).',
     'Reply with ONLY one JSON object. First character {. Last character }. No markdown, no commentary.',
     'Shape: {"tasks":[{"title":"string","dependsOnIndices":number[]}]}',
@@ -465,10 +504,19 @@ export async function runBatchTaskSpecLlm(params: {
     '---',
   ].join('\n');
 
+  const repairSystem = [
+    BATCH_SPEC_REPAIR_SYSTEM,
+    params.vercelDeploymentFramework?.trim()
+      ? `Vercel framework preset: ${params.vercelDeploymentFramework.trim()}.`
+      : '',
+  ]
+    .filter(Boolean)
+    .join('\n');
+
   const pass2 = await runBatchSpecLlmPass({
     provider: params.provider,
     workingDirectory: params.workingDirectory,
-    systemPrompt: BATCH_SPEC_REPAIR_SYSTEM,
+    systemPrompt: repairSystem,
     userPrompt: repairUserPrompt,
     sessionId: `batch-spec-repair-${Date.now()}`,
     phase: 'batch-spec preview pass 2 (JSON repair)',
@@ -481,6 +529,7 @@ export async function runBatchTaskSpecLlm(params: {
       workingDirectory: params.workingDirectory,
       rawText: raw,
       tasks: plan,
+      vercelDeploymentFramework: params.vercelDeploymentFramework,
     });
   } catch (e) {
     try {
@@ -490,6 +539,7 @@ export async function runBatchTaskSpecLlm(params: {
         workingDirectory: params.workingDirectory,
         rawText: raw,
         tasks: loosePlan,
+        vercelDeploymentFramework: params.vercelDeploymentFramework,
       });
     } catch {
       /* fall through to final error */
@@ -498,4 +548,94 @@ export async function runBatchTaskSpecLlm(params: {
     const base = e instanceof Error ? e.message : String(e);
     throw new Error(`${base} — model output preview: ${preview}`);
   }
+}
+
+const BOOTSTRAP_FRAMEWORK_SYSTEM = [
+  'You select exactly one Vercel project `framework` slug for a new repository that will be deployed on Vercel.',
+  'Read the product requirement and pick the single best slug from the list in the user message.',
+  'The slug must be copied verbatim from that list (same spelling and casing).',
+  'Reply with ONLY one JSON object. No markdown, no code fences, no commentary. First character {. Last character }.',
+  'Required shape: {"framework":"<slug>"}',
+].join('\n');
+
+const BOOTSTRAP_FRAMEWORK_REPAIR_SYSTEM = [
+  'Convert the assistant text into exactly one JSON object: {"framework":"<slug>"}.',
+  'The slug must be exactly one line from the allowed list the user gave. Copy it verbatim.',
+  'Reply with ONLY valid JSON. First character {. Last character }.',
+].join('\n');
+
+function normalizeFrameworkJsonOrThrow(text: string): string {
+  const json = extractJsonObjectFromAssistantText(text);
+  if (typeof json !== 'object' || json === null || Array.isArray(json)) {
+    throw new Error('Expected JSON object with "framework" field');
+  }
+  const fw = (json as Record<string, unknown>).framework;
+  if (typeof fw !== 'string' || !fw.trim()) {
+    throw new Error('framework must be a non-empty string');
+  }
+  return fw.trim();
+}
+
+/**
+ * Same runner/provider path as batch task spec: **codex-senior** resolves to {@link LLMProvider}.
+ * On success returns a Vercel API framework slug; throws if the model output is invalid or not allowed.
+ */
+export async function runBootstrapVercelFrameworkLlm(params: {
+  provider: LLMProvider;
+  workingDirectory: string;
+  requirement: string;
+}): Promise<string> {
+  const req = params.requirement.trim();
+  if (!req) throw new Error('requirement is empty');
+
+  const userPrompt = [
+    'Allowed `framework` slugs (pick exactly one; use as the JSON "framework" value):',
+    formatVercelFrameworkSlugListForLlm(),
+    '',
+    'Product requirement:',
+    '---',
+    req.slice(0, 24_000),
+    '---',
+  ].join('\n');
+
+  const pass1 = await runBatchSpecLlmPass({
+    provider: params.provider,
+    workingDirectory: params.workingDirectory,
+    systemPrompt: BOOTSTRAP_FRAMEWORK_SYSTEM,
+    userPrompt,
+    sessionId: `bootstrap-framework-${Date.now()}`,
+    phase: 'bootstrap framework selection pass 1',
+  });
+
+  try {
+    const slug = normalizeFrameworkJsonOrThrow(pass1.text);
+    assertVercelApiFrameworkSlug(slug);
+    return slug;
+  } catch {
+    /* fall through */
+  }
+
+  const repairUserPrompt = [
+    'The model reply was not a valid {"framework":"<slug>"} object or the slug was not in the allowed list.',
+    'Allowed slugs:',
+    formatVercelFrameworkSlugListForLlm(),
+    '',
+    'Invalid reply to fix:',
+    '---',
+    pass1.text.slice(0, 12_000),
+    '---',
+  ].join('\n');
+
+  const pass2 = await runBatchSpecLlmPass({
+    provider: params.provider,
+    workingDirectory: params.workingDirectory,
+    systemPrompt: BOOTSTRAP_FRAMEWORK_REPAIR_SYSTEM,
+    userPrompt: repairUserPrompt,
+    sessionId: `bootstrap-framework-repair-${Date.now()}`,
+    phase: 'bootstrap framework selection pass 2 (repair)',
+  });
+
+  const slug = normalizeFrameworkJsonOrThrow(pass2.text);
+  assertVercelApiFrameworkSlug(slug);
+  return slug;
 }

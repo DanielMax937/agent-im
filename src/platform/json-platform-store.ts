@@ -484,6 +484,23 @@ export class JsonPlatformStore {
     return nextSprint;
   }
 
+  removeSprint(sprintId: string): { ok: true } | { ok: false; error: string } {
+    if (!this.sprints.has(sprintId)) {
+      return { ok: false, error: `Sprint not found: ${sprintId}` };
+    }
+    const sprint = this.sprints.get(sprintId)!;
+    const taskCount = this.listTaskSessions(sprint.projectId).filter((t) => t.sprintId === sprintId).length;
+    if (taskCount > 0) {
+      return {
+        ok: false,
+        error: `Cannot delete sprint: ${taskCount} task session(s) still reference it. Delete tasks first.`,
+      };
+    }
+    this.sprints.delete(sprintId);
+    this.persistSprints();
+    return { ok: true };
+  }
+
   listTaskSessions(projectId?: string): TaskSession[] {
     const items = Array.from(this.taskSessions.values());
     if (!projectId) return items;

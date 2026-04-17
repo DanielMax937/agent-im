@@ -56,6 +56,11 @@ export interface PullRequestMergeStatus {
   terminalState?: 'merged' | 'closed';
   /** Set when `canMerge` is false (draft, conflicts, blocked checks, etc.). */
   reason?: string;
+  /**
+   * Host branch this PR/MR merges **into** (GitHub `base.ref`; GitLab `target_branch`).
+   * Used to block Kanban auto-merge into the repository default branch.
+   */
+  mergeTargetBranch?: string;
 }
 
 export interface ScmClient {
@@ -231,42 +236,47 @@ export class HttpScmClient implements ScmClient {
         state?: string;
         merged?: boolean;
         merged_at?: string | null;
+        base?: { ref?: string };
       };
+      const mergeTargetBranch =
+        typeof pr.base?.ref === 'string' && pr.base.ref.trim() !== '' ? pr.base.ref.trim() : undefined;
+      const withTarget = (status: PullRequestMergeStatus): PullRequestMergeStatus =>
+        mergeTargetBranch !== undefined ? { ...status, mergeTargetBranch } : status;
       console.warn(
         `[scm/github] PR #${pullNumber} merge status payload: state=${pr.state ?? '-'} merged=${String(pr.merged ?? false)} merged_at=${pr.merged_at ?? '-'} draft=${String(pr.draft ?? false)} mergeable=${String(pr.mergeable)} mergeable_state=${pr.mergeable_state ?? '-'}`,
       );
       if (pr.merged === true || Boolean(pr.merged_at)) {
-        return { canMerge: false, terminalState: 'merged', reason: 'PR is already merged on GitHub' };
+        return withTarget({ canMerge: false, terminalState: 'merged', reason: 'PR is already merged on GitHub' });
       }
       if (pr.state === 'closed') {
-        return { canMerge: false, terminalState: 'closed', reason: 'PR is already closed on GitHub' };
+        return withTarget({ canMerge: false, terminalState: 'closed', reason: 'PR is already closed on GitHub' });
       }
       if (pr.draft) {
-        return { canMerge: false, reason: 'PR is still a draft' };
+        return withTarget({ canMerge: false, reason: 'PR is still a draft' });
       }
       if (pr.mergeable === null) {
         if (attempt < 5) {
           await new Promise((r) => setTimeout(r, 500));
           continue;
         }
-        return {
+        return withTarget({
           canMerge: false,
           reason: 'PR mergeability is still computing on GitHub; retry APPROVE_MERGE in a moment',
-        };
+        });
       }
       if (pr.mergeable === false) {
-        return {
+        return withTarget({
           canMerge: false,
           reason: `mergeable_state=${pr.mergeable_state} (conflicts or cannot merge with base)`,
-        };
+        });
       }
       if (pr.mergeable_state === 'clean') {
-        return { canMerge: true };
+        return withTarget({ canMerge: true });
       }
-      return {
+      return withTarget({
         canMerge: false,
         reason: `not merge-ready yet (mergeable_state=${pr.mergeable_state}; need clean: no conflicts, blocking checks/reviews resolved)`,
-      };
+      });
     }
     return { canMerge: false, reason: 'could not determine GitHub PR mergeability' };
   }
@@ -286,25 +296,32 @@ export class HttpScmClient implements ScmClient {
         draft?: boolean;
         merge_status?: string;
         work_in_progress?: boolean;
+        target_branch?: string;
       };
+      const mergeTargetBranch =
+        typeof mr.target_branch === 'string' && mr.target_branch.trim() !== ''
+          ? mr.target_branch.trim()
+          : undefined;
+      const withTarget = (status: PullRequestMergeStatus): PullRequestMergeStatus =>
+        mergeTargetBranch !== undefined ? { ...status, mergeTargetBranch } : status;
       if (mr.draft || mr.work_in_progress) {
-        return { canMerge: false, reason: 'MR is draft or WIP' };
+        return withTarget({ canMerge: false, reason: 'MR is draft or WIP' });
       }
       const ms = mr.merge_status;
       if (ms === 'can_be_merged') {
-        return { canMerge: true };
+        return withTarget({ canMerge: true });
       }
       if (ms === 'cannot_be_merged') {
-        return { canMerge: false, reason: 'cannot_be_merged (conflicts or failing pipeline)' };
+        return withTarget({ canMerge: false, reason: 'cannot_be_merged (conflicts or failing pipeline)' });
       }
       if (attempt < 5) {
         await new Promise((r) => setTimeout(r, 500));
         continue;
       }
-      return {
+      return withTarget({
         canMerge: false,
         reason: 'merge_status still unchecked on GitLab; retry APPROVE_MERGE in a moment',
-      };
+      });
     }
     return { canMerge: false, reason: 'could not determine GitLab MR merge status' };
   }

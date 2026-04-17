@@ -235,15 +235,16 @@ describe('Kanban prompts', () => {
     assert.doesNotMatch(prompt, /`KANBAN_ACTION:START_TESTING` \(developer\)/);
   });
 
-  it('pre-tester prompt requires env validation and manual hookup when prerequisites are missing', () => {
+  it('pre-tester prompt distinguishes secrets from npm install/build and allows START_FEATURE_TESTING when only routine setup remains', () => {
     const project = baseProject();
     const sprint = baseSprint(project.id);
     const task = baseTask('pre_testing', 'tester');
     const prompt = buildRolePrompt({ role: 'tester', project, sprint, taskSession: task });
     const systemCheck = buildSystemCheckPrompt(task, 'tester');
 
-    assert.match(prompt, /verify that all environment variables, credentials, external services, and local prerequisites/i);
-    assert.match(prompt, /manual hookup/i);
+    assert.match(prompt, /npm ci|npm install/i);
+    assert.match(prompt, /API keys|secrets|credentials/i);
+    assert.match(prompt, /manual hookup|manual接入/i);
     assert.match(prompt, /`KANBAN_ACTION:START_FEATURE_TESTING`/);
     assert.match(systemCheck, /`KANBAN_ACTION:START_FEATURE_TESTING`/);
     assert.match(systemCheck, /do not emit a KANBAN action/i);
