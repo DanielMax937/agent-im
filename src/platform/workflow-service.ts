@@ -16,6 +16,7 @@ import {
   pickRunnerForCodexSenior,
   parsePreviewBatchSpecBody,
   runBatchTaskSpecLlm,
+  runBootstrapVercelFrameworkLlm,
   normalizeBatchTaskPlan,
   type BatchTaskPlanItem,
 } from './batch-task-spec';
@@ -36,10 +37,23 @@ import { createApprovalQueueKey, createTaskQueueKey, JsonPlatformStore } from '.
 import { GitService } from './git-service';
 import { assertValidLocalRepositoryPath } from './repository-path';
 import { InstanceManager } from './instance-manager';
-import { isScmMergeNotMergeableError, type PullRequestRef, type ScmClient } from './scm-client';
-import { deployVercelFromLocalBranch, pollVercelDeploymentSuccesses, rememberVercelDeploymentBranch } from './vercel-cli';
-import { ensureVercelGitConnection, ensureVercelProjectLinked } from './vercel-cli';
+import {
+  isScmMergeNotMergeableError,
+  type PullRequestMergeStatus,
+  type PullRequestRef,
+  type ScmClient,
+} from './scm-client';
+import {
+  deployVercelFromLocalBranch,
+  ensureVercelGitConnection,
+  ensureVercelProjectLinked,
+  patchVercelGitProductionBranch,
+  pollVercelDeploymentSuccesses,
+  rememberVercelDeploymentBranch,
+  triggerVercelProductionDeployFromLinkedRepo,
+} from './vercel-cli';
 import { ensureBootstrappedWorkspace, parseBootstrapProjectWorkflowInput } from './project-bootstrap';
+import { coverageDefaultsForVercelFramework } from './vercel-project-frameworks';
 import type {
   AgentInstanceRecord,
   AgentRole,
@@ -52,6 +66,7 @@ import type {
   Sprint,
   StartSprintInput,
   SubmitTaskForReviewInput,
+  CloseTaskOptions,
   TaskFailurePayload,
   TaskHistoryComment,
   TaskSession,
@@ -607,7 +622,14 @@ export class WorkflowService {
       return;
     }
 
-    const content = buildSystemCheckPrompt(task, expected);
+    const project = this.deps.store.getProject(task.projectId);
+    const fw = project?.vercelDeploymentFramework?.trim();
+    const content = [
+      fw ? `Project Vercel framework preset: ${fw}.` : '',
+      buildSystemCheckPrompt(task, expected),
+    ]
+      .filter(Boolean)
+      .join('\n\n');
     this.deps.store.enqueueTaskMessage({
       queueKey: task.messageQueueKey,
       taskSessionId: task.id,
@@ -799,11 +821,55 @@ export class WorkflowService {
     warnings: string[];
   }> {
     const prepared = parseBootstrapProjectWorkflowInput(input, this.availableRunners());
-    const workspace = await ensureBootstrappedWorkspace(prepared);
-    let project: Project = {
+    const localPath = prepared.project.repository.localPath.trim();
+    await fs.promises.mkdir(localPath, { recursive: true });
+
+    let frameworkSlug = prepared.project.vercelDeploymentFramework?.trim();
+    if (!frameworkSlug) {
+      const config = loadKanbanPlatformConfig();
+      const runner = pickRunnerForCodexSenior(prepared.project, config);
+      if (!runner) {
+        throw new Error(
+          'No runner for bootstrap framework selection: configure CTI_RUNNERS with a Codex runtime, or set project Kanban role runner for codex-senior.',
+        );
+      }
+      const eff = resolveRuntimeForPlatformInstance(config, {
+        runtime: resolveKanbanAgent('codex-senior').runtime,
+        runtimeProfileId: runner.id,
+      });
+      const pendingPermissions = new PendingPermissions();
+      const provider = await resolveProvider({
+        config,
+        pendingPermissions,
+        runtimeOverride: eff,
+        runner,
+        autoApproveOverride: true,
+      });
+      frameworkSlug = await runBootstrapVercelFrameworkLlm({
+        provider,
+        workingDirectory: localPath,
+        requirement: prepared.requirement,
+      });
+    }
+
+    const coveragePatch = coverageDefaultsForVercelFramework(frameworkSlug);
+    const seededProject: Project = {
       ...prepared.project,
+      vercelDeploymentFramework: frameworkSlug,
+      deployment: prepared.project.deployment
+        ? {
+            ...prepared.project.deployment,
+            ...(prepared.project.deployment.enabled !== false ? { vercelFramework: frameworkSlug } : {}),
+          }
+        : undefined,
+      ...coveragePatch,
+    };
+
+    const workspace = await ensureBootstrappedWorkspace({ ...prepared, project: seededProject });
+    let project: Project = {
+      ...seededProject,
       repository: {
-        ...prepared.project.repository,
+        ...seededProject.repository,
         remoteUrl: workspace.remoteUrl,
         localPath: workspace.localPath,
         scmProject: workspace.scmProject,
@@ -819,6 +885,7 @@ export class WorkflowService {
         ...project,
         repository: project.repository,
         kanbanRoleRunners: project.kanbanRoleRunners,
+        vercelDeploymentFramework: project.vercelDeploymentFramework ?? existingProject.vercelDeploymentFramework,
         deployment: {
           ...existingProject.deployment,
           ...project.deployment,
@@ -883,6 +950,7 @@ export class WorkflowService {
           rawText: [
             `Project: ${project.name}`,
             `Sprint: ${sprint.name}`,
+            `Vercel framework preset: ${project.vercelDeploymentFramework ?? '(unset)'}`,
             '',
             'Requirement:',
             prepared.requirement,
@@ -1677,7 +1745,7 @@ export class WorkflowService {
       kanbanAgent: 'pre-tester',
       handoffComment:
         taskSession.handoffComment ??
-        'Pre-test check: verify required environment variables, credentials, local services, and task prerequisites. If anything is missing, list missing items and require manual hookup without editing code.',
+        'Pre-test check: run install/build in the workspace if needed. Block only on API keys, DB credentials, or other secrets/external services — not on missing node_modules. List any secret gaps for manual hookup before advancing.',
       runtimeProfileId: testerProfile,
       ...assignPatch,
       historyComments: [
@@ -1863,6 +1931,42 @@ export class WorkflowService {
       }
     }
 
+    if (mergeStatus.canMerge && mergeStatus.terminalState !== 'merged') {
+      this.assertKanbanDoesNotAutoMergeIntoRepositoryBase(
+        project,
+        mergeStatus,
+        taskSession.pullRequestNumber,
+      );
+    }
+
+    const shouldPatchVercelGitProductionBranch =
+      mergeStatus.terminalState !== 'merged' &&
+      mergeStatus.canMerge &&
+      project.deployment?.enabled !== false &&
+      project.deployment?.applyVercelGitProductionBranchPatch !== false;
+
+    if (shouldPatchVercelGitProductionBranch) {
+      try {
+        await patchVercelGitProductionBranch(project, mergeTarget);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        getKanbanLogger().warn(
+          { err: error, taskSessionId: taskSession.id, projectId: project.id, mergeTarget },
+          'Failed to PATCH Vercel production branch before merge',
+        );
+        await this.appendWorkflowComment(
+          taskSession.id,
+          `Cannot merge yet: failed to set Vercel Git production branch to \`${mergeTarget}\` (required for Production deployments on merge). ${message.slice(0, 500)}`,
+        );
+        return this.transitionReviewToDevelopment(
+          taskSession.id,
+          deferStopInstanceId,
+          'merge_conflict',
+          `Vercel production branch sync failed: ${message.slice(0, 400)}`,
+        );
+      }
+    }
+
     if (mergeStatus.terminalState !== 'merged') {
       try {
         await this.deps.scmClient.mergePullRequest(project, taskSession.pullRequestNumber);
@@ -1958,11 +2062,11 @@ export class WorkflowService {
         const message = error instanceof Error ? error.message : String(error);
         getKanbanLogger().warn(
           { err: error, taskSessionId: taskSession.id, projectId: project.id, mergeTarget },
-          'Failed to update Vercel production branch after review merge',
+          'Failed to persist Kanban Vercel deployment settings after review merge',
         );
         await this.appendWorkflowComment(
           taskSession.id,
-          `Merged into ${mergeTarget}, but could not update Vercel production branch automatically: ${message.slice(0, 400)}`,
+          `Merged into ${mergeTarget}, but could not finish Vercel project link / local deployment tracking update: ${message.slice(0, 400)}`,
         );
       }
     }
@@ -2588,7 +2692,7 @@ export class WorkflowService {
     }
   }
 
-  async closeTask(taskSessionId: string, deferStopInstanceId?: string): Promise<TaskSession> {
+  async closeTask(taskSessionId: string, deferStopInstanceId?: string, options?: CloseTaskOptions): Promise<TaskSession> {
     const taskSession = this.requireTaskSession(taskSessionId);
     // Allow close from pending_release OR from the closing (async) transient state
     if (taskSession.workflowState !== 'pending_release' && taskSession.workflowState !== 'closing') {
@@ -2659,8 +2763,58 @@ export class WorkflowService {
     await this.stopInstancesForTask(taskSession.id, deferStopInstanceId);
 
     await this.appendWorkflowComment(updatedTaskSession.id, 'Task closed.');
+    await this.maybeRestoreVercelBaseBranchAndRedeployAfterClose(project, sprint, updatedTaskSession.id, options);
     await this.processDeveloperAssignmentQueue(taskSession.sprintId);
     return updatedTaskSession;
+  }
+
+  /**
+   * After a successful close: PATCH Vercel `link.productionBranch` back to the repo base, align the
+   * workflow clone to `origin/<base>`, then run `vercel deploy --prod` so Production matches base.
+   * Best-effort: failures are commented but do not revert the closed state.
+   */
+  private async maybeRestoreVercelBaseBranchAndRedeployAfterClose(
+    project: Project,
+    sprint: Sprint,
+    taskSessionId: string,
+    options?: CloseTaskOptions,
+  ): Promise<void> {
+    if (options?.skipVercelRestoreAfterClose) return;
+    if (project.deployment?.enabled === false) return;
+    if (project.deployment?.restoreVercelGitProductionBranchOnClose === false) return;
+
+    const baseBranch = sprint.baseBranch ?? project.repository.baseBranch;
+    const repoPath = project.repository.localPath.trim();
+    this.assertProjectLocalRepositoryPath(project);
+
+    try {
+      await patchVercelGitProductionBranch(project, baseBranch);
+      const checkout = await this.deps.gitService.checkoutOriginTrackingBranch(repoPath, baseBranch);
+      if (checkout.discardedEntries.length > 0) {
+        await this.appendWorkflowComment(
+          taskSessionId,
+          [
+            `Vercel post-close: reset workflow clone to \`origin/${baseBranch}\` and discarded local entries:`,
+            ...checkout.discardedEntries.map((entry) => `- ${entry.raw}`),
+          ].join('\n'),
+        );
+      }
+      await triggerVercelProductionDeployFromLinkedRepo(project);
+      await this.appendWorkflowComment(
+        taskSessionId,
+        `Vercel: Git production branch set to \`${baseBranch}\` and a production deployment was triggered (\`vercel deploy --prod\`).`,
+      );
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      getKanbanLogger().warn(
+        { err, taskSessionId, projectId: project.id, baseBranch },
+        'Vercel restore base branch + deploy after task close failed',
+      );
+      await this.appendWorkflowComment(
+        taskSessionId,
+        `Vercel post-close step failed (task remains closed): ${msg.slice(0, 800)}`,
+      );
+    }
   }
 
   /**
@@ -3019,6 +3173,7 @@ export class WorkflowService {
       provider,
       rawText,
       workingDirectory: project.repository.localPath,
+      vercelDeploymentFramework: project.vercelDeploymentFramework,
     });
     return { tasks };
   }
@@ -3088,9 +3243,11 @@ export class WorkflowService {
       autoApproveOverride: false,
     });
     const laneHints = preferredSkillsForProjectLane(project, 'codex-senior');
+    const fw = project.vercelDeploymentFramework?.trim();
     const systemPrompt = [
       BOARD_BRAINSTORM_SYSTEM,
       '',
+      ...(fw ? [`Vercel framework preset for this project: ${fw}.`, ''] : []),
       'Lane skill hints (optional):',
       ...laneHints.map((h) => `- ${h}`),
     ].join('\n');
@@ -3121,6 +3278,8 @@ export class WorkflowService {
 
   /** First user turn for the runner: local Kanban only (no external issue tracker). */
   private enqueueKickoffPrompt(taskSession: TaskSession): void {
+    const project = this.deps.store.getProject(taskSession.projectId);
+    const fw = project?.vercelDeploymentFramework?.trim();
     this.deps.store.enqueueTaskMessage({
       queueKey: taskSession.messageQueueKey,
       taskSessionId: taskSession.id,
@@ -3128,6 +3287,7 @@ export class WorkflowService {
       type: 'directive',
       content: [
         `Begin work on task ${taskSession.issueId}: ${taskSession.title}.`,
+        ...(fw ? [`This project targets Vercel with framework preset \`${fw}\`.`] : []),
         'Follow your role-specific instructions and the task context in this conversation.',
       ].join(' '),
     });
@@ -3208,6 +3368,24 @@ export class WorkflowService {
     this.deps.store.upsertTaskSession(normalized);
     normalizeInstances(taskSession.id);
     return normalized;
+  }
+
+  /**
+   * Block Kanban auto-merge when the open PR/MR targets the repository default branch.
+   * Review PRs should merge into an integration branch first; integrating into base is manual or release flow.
+   */
+  private assertKanbanDoesNotAutoMergeIntoRepositoryBase(
+    project: Project,
+    mergeStatus: PullRequestMergeStatus,
+    pullRequestNumber: number,
+  ): void {
+    const repoBase = project.repository.baseBranch.trim();
+    const hostTarget = mergeStatus.mergeTargetBranch?.trim();
+    if (!hostTarget || !repoBase) return;
+    if (hostTarget !== repoBase) return;
+    throw new Error(
+      `Refusing to auto-merge PR #${pullRequestNumber}: host merge target "${hostTarget}" is the repository base branch (\`${repoBase}\`). Retarget the review PR to a non-base integration branch, or merge into \`${repoBase}\` manually on the host.`,
+    );
   }
 
   private assertTransition(from: TaskWorkflowState, to: TaskWorkflowState): void {

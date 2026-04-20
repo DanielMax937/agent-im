@@ -93,13 +93,43 @@ export interface ProjectDeploymentConfig {
  /** Optional IDs resolved from `.vercel/project.json` after linking. */
   vercelProjectId?: string;
   vercelOrgId?: string;
-  /** The sprint / integration branch that Kanban expects to deploy from the local repo via Vercel CLI. */
+  /**
+   * Sprint / integration Git branch name (e.g. `feature/mvp-sprint`). Before merging a review PR, Kanban may
+   * PATCH Vercel's Git `productionBranch` to this ref so the merge triggers a **Production** build; after merge,
+   * this value is persisted for polling Telegram notifications against READY deployments on that branch.
+   */
   productionBranch?: string;
-  /** Whether successful Vercel production deployments should send Telegram notifications. Defaults to true. */
+  /** Whether successful Vercel deployments for {@link productionBranch} should send Telegram notifications. Defaults to true. */
   notifyTelegram?: boolean;
-  /** Last successful Vercel production deployment id already notified to Telegram. */
+  /** Last Vercel deployment id already notified to Telegram (sprint-branch poll dedupe). */
   lastNotifiedDeploymentId?: string;
+  /**
+   * When `false`, Kanban will not call `vercel api` to PATCH the Vercel project's
+   * `link.productionBranch` before merging a PR into the sprint branch. Defaults to `true`
+   * when deployment is enabled (so Git-triggered builds target Production for that branch).
+   */
+  applyVercelGitProductionBranchPatch?: boolean;
+  /**
+   * When `false`, skip PATCH + `vercel deploy --prod` after a task closes (normally restores Git
+   * production branch to the repo base). Defaults to `true` when deployment is enabled.
+   */
+  restoreVercelGitProductionBranchOnClose?: boolean;
+  /**
+   * When set (e.g. `nextjs`), Kanban issues `PATCH /v9/projects/{id}` with `{ "framework": "<value>" }`
+   * after Vercel link / Git connect so the project preset matches the repo (avoids dashboard `Other`
+   * + wrong output directory). Omit to skip the API call.
+   */
+  vercelFramework?: string;
 }
+
+/** Options for HTTP `POST .../tasks/:id/close` and `WorkflowService.closeTask`. */
+export type CloseTaskOptions = {
+  /**
+   * When `true`, do not PATCH Vercel production branch back to base or trigger a deploy (used so
+   * **bulk** closes only run restore once per project — on the last task in that batch).
+   */
+  skipVercelRestoreAfterClose?: boolean;
+};
 
 /**
  * Per-project unit-test coverage record. Coverage is the total lines percentage (0–100) from
@@ -150,6 +180,11 @@ export interface Project {
   repository: ProjectRepository;
   /** Project-level deploy automation contract for GitHub workflow generation. Defaults to enabled when omitted. */
   deployment?: ProjectDeploymentConfig;
+  /**
+   * Vercel `framework` slug for this repo (`PATCH /v9/projects`), chosen at bootstrap or overridden via API.
+   * Used for Vercel preset updates and injected into Kanban / batch-spec prompts.
+   */
+  vercelDeploymentFramework?: string;
   /**
    * Shell command to run unit tests and produce coverage output.
    * Defaults to `npm test -- --coverage --coverageReporters=json-summary`.

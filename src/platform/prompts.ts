@@ -108,6 +108,14 @@ export function buildRolePrompt({
         }).split('\n')
       : [];
 
+  const frameworkBlock = project.vercelDeploymentFramework?.trim()
+    ? [
+        'Deployment stack context:',
+        `This repository targets Vercel with project framework preset "${project.vercelDeploymentFramework.trim()}" (Vercel API slug). Prefer that stack's idioms, directory layout, and tooling.`,
+        '',
+      ]
+    : [];
+
   const developerReworkBlock =
     role === 'developer' && taskSession.workflowState === 'in_progress' && (taskSession.reviewRejectionCount ?? 0) > 0
       ? [
@@ -141,6 +149,7 @@ export function buildRolePrompt({
   return [
     ROLE_PROMPTS[role],
     '',
+    ...frameworkBlock,
     ...skillBlock,
     ...handoffBlock,
     ...historyLogBlock,

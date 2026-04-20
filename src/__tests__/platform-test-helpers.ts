@@ -136,7 +136,8 @@ export class FakeScmClient implements ScmClient {
   public findOpenPullRequestResult: PullRequestRef | null = null;
   public findOpenPullRequestResults: Array<PullRequestRef | null> | null = null;
 
-  public mergeStatusResult: PullRequestMergeStatus = { canMerge: true };
+  /** `mergeTargetBranch` matches default sprint integration branch in tests (not repo `baseBranch`). */
+  public mergeStatusResult: PullRequestMergeStatus = { canMerge: true, mergeTargetBranch: 'feature/sprint-alpha' };
 
   async getPullRequestMergeStatus(): Promise<PullRequestMergeStatus> {
     this.calls.push('getPullRequestMergeStatus');

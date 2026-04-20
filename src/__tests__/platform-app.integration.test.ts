@@ -224,6 +224,7 @@ describe('Platform app integration', () => {
   it('bootstraps a project, sprint, tasks, and default lane runners from a requirement', async () => {
     const { app, store } = createHarness();
     const repoPath = fs.mkdtempSync(path.join(os.tmpdir(), 'cti-bootstrap-test-'));
+    fs.writeFileSync(path.join(repoPath, 'README.md'), '# bootstrap test\n', 'utf8');
     const server = await startHttpApp(app);
     try {
       const response = await fetchJson(server.baseUrl, '/api/workflows/projects/bootstrap', {
@@ -233,6 +234,8 @@ describe('Platform app integration', () => {
           requirement: 'Build a jackpot-style web game with lobby, spin flow, and result history.',
           projectName: 'Jackpot Game',
           sprintName: 'MVP Sprint',
+          /** Skip LLM framework picker in this test (no live Codex). */
+          framework: 'nextjs',
           repository: {
             localPath: repoPath,
             remoteUrl: 'git@github.com:example/jackpot-game.git',
@@ -272,6 +275,7 @@ describe('Platform app integration', () => {
 
       const project = store.getProject('jackpot-game');
       assert.ok(project);
+      assert.equal(project?.vercelDeploymentFramework, 'nextjs');
       assert.ok(project?.kanbanRoleRunners?.['agent-dev']);
       assert.ok(project?.kanbanRoleRunners?.['pre-tester']);
       assert.ok(project?.kanbanRoleRunners?.['codex-senior']);
