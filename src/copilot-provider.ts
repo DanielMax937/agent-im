@@ -59,6 +59,21 @@ function stringifyContent(value: unknown): string {
   }
 }
 
+function buildPromptWithImageFallback(params: StreamChatParams): string {
+  if (!params.files?.length) return params.prompt;
+  const imageFiles = params.files.filter((file) => file.type.startsWith('image/'));
+  if (!imageFiles.length) return params.prompt;
+  const imageHints = imageFiles.map((file, index) => (
+    `image_${index + 1}: data:${file.type};base64,${file.data}`
+  ));
+  return [
+    params.prompt,
+    '',
+    '[Attached images as data URLs]',
+    ...imageHints,
+  ].join('\n');
+}
+
 export class CopilotProvider implements LLMProvider {
   private spawnFn: CopilotSpawnFn;
   private copilotExecutable?: string;
@@ -102,7 +117,7 @@ export class CopilotProvider implements LLMProvider {
               args.push(`--resume=${params.sdkSessionId}`);
             }
 
-            args.push('-p', params.prompt);
+            args.push('-p', buildPromptWithImageFallback(params));
 
             const childEnv = mergeRunnerSubprocessEnv(
               buildSubprocessEnvForRuntime({ runtime: 'copilot' }),

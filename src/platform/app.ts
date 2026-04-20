@@ -1,4 +1,5 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 
 import * as bridgeManager from '../lib/bridge/bridge-manager';
@@ -24,6 +25,8 @@ import {
 } from '../config';
 import { readMonitorMessages, readRunnerStatusForMonitor } from '../lib/monitor-messages';
 import { getLogger } from '../logger';
+import { getBridgeContext, hasBridgeContext } from '../lib/bridge/context';
+import type { FileAttachment } from '../lib/bridge/host';
 import type {
   PendingApprovalRecord,
   Project,
@@ -275,6 +278,153 @@ function notFoundResponse(resource: string, id: string): Response {
   return jsonResponse({ error: `${resource} not found: ${id}` }, 404);
 }
 
+interface OpenAIContentTextPart {
+  type: 'text';
+  text: string;
+}
+
+interface OpenAIContentImagePart {
+  type: 'image_url';
+  image_url: { url: string };
+}
+
+type OpenAIContentPart = OpenAIContentTextPart | OpenAIContentImagePart;
+
+interface OpenAIChatMessage {
+  role: 'system' | 'user' | 'assistant' | 'tool';
+  content: string | OpenAIContentPart[];
+}
+
+interface OpenAIChatCompletionsRequest {
+  model?: string;
+  messages?: OpenAIChatMessage[];
+  stream?: boolean;
+  temperature?: number;
+  max_tokens?: number;
+}
+
+interface ParsedOpenAIPrompt {
+  prompt: string;
+  files: FileAttachment[];
+}
+
+export function parseBase64DataUrl(url: string): { mime: string; base64: string } | null {
+  const match = /^data:([^;,]+);base64,(.+)$/i.exec(url.trim());
+  if (!match) return null;
+  const mime = match[1]?.toLowerCase() || 'image/png';
+  const base64 = match[2]?.trim();
+  if (!base64) return null;
+  return { mime, base64 };
+}
+
+export function parseOpenAIMessagesAsPrompt(messages: OpenAIChatMessage[]): ParsedOpenAIPrompt {
+  const files: FileAttachment[] = [];
+  const lines: string[] = [];
+  for (const msg of messages) {
+    if (typeof msg.content === 'string') {
+      lines.push(`${msg.role.toUpperCase()}: ${msg.content}`);
+      continue;
+    }
+    if (!Array.isArray(msg.content)) {
+      lines.push(`${msg.role.toUpperCase()}:`);
+      continue;
+    }
+
+    const contentLines: string[] = [];
+    for (const part of msg.content) {
+      if (part.type === 'text') {
+        contentLines.push(part.text);
+        continue;
+      }
+      if (part.type === 'image_url') {
+        const imageUrl = part.image_url?.url || '';
+        const parsed = parseBase64DataUrl(imageUrl);
+        if (parsed) {
+          files.push({
+            id: `img-${crypto.randomUUID()}`,
+            name: `openai-image-${files.length + 1}`,
+            type: parsed.mime,
+            size: 0,
+            data: parsed.base64,
+          });
+          contentLines.push(`[image_${files.length}: data-url attached]`);
+        } else if (imageUrl) {
+          contentLines.push(`[image_url: ${imageUrl}]`);
+        }
+      }
+    }
+    lines.push(`${msg.role.toUpperCase()}: ${contentLines.join('\n').trim()}`);
+  }
+
+  return { prompt: lines.join('\n\n').trim(), files };
+}
+
+function parseSSEPayload(data: unknown): unknown {
+  if (typeof data !== 'string') return data;
+  try {
+    return JSON.parse(data);
+  } catch {
+    return data;
+  }
+}
+
+async function collectProviderResponse(stream: ReadableStream<string>): Promise<{
+  text: string;
+  usage: { input: number; output: number };
+  sessionId?: string;
+  errors: string[];
+}> {
+  const reader = stream.getReader();
+  let buffer = '';
+  let text = '';
+  let sessionId: string | undefined;
+  const usage = { input: 0, output: 0 };
+  const errors: string[] = [];
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    if (!value) continue;
+    buffer += value;
+    const lines = buffer.split('\n');
+    buffer = lines.pop() ?? '';
+    for (const line of lines) {
+      const trimmed = line.trim();
+      if (!trimmed || !trimmed.startsWith('data:')) continue;
+      const raw = trimmed.slice('data:'.length).trim();
+      let event: { type?: string; data?: unknown } | null = null;
+      try {
+        event = JSON.parse(raw) as { type?: string; data?: unknown };
+      } catch {
+        continue;
+      }
+      if (!event?.type) continue;
+      const payload = parseSSEPayload(event.data);
+      if (event.type === 'text') {
+        text += typeof payload === 'string' ? payload : String(payload ?? '');
+        continue;
+      }
+      if (event.type === 'result' && payload && typeof payload === 'object') {
+        const result = payload as {
+          session_id?: string;
+          usage?: { input_tokens?: number; output_tokens?: number };
+          is_error?: boolean;
+        };
+        if (result.session_id) sessionId = result.session_id;
+        usage.input = Number(result.usage?.input_tokens ?? usage.input);
+        usage.output = Number(result.usage?.output_tokens ?? usage.output);
+        if (result.is_error) errors.push('upstream reported error');
+        continue;
+      }
+      if (event.type === 'error') {
+        errors.push(typeof payload === 'string' ? payload : JSON.stringify(payload));
+      }
+    }
+  }
+
+  return { text, usage, sessionId, errors };
+}
+
 async function readRequestBody<T>(request: Request): Promise<T> {
   const text = await request.text();
   if (!text) return {} as T;
@@ -382,6 +532,82 @@ export function createPlatformApp(options: CreatePlatformAppOptions): PlatformAp
           bridge: getBridgeStatusForApi(),
           runningInstances: options.instanceManager.listRunningInstanceIds(),
           rssMb: Math.round(mem.rss / 1024 / 1024 * 10) / 10,
+        });
+      }
+
+      if (request.method === 'POST' && pathname === '/v1/chat/completions') {
+        if (!hasBridgeContext()) {
+          return jsonResponse(
+            { error: { message: 'bridge context not initialized', type: 'server_error' } },
+            503,
+          );
+        }
+        const body = await readRequestBody<OpenAIChatCompletionsRequest>(request);
+        if (!body?.messages?.length) {
+          return jsonResponse(
+            { error: { message: 'messages is required', type: 'invalid_request_error' } },
+            400,
+          );
+        }
+        if (body.stream) {
+          return jsonResponse(
+            { error: { message: 'stream=true is not supported yet', type: 'invalid_request_error' } },
+            400,
+          );
+        }
+        const { prompt, files } = parseOpenAIMessagesAsPrompt(body.messages);
+        if (!prompt) {
+          return jsonResponse(
+            { error: { message: 'messages content is empty', type: 'invalid_request_error' } },
+            400,
+          );
+        }
+
+        const requestId = `chatcmpl-${crypto.randomUUID()}`;
+        const model = body.model || process.env.CTI_COPILOT_MODEL || 'copilot';
+        const ctx = getBridgeContext();
+        const stream = ctx.llm.streamChat({
+          prompt,
+          files,
+          sessionId: requestId,
+          model,
+          workingDirectory: process.cwd(),
+          disableLlmStreaming: true,
+        });
+        const completion = await collectProviderResponse(stream);
+        if (completion.errors.length > 0 && !completion.text.trim()) {
+          return jsonResponse(
+            {
+              error: {
+                message: completion.errors[0],
+                type: 'upstream_error',
+              },
+            },
+            502,
+          );
+        }
+
+        return jsonResponse({
+          id: requestId,
+          object: 'chat.completion',
+          created: Math.floor(Date.now() / 1000),
+          model,
+          choices: [
+            {
+              index: 0,
+              message: {
+                role: 'assistant',
+                content: completion.text,
+              },
+              finish_reason: completion.errors.length > 0 ? 'length' : 'stop',
+            },
+          ],
+          usage: {
+            prompt_tokens: completion.usage.input,
+            completion_tokens: completion.usage.output,
+            total_tokens: completion.usage.input + completion.usage.output,
+          },
+          ...(completion.sessionId ? { _session_id: completion.sessionId } : {}),
         });
       }
 
