@@ -3,7 +3,7 @@
 set -euo pipefail
 
 BASE_URL="${BASE_URL:-http://127.0.0.1:3300}"
-MODEL="${MODEL:-gpt-5.1-mini}"
+MODEL="${MODEL:-gpt-5-mini}"
 MODE="all"
 TEXT_PROMPT=""
 IMAGE_URL=""
@@ -18,7 +18,7 @@ usage() {
 选项:
   -h, --help              显示本帮助并退出
   --base-url URL          服务根地址 (默认: http://127.0.0.1:3300)
-  --model MODEL           模型名 (默认: gpt-5.1-mini)
+  --model MODEL           模型名 (默认: gpt-5-mini)
   --all                   依次运行文本测试与图文混合测试 (默认)
   --text-only             仅运行纯文本请求
   --vision                仅运行文本 + image_url 混合请求
