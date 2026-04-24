@@ -303,6 +303,8 @@ interface OpenAIChatCompletionsRequest {
   stream?: boolean;
   temperature?: number;
   max_tokens?: number;
+  session_id?: string;
+  working_directory?: string;
 }
 
 interface ParsedOpenAIPrompt {
@@ -359,6 +361,20 @@ export function parseOpenAIMessagesAsPrompt(messages: OpenAIChatMessage[]): Pars
   }
 
   return { prompt: lines.join('\n\n').trim(), files };
+}
+
+function parseSingleOpenAIMessageAsPrompt(message: OpenAIChatMessage): ParsedOpenAIPrompt {
+  return parseOpenAIMessagesAsPrompt([message]);
+}
+
+function findLatestUserMessage(messages: OpenAIChatMessage[]): OpenAIChatMessage | null {
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const msg = messages[index];
+    if (msg?.role !== 'user') continue;
+    if (typeof msg.content === 'string' && msg.content.trim()) return msg;
+    if (Array.isArray(msg.content) && msg.content.length > 0) return msg;
+  }
+  return null;
 }
 
 function parseSSEPayload(data: unknown): unknown {
@@ -557,23 +573,45 @@ export function createPlatformApp(options: CreatePlatformAppOptions): PlatformAp
             400,
           );
         }
-        const { prompt, files } = parseOpenAIMessagesAsPrompt(body.messages);
+        const sdkSessionId = body.session_id?.trim() || undefined;
+        const parsed = sdkSessionId
+          ? (() => {
+              const latestUserMessage = findLatestUserMessage(body.messages);
+              if (!latestUserMessage) {
+                return {
+                  prompt: '',
+                  files: [],
+                } satisfies ParsedOpenAIPrompt;
+              }
+              return parseSingleOpenAIMessageAsPrompt(latestUserMessage);
+            })()
+          : parseOpenAIMessagesAsPrompt(body.messages);
+        const { prompt, files } = parsed;
         if (!prompt) {
           return jsonResponse(
-            { error: { message: 'messages content is empty', type: 'invalid_request_error' } },
+            {
+              error: {
+                message: sdkSessionId
+                  ? 'latest user message content is empty'
+                  : 'messages content is empty',
+                type: 'invalid_request_error',
+              },
+            },
             400,
           );
         }
 
         const requestId = `chatcmpl-${crypto.randomUUID()}`;
         const model = body.model || process.env.CTI_COPILOT_MODEL || 'copilot';
+        const workingDirectory = body.working_directory?.trim() || process.cwd();
         const ctx = getBridgeContext();
         const stream = ctx.llm.streamChat({
           prompt,
           files,
           sessionId: requestId,
+          sdkSessionId,
           model,
-          workingDirectory: process.cwd(),
+          workingDirectory,
           disableLlmStreaming: true,
         });
         const completion = await collectProviderResponse(stream);
@@ -609,7 +647,9 @@ export function createPlatformApp(options: CreatePlatformAppOptions): PlatformAp
             completion_tokens: completion.usage.output,
             total_tokens: completion.usage.input + completion.usage.output,
           },
-          ...(completion.sessionId ? { _session_id: completion.sessionId } : {}),
+          ...(completion.sessionId
+            ? { _session_id: completion.sessionId, session_id: completion.sessionId }
+            : {}),
         });
       }
 
