@@ -16,7 +16,7 @@ export const STANDARD_PROXY_KEYS = [
   'all_proxy',
 ] as const;
 
-export type SubprocessRuntimeKind = 'claude' | 'codex' | 'cursor' | 'copilot' | 'auto';
+export type SubprocessRuntimeKind = 'claude' | 'codex' | 'cursor' | 'copilot' | 'opencode' | 'auto';
 
 /**
  * Remove conventional proxy env vars from a child env so CLIs do not pick up a
@@ -65,6 +65,7 @@ export function applySubprocessProxyPolicyForRuntime(
       applyStandardProxyEnvFromCtiProxy(env, { force: true });
       break;
     case 'copilot':
+    case 'opencode':
       applyStandardProxyEnvFromCtiProxy(env, { force: true });
       break;
   }

@@ -11,7 +11,7 @@ import {
 } from '../../config-shared';
 
 const IM_INSTANCE_CHANNELS: ImInstanceChannel[] = ['telegram', 'discord', 'feishu', 'qq'];
-const RUNTIMES = ['claude', 'codex', 'cursor', 'copilot'] as const;
+const RUNTIMES = ['claude', 'codex', 'cursor', 'copilot', 'opencode'] as const;
 const RUNNER_MODES = ['code', 'plan', 'ask'] as const;
 
 async function readJsonFromResponse(res: Response): Promise<unknown> {
@@ -1315,6 +1315,22 @@ export default function AdminPage() {
                           </label>
                         </div>
                       )}
+                      {prof.runtime === 'opencode' && (
+                        <div
+                          className="ui-grid"
+                          style={{ marginTop: '0.75rem', marginBottom: '0.75rem' }}
+                        >
+                          <label className="ui-field">
+                            <span>OpenCode CLI 路径</span>
+                            <input
+                              value={prof.opencodeExecutable ?? ''}
+                              onChange={(e) =>
+                                updateImRunner(ridx, { opencodeExecutable: e.target.value || undefined })
+                              }
+                            />
+                          </label>
+                        </div>
+                      )}
                     </div>
                   ))}
                   <button type="button" className="ui-btn secondary" style={{ marginTop: '0.5rem' }} onClick={() => addImRunner()}>
@@ -1625,6 +1641,22 @@ export default function AdminPage() {
                                       value={slaveProf.copilotExecutable ?? ''}
                                       onChange={(e) =>
                                         updateSlave({ copilotExecutable: e.target.value || undefined })
+                                      }
+                                    />
+                                  </label>
+                                </div>
+                              )}
+                              {slaveProf.runtime === 'opencode' && (
+                                <div
+                                  className="ui-grid"
+                                  style={{ marginTop: '0.75rem', marginBottom: '0.75rem' }}
+                                >
+                                  <label className="ui-field">
+                                    <span>OpenCode CLI 路径</span>
+                                    <input
+                                      value={slaveProf.opencodeExecutable ?? ''}
+                                      onChange={(e) =>
+                                        updateSlave({ opencodeExecutable: e.target.value || undefined })
                                       }
                                     />
                                   </label>

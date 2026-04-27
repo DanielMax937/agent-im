@@ -419,7 +419,7 @@ Loader: `renderPrompt(name, vars?)` — loads `.md` file relative to `process.cw
 | `CTI_HOME` | Explicit bot data directory | — |
 | `CTI_BOT_NAME` | Slug under `CTI_BASE` | — |
 | `CTI_BASE` | Base directory | `~/.claude-to-im` |
-| `CTI_RUNTIME` | Default AI runtime (`claude`/`codex`/`cursor`/`copilot`) | `claude` |
+| `CTI_RUNTIME` | Default AI runtime (`claude`/`codex`/`cursor`/`copilot`/`opencode`) | `claude` |
 | `CTI_RUNNERS` | JSON array of `RunnerConfig` | — |
 | `CTI_AUTO_APPROVE` | Auto-approve all tool permissions | — |
 | `CTI_AUTO_REDIS_URL` | Redis URL for auto-mode | — |

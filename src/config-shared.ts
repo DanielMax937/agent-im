@@ -4,7 +4,7 @@
  */
 
 /** Single selectable backend for bridge or platform (matches `CTI_RUNTIME` values). */
-export type RuntimeKind = "claude" | "codex" | "cursor" | "copilot";
+export type RuntimeKind = "claude" | "codex" | "cursor" | "copilot" | "opencode";
 
 /**
  * Parse runtime from config JSON / env. Legacy `auto` is treated as `claude`.
@@ -12,7 +12,7 @@ export type RuntimeKind = "claude" | "codex" | "cursor" | "copilot";
  */
 export function parseRunnerRuntimeKind(raw: unknown): RuntimeKind | null {
   if (typeof raw !== "string") return null;
-  if (raw === "codex" || raw === "cursor" || raw === "copilot") return raw;
+  if (raw === "codex" || raw === "cursor" || raw === "copilot" || raw === "opencode") return raw;
   if (raw === "claude" || raw === "auto") return "claude";
   return null;
 }
@@ -50,6 +50,8 @@ export interface RunnerConfig {
   cursorDefaultModel?: string;
   /** GitHub Copilot CLI (`copilot`) binary path. */
   copilotExecutable?: string;
+  /** OpenCode CLI (`opencode`) binary path. */
+  opencodeExecutable?: string;
   /**
    * Extra env vars merged into the subprocess when this runner spawns its CLI/SDK
    * (after `buildSubprocessEnv*`). Use for Auto slave with a different `ANTHROPIC_*`

@@ -105,7 +105,7 @@ export function buildSubprocessEnv(): NodeJS.ProcessEnv {
 }
 
 export interface BuildSubprocessEnvOptions {
-  runtime?: 'claude' | 'codex' | 'cursor' | 'copilot' | 'auto';
+  runtime?: 'claude' | 'codex' | 'cursor' | 'copilot' | 'opencode' | 'auto';
   useLogin?: boolean;
 }
 
@@ -114,7 +114,7 @@ export function buildSubprocessEnvForRuntime(
 ): NodeJS.ProcessEnv {
   const mode = process.env.CTI_ENV_ISOLATION || 'inherit';
   const out = {} as NodeJS.ProcessEnv;
-  const runtime = options.runtime || (process.env.CTI_RUNTIME as 'claude' | 'codex' | 'cursor' | 'copilot' | 'auto' | undefined) || 'claude';
+  const runtime = options.runtime || (process.env.CTI_RUNTIME as 'claude' | 'codex' | 'cursor' | 'copilot' | 'opencode' | 'auto' | undefined) || 'claude';
   const useLogin = options.useLogin === true;
 
   if (mode === 'inherit') {
@@ -140,8 +140,8 @@ export function buildSubprocessEnvForRuntime(
       }
     }
 
-    // In codex/cursor/copilot mode, pass through provider-related env vars
-    if (runtime === 'codex' || runtime === 'cursor' || runtime === 'copilot' || runtime === 'auto') {
+    // In codex/cursor/copilot/opencode mode, pass through provider-related env vars
+    if (runtime === 'codex' || runtime === 'cursor' || runtime === 'copilot' || runtime === 'opencode' || runtime === 'auto') {
       for (const [k, v] of Object.entries(process.env)) {
         if (v === undefined) continue;
         if (
@@ -150,7 +150,8 @@ export function buildSubprocessEnvForRuntime(
           k.startsWith('CURSOR_') ||
           k.startsWith('GITHUB_') ||
           k.startsWith('GH_') ||
-          k.startsWith('COPILOT_')
+          k.startsWith('COPILOT_') ||
+          k.startsWith('OPENCODE_')
         ) {
           out[k] = v;
         }
@@ -278,6 +279,20 @@ export const COPILOT_PROVIDER_LOG_ENV_KEYS = [
   'CTI_COPILOT_EXECUTABLE',
   'GITHUB_TOKEN',
   'GH_TOKEN',
+] as const;
+
+/** Env keys logged for OpenCode CLI subprocess. */
+export const OPENCODE_PROVIDER_LOG_ENV_KEYS = [
+  ...PROVIDER_LOG_PROXY_KEYS,
+  'CTI_ENV_ISOLATION',
+  'CTI_RUNTIME',
+  'CTI_OPENCODE_MODEL',
+  'CTI_OPENCODE_EXECUTABLE',
+  'OPENCODE_CONFIG',
+  'OPENCODE_CONFIG_DIR',
+  'OPENCODE_SERVER_PASSWORD',
+  'OPENAI_API_KEY',
+  'ANTHROPIC_API_KEY',
 ] as const;
 
 function maskEnvScalar(value: string): string {

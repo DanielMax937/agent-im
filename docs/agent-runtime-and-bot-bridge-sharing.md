@@ -84,11 +84,11 @@ interface LLMProvider {
 
 一个 runner 可以声明：
 
-- `runtime`：`claude`、`codex`、`cursor`、`copilot`。
+- `runtime`：`claude`、`codex`、`cursor`、`copilot`、`opencode`。
 - `defaultModel`：该 runner 默认模型。
 - `defaultMode`：默认聊天模式。
 - `autoApprove`：是否自动放行工具权限。
-- `claudeExecutable` / `codexExecutable` / `cursorExecutable` / `copilotExecutable`：指定 CLI 路径。
+- `claudeExecutable` / `codexExecutable` / `cursorExecutable` / `copilotExecutable` / `opencodeExecutable`：指定 CLI 路径。
 - `claudeUseLogin` / `codexUseLogin`：使用本机 CLI 登录态，而不是 API key。
 - `subprocessEnv`：给该 runner 注入额外环境变量。
 

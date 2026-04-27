@@ -22,7 +22,7 @@ should_forward_shell_env_var() {
     HOME|PATH|USER|LOGNAME|SHELL|LANG|TMPDIR|TEMP|TMP|TERM|COLORTERM|LC_ALL|LC_CTYPE|NODE_EXTRA_CA_CERTS|SSH_AUTH_SOCK|XDG_CONFIG_HOME|XDG_DATA_HOME|XDG_CACHE_HOME)
       return 0
       ;;
-    OPENAI_*|ANTHROPIC_*|CODEX_*|CURSOR_*|GITHUB_*|GH_*|COPILOT_*|HTTP_PROXY|HTTPS_PROXY|ALL_PROXY|NO_PROXY|http_proxy|https_proxy|all_proxy|no_proxy)
+    OPENAI_*|ANTHROPIC_*|CODEX_*|CURSOR_*|GITHUB_*|GH_*|COPILOT_*|OPENCODE_*|HTTP_PROXY|HTTPS_PROXY|ALL_PROXY|NO_PROXY|http_proxy|https_proxy|all_proxy|no_proxy)
       return 0
       ;;
     *)

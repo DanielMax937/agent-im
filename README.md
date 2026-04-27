@@ -141,6 +141,7 @@ The platform can run different providers behind the same workflow model:
 - Codex
 - Cursor
 - Copilot
+- OpenCode
 
 This makes runner selection a project / lane concern instead of a product fork.
 

@@ -70,6 +70,16 @@ export async function resolveProvider({
     });
   }
 
+  if (runtime === 'opencode') {
+    const { OpenCodeProvider } = await import('./opencode-provider');
+    return new OpenCodeProvider(undefined, {
+      opencodeExecutable: runner?.opencodeExecutable,
+      defaultModel: runner?.defaultModel,
+      subprocessEnv: runner?.subprocessEnv,
+      autoApprove,
+    });
+  }
+
   const cliPath = resolveClaudeCliPathFromRunner(runner);
   if (!cliPath) {
     throw new Error(

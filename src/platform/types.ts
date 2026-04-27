@@ -1,4 +1,4 @@
-export type AgentRuntime = 'claude' | 'codex' | 'cursor' | 'copilot';
+export type AgentRuntime = 'claude' | 'codex' | 'cursor' | 'copilot' | 'opencode';
 export type AgentRole = 'developer' | 'reviewer' | 'tester';
 /**
  * Kanban columns:

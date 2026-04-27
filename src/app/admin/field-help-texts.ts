@@ -41,12 +41,12 @@ export const FIELD_HELP = {
     def: 'Default / 默认',
   },
   runner_runtime: {
-    detail: '该 Runner 使用的后端：claude、codex、cursor 或 copilot（GitHub Copilot CLI）。',
+    detail: '该 Runner 使用的后端：claude、codex、cursor、copilot（GitHub Copilot CLI）或 opencode。',
     def: '与顶层 CTI_RUNTIME 一致',
   },
   runner_defaultModel: {
     detail:
-      '绑定到该 Runner 的会话在未指定模型时使用的默认模型；Claude、Codex、Cursor、Copilot 共用此字段。',
+      '绑定到该 Runner 的会话在未指定模型时使用的默认模型；Claude、Codex、Cursor、Copilot、OpenCode 共用此字段。',
     def: '空（继承桥接或 CLI 默认）',
   },
   runner_defaultMode: {
@@ -84,6 +84,10 @@ export const FIELD_HELP = {
   },
   runner_copilotExecutable: {
     detail: 'GitHub Copilot CLI（copilot）可执行文件路径；不填则用 CTI_COPILOT_EXECUTABLE 或 PATH 中的 copilot。默认模型使用上方 Runner 的「默认模型」字段。',
+    def: '空',
+  },
+  runner_opencodeExecutable: {
+    detail: 'OpenCode CLI（opencode）可执行文件路径；不填则用 CTI_OPENCODE_EXECUTABLE 或 PATH 中的 opencode。auto approve 会传 --dangerously-skip-permissions。',
     def: '空',
   },
   tgBotToken: {

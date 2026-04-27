@@ -9,8 +9,10 @@ import {
 
 test('IM LLM key prefixes include secondary enabled channels for one bot instance', () => {
   const savedBotName = process.env.CTI_BOT_NAME;
+  const savedCtiHome = process.env.CTI_HOME;
   try {
     process.env.CTI_BOT_NAME = 'mybot';
+    delete process.env.CTI_HOME;
     const config: Config = {
       runtime: 'claude',
       enabledChannels: ['discord', 'telegram'],
@@ -42,5 +44,7 @@ test('IM LLM key prefixes include secondary enabled channels for one bot instanc
   } finally {
     if (savedBotName === undefined) delete process.env.CTI_BOT_NAME;
     else process.env.CTI_BOT_NAME = savedBotName;
+    if (savedCtiHome === undefined) delete process.env.CTI_HOME;
+    else process.env.CTI_HOME = savedCtiHome;
   }
 });

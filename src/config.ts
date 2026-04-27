@@ -167,6 +167,7 @@ export function buildSlaveEnvFromRunner(
   if (runner.codexExecutable) env.CTI_CODEX_EXECUTABLE = runner.codexExecutable;
   if (runner.cursorExecutable) env.CTI_CURSOR_EXECUTABLE = runner.cursorExecutable;
   if (runner.copilotExecutable) env.CTI_COPILOT_EXECUTABLE = runner.copilotExecutable;
+  if (runner.opencodeExecutable) env.CTI_OPENCODE_EXECUTABLE = runner.opencodeExecutable;
   // Carry forward Auto mode Redis settings so the slave bridge can connect
   if (spec.autoRedisUrl) env.CTI_AUTO_REDIS_URL = spec.autoRedisUrl;
   if (spec.autoRedisNamespace) env.CTI_AUTO_REDIS_NAMESPACE = spec.autoRedisNamespace;
@@ -471,6 +472,7 @@ export function runnerFromRow(o: Record<string, unknown>): RunnerConfig | null {
     cursorExecutable: pickRunnerStrRow(o, "cursorExecutable"),
     cursorDefaultModel: pickRunnerStrRow(o, "cursorDefaultModel"),
     copilotExecutable: pickRunnerStrRow(o, "copilotExecutable"),
+    opencodeExecutable: pickRunnerStrRow(o, "opencodeExecutable"),
     subprocessEnv: pickRunnerSubprocessEnvRow(o),
   };
 }
@@ -1272,10 +1274,10 @@ function validateRunnerList(runners: RunnerConfig[] | undefined, pathLabel: stri
   for (let index = 0; index < runners.length; index += 1) {
     const runner = runners[index];
     const runtime = runner.runtime;
-    if (runtime !== 'claude' && runtime !== 'codex' && runtime !== 'cursor' && runtime !== 'copilot') {
+    if (runtime !== 'claude' && runtime !== 'codex' && runtime !== 'cursor' && runtime !== 'copilot' && runtime !== 'opencode') {
       throw new Error(
         `${pathLabel}[${index}] has unsupported runtime "${String(runtime)}". ` +
-          'Allowed values: claude, codex, cursor, copilot.',
+          'Allowed values: claude, codex, cursor, copilot, opencode.',
       );
     }
   }
