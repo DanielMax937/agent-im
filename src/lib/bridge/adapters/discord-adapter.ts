@@ -129,6 +129,8 @@ export class DiscordAdapter extends BaseChannelAdapter {
         resolveAutoRedisBridgeSlug(cfg),
         masterRunnerIds,
         slaveRunnerId,
+        undefined,
+        defaultRunner,
       );
       try {
         await this.autoModeRedis.connect();

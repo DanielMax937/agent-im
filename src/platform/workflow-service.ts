@@ -20,7 +20,7 @@ import {
   normalizeBatchTaskPlan,
   type BatchTaskPlanItem,
 } from './batch-task-spec';
-import { BOARD_BRAINSTORM_SYSTEM, type BoardBrainstormChatInput } from './board-brainstorm';
+import { buildBoardBrainstormSystemPrompt, type BoardBrainstormChatInput } from './board-brainstorm';
 import { CompensationService } from './compensation-service';
 import { getKanbanLogger } from './kanban-logger';
 import { preferredSkillsForProjectLane, resolveKanbanAgent } from './kanban-agents';
@@ -3243,14 +3243,12 @@ export class WorkflowService {
       autoApproveOverride: false,
     });
     const laneHints = preferredSkillsForProjectLane(project, 'codex-senior');
-    const fw = project.vercelDeploymentFramework?.trim();
-    const systemPrompt = [
-      BOARD_BRAINSTORM_SYSTEM,
-      '',
-      ...(fw ? [`Vercel framework preset for this project: ${fw}.`, ''] : []),
-      'Lane skill hints (optional):',
-      ...laneHints.map((h) => `- ${h}`),
-    ].join('\n');
+    const systemPrompt = buildBoardBrainstormSystemPrompt({
+      intent: input.intent,
+      currentDraft: input.currentDraft,
+      vercelFramework: project.vercelDeploymentFramework,
+      laneHints,
+    });
 
     return provider.streamChat({
       prompt: input.message,

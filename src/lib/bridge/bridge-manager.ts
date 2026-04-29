@@ -115,8 +115,9 @@ async function syncHybridAutoModeSyntheticWorkingDirectory(
   const channelType = adapter.channelType;
   const masterRows = normalizeRunnersForChannelType(cfg, channelType);
   const masterIds = masterRows.map((r) => r.id);
-  const masterRid = masterIds[0] ?? 'default';
   const defaultRunner = getBridgeContext().getDefaultRunnerIdForChannelType?.(channelType);
+  const masterRid =
+    (defaultRunner && masterIds.includes(defaultRunner) ? defaultRunner : masterIds[0]) ?? 'default';
   const slaveRunnerId = resolveAutoSlaveRunnerId(
     store,
     channelType,

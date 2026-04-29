@@ -214,6 +214,8 @@ export class AutoModeRedisTransport {
     private readonly masterRunnerIds: string[],
     private readonly slaveRunnerId: string,
     private readonly getMirrorChatId?: () => string | null,
+    /** Preferred master runner id (from defaultRunnerId config). Falls back to masterRunnerIds[0]. */
+    private readonly defaultRunnerId?: string,
   ) {}
 
   private keyMaster(suffix: AutoRedisQueueSuffix): string {
@@ -690,7 +692,10 @@ export class AutoModeRedisTransport {
     const raw = await this.client.rPop(this.keyMaster('input'));
     if (!raw) return null;
     const payload = decodeQueuePayload(raw);
-    const rid = this.masterRunnerIds[0] ?? 'default';
+    const rid =
+      (this.defaultRunnerId && this.masterRunnerIds.includes(this.defaultRunnerId)
+        ? this.defaultRunnerId
+        : this.masterRunnerIds[0]) ?? 'default';
     const chatId = payload.outboundChatId
       ? `auto:master:${this.bridgeSlug}:${this.channelType}:${encodeChatSegment(payload.outboundChatId)}:${rid}`
       : `auto:master:${this.bridgeSlug}:${this.channelType}:${rid}`;

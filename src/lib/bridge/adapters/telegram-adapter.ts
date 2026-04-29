@@ -184,6 +184,7 @@ export class TelegramAdapter extends BaseChannelAdapter {
         masterRunnerIds,
         slaveRunnerId,
         () => this.hybridMirrorChatId || this.imGet('telegram_chat_id') || null,
+        defaultRunner,
       );
       try {
         await this.autoModeRedis.connect();
@@ -236,6 +237,8 @@ export class TelegramAdapter extends BaseChannelAdapter {
         bridgeSlug,
         masterRunnerIds,
         slaveRunnerId,
+        undefined,
+        defaultRunner,
       );
       try {
         await this.autoModeRedis.connect();

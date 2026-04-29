@@ -145,6 +145,16 @@ function formatHistoryCommentMeta(c: TaskHistoryComment, workflowLabel: (s: Task
 }
 
 type TaskDetailTab = 'overview' | 'history' | 'dialog';
+type BrainstormDraftMode = 'idle' | 'generating' | 'revising';
+
+type BrainstormDraft = {
+  id: string;
+  version: number;
+  title: string;
+  content: string;
+  sourceMessageCount: number;
+  createdAt: string;
+};
 
 type KanbanStatus = {
   projects: Project[];
@@ -208,6 +218,10 @@ export default function BoardPage() {
   >([]);
   const [brainstormInput, setBrainstormInput] = useState('');
   const [brainstormStreaming, setBrainstormStreaming] = useState(false);
+  const [brainstormDrafts, setBrainstormDrafts] = useState<BrainstormDraft[]>([]);
+  const [selectedDraftId, setSelectedDraftId] = useState('');
+  const [draftMode, setDraftMode] = useState<BrainstormDraftMode>('idle');
+  const [revisionInstruction, setRevisionInstruction] = useState('');
   /** 待办领取弹窗：当前选中的任务；null 表示关闭 */
   const [assignModalTask, setAssignModalTask] = useState<TaskSession | null>(null);
   const [modalHandoff, setModalHandoff] = useState('');
@@ -256,6 +270,11 @@ export default function BoardPage() {
   );
   effectiveProjectIdRef.current = effectiveProjectId;
   assignModalTaskIdRef.current = assignModalTask?.id ?? null;
+
+  const selectedDraft = useMemo(
+    () => brainstormDrafts.find((d) => d.id === selectedDraftId) ?? brainstormDrafts[brainstormDrafts.length - 1] ?? null,
+    [brainstormDrafts, selectedDraftId],
+  );
 
   const modalTodoAssignOptions = useMemo(() => {
     if (!laneMembersByKind) return [];
@@ -708,7 +727,9 @@ export default function BoardPage() {
       setError('请先选择项目与迭代');
       return;
     }
-    const rawText = formatBrainstormTranscriptForBatch(brainstormMessages);
+    const rawText = selectedDraft?.content.trim()
+      ? `以下为已确认的结构化方案稿。请据此拆分为可执行的 Kanban 任务并标注依赖关系（后序任务依赖先序任务）。\n\n${selectedDraft.content.trim()}`
+      : formatBrainstormTranscriptForBatch(brainstormMessages);
     if (!rawText.trim()) {
       setError('请先与助手讨论并确认方案（对话内容不能为空）');
       return;
@@ -721,6 +742,72 @@ export default function BoardPage() {
     }
   }
 
+  async function streamBrainstormResponse(args: {
+    intent?: 'chat' | 'draft' | 'revise';
+    message: string;
+    conversationHistory: { role: 'user' | 'assistant'; content: string }[];
+    currentDraft?: string;
+    onText?: (content: string) => void;
+  }): Promise<string> {
+    const res = await fetch('/api/workflows/board-brainstorm/chat', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        projectId: effectiveProjectId,
+        sessionId: brainstormSessionId,
+        sdkSessionId: brainstormSdkSessionId ?? undefined,
+        intent: args.intent ?? 'chat',
+        message: args.message,
+        conversationHistory: args.conversationHistory,
+        currentDraft: args.currentDraft,
+      }),
+    });
+    if (!res.ok) {
+      throw new Error(await errorMessageFromApiResponse(res));
+    }
+    const reader = res.body?.getReader();
+    if (!reader) {
+      throw new Error('No response body');
+    }
+    const dec = new TextDecoder();
+    let buffer = '';
+    let assistantAcc = '';
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += dec.decode(value, { stream: true });
+      const lines = buffer.split('\n');
+      buffer = lines.pop() ?? '';
+      for (const line of lines) {
+        if (!line.startsWith('data: ')) continue;
+        let event: { type: string; data: string };
+        try {
+          event = JSON.parse(line.slice(6)) as { type: string; data: string };
+        } catch {
+          continue;
+        }
+        if (event.type === 'text') {
+          assistantAcc += event.data;
+          args.onText?.(assistantAcc);
+        }
+        if (event.type === 'error') {
+          throw new Error(event.data || 'Stream error');
+        }
+        if (event.type === 'status' || event.type === 'result') {
+          try {
+            const payload = JSON.parse(event.data) as { session_id?: string };
+            if (payload.session_id) {
+              setBrainstormSdkSessionId(payload.session_id);
+            }
+          } catch {
+            /* ignore */
+          }
+        }
+      }
+    }
+    return assistantAcc.trim();
+  }
+
   async function sendBrainstormMessage() {
     const text = brainstormInput.trim();
     if (!text || !effectiveProjectId || brainstormStreaming) return;
@@ -729,70 +816,22 @@ export default function BoardPage() {
     setBrainstormStreaming(true);
     setError(null);
     setBrainstormMessages((m) => [...m, { role: 'user', content: text }, { role: 'assistant', content: '' }]);
-    let assistantAcc = '';
     try {
-      const res = await fetch('/api/workflows/board-brainstorm/chat', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          projectId: effectiveProjectId,
-          sessionId: brainstormSessionId,
-          sdkSessionId: brainstormSdkSessionId ?? undefined,
-          message: text,
-          conversationHistory: priorHistory,
-        }),
-      });
-      if (!res.ok) {
-        setBrainstormMessages((m) => m.slice(0, -2));
-        throw new Error(await errorMessageFromApiResponse(res));
-      }
-      const reader = res.body?.getReader();
-      if (!reader) {
-        setBrainstormMessages((m) => m.slice(0, -2));
-        throw new Error('No response body');
-      }
-      const dec = new TextDecoder();
-      let buffer = '';
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        buffer += dec.decode(value, { stream: true });
-        const lines = buffer.split('\n');
-        buffer = lines.pop() ?? '';
-        for (const line of lines) {
-          if (!line.startsWith('data: ')) continue;
-          let event: { type: string; data: string };
-          try {
-            event = JSON.parse(line.slice(6)) as { type: string; data: string };
-          } catch {
-            continue;
-          }
-          if (event.type === 'text') {
-            assistantAcc += event.data;
-            setBrainstormMessages((prev) => {
-              const next = [...prev];
-              const last = next[next.length - 1];
-              if (last?.role === 'assistant') {
-                next[next.length - 1] = { role: 'assistant', content: assistantAcc };
-              }
-              return next;
-            });
-          }
-          if (event.type === 'error') {
-            throw new Error(event.data || 'Stream error');
-          }
-          if (event.type === 'status' || event.type === 'result') {
-            try {
-              const payload = JSON.parse(event.data) as { session_id?: string };
-              if (payload.session_id) {
-                setBrainstormSdkSessionId(payload.session_id);
-              }
-            } catch {
-              /* ignore */
+      await streamBrainstormResponse({
+        intent: 'chat',
+        message: text,
+        conversationHistory: priorHistory,
+        onText: (content) => {
+          setBrainstormMessages((prev) => {
+            const next = [...prev];
+            const last = next[next.length - 1];
+            if (last?.role === 'assistant') {
+              next[next.length - 1] = { role: 'assistant', content };
             }
-          }
-        }
-      }
+            return next;
+          });
+        },
+      });
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       setError(msg);
@@ -804,6 +843,77 @@ export default function BoardPage() {
       });
     } finally {
       setBrainstormStreaming(false);
+    }
+  }
+
+  async function generateBrainstormDraft() {
+    if (!effectiveProjectId || brainstormStreaming || draftMode !== 'idle' || brainstormMessages.length === 0) return;
+    setDraftMode('generating');
+    setError(null);
+    try {
+      const content = await streamBrainstormResponse({
+        intent: 'draft',
+        message: '请根据当前需求讨论生成结构化方案稿。',
+        conversationHistory: brainstormMessages,
+      });
+      if (!content) throw new Error('未生成方案稿内容');
+      const version = brainstormDrafts.length + 1;
+      const id =
+        typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
+          ? crypto.randomUUID()
+          : `draft-${Date.now()}`;
+      const draft: BrainstormDraft = {
+        id,
+        version,
+        title: `方案稿 v${version}`,
+        content,
+        sourceMessageCount: brainstormMessages.length,
+        createdAt: new Date().toISOString(),
+      };
+      setBrainstormDrafts((prev) => [...prev, draft]);
+      setSelectedDraftId(id);
+      setBrainstormMessages((prev) => [...prev, { role: 'assistant', content: `已生成方案稿 v${version}` }]);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setDraftMode('idle');
+    }
+  }
+
+  async function reviseBrainstormDraft() {
+    const instruction = revisionInstruction.trim();
+    if (!effectiveProjectId || brainstormStreaming || draftMode !== 'idle' || !selectedDraft || !instruction) return;
+    setDraftMode('revising');
+    setError(null);
+    try {
+      const content = await streamBrainstormResponse({
+        intent: 'revise',
+        message: instruction,
+        conversationHistory: brainstormMessages,
+        currentDraft: selectedDraft.content,
+      });
+      if (!content) throw new Error('未生成新版方案稿内容');
+      const version = brainstormDrafts.length + 1;
+      const id =
+        typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
+          ? crypto.randomUUID()
+          : `draft-${Date.now()}`;
+      const draft: BrainstormDraft = {
+        id,
+        version,
+        title: `方案稿 v${version}`,
+        content,
+        sourceMessageCount: brainstormMessages.length,
+        createdAt: new Date().toISOString(),
+      };
+      setBrainstormDrafts((prev) => [...prev, draft]);
+      setSelectedDraftId(id);
+      setRevisionInstruction('');
+      setBrainstormMessages((prev) => [...prev, { role: 'assistant', content: `已生成方案稿 v${version}` }]);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setDraftMode('idle');
     }
   }
 
@@ -2455,88 +2565,181 @@ export default function BoardPage() {
               <strong>{sprintId ? (sprints.find((s) => s.id === sprintId)?.name ?? sprintId) : '—'}</strong>
               （未在表单选项目时使用列表中的第一个项目；批量拆任务需已选迭代）
             </p>
-            <div
-              className="ui-task-detail-scroll"
-              style={{
-                flex: 1,
-                minHeight: 0,
-                overflow: 'auto',
-                border: '1px solid rgba(148, 163, 184, 0.2)',
-                borderRadius: 8,
-                padding: '12px',
-                marginBottom: '0.75rem',
-                background: 'rgba(15, 23, 42, 0.35)',
-              }}
-            >
-              {brainstormMessages.length === 0 ? (
-                <p className="ui-muted ui-small" style={{ margin: 0 }}>
-                  先用一句话说明你的目标；助手会复述理解并<strong>一次只问一个</strong>澄清问题，随后再带你收敛方案并整理成可保存的 plan 文档路径建议。
+            <div style={{ flex: 1, minHeight: 0, display: 'flex', gap: '0.75rem', flexWrap: 'wrap' }}>
+              <section style={{ flex: '1 1 520px', minWidth: 320, display: 'flex', flexDirection: 'column', minHeight: 0 }}>
+                <div
+                  className="ui-task-detail-scroll"
+                  style={{
+                    flex: 1,
+                    minHeight: 260,
+                    overflow: 'auto',
+                    border: '1px solid rgba(148, 163, 184, 0.2)',
+                    borderRadius: 8,
+                    padding: '12px',
+                    marginBottom: '0.75rem',
+                    background: 'rgba(15, 23, 42, 0.35)',
+                  }}
+                >
+                  {brainstormMessages.length === 0 ? (
+                    <p className="ui-muted ui-small" style={{ margin: 0 }}>
+                      先用一句话说明你的目标；助手会复述理解并<strong>一次只问一个</strong>澄清问题，随后再带你收敛方案并整理成可保存的 plan 文档路径建议。
+                    </p>
+                  ) : (
+                    brainstormMessages.map((msg, i) => (
+                      <div
+                        key={i}
+                        style={{
+                          marginBottom: '0.75rem',
+                          textAlign: msg.role === 'user' ? 'right' : 'left',
+                        }}
+                      >
+                        <span className="ui-muted ui-small" style={{ display: 'block', marginBottom: 4 }}>
+                          {msg.role === 'user' ? '你' : '高级开发'}
+                        </span>
+                        <div
+                          style={{
+                            display: 'inline-block',
+                            maxWidth: '100%',
+                            textAlign: 'left',
+                            padding: '8px 12px',
+                            borderRadius: 8,
+                            background:
+                              msg.role === 'user'
+                                ? 'rgba(59, 130, 246, 0.22)'
+                                : 'rgba(148, 163, 184, 0.12)',
+                            whiteSpace: 'pre-wrap',
+                            wordBreak: 'break-word',
+                          }}
+                        >
+                          {msg.content || (msg.role === 'assistant' && brainstormStreaming ? '…' : '')}
+                        </div>
+                      </div>
+                    ))
+                  )}
+                </div>
+                <label style={{ display: 'block', flexShrink: 0 }}>
+                  消息
+                  <textarea
+                    className="ui-input"
+                    style={{ width: '100%', minHeight: 88, marginTop: 6 }}
+                    value={brainstormInput}
+                    onChange={(e) => setBrainstormInput(e.target.value)}
+                    placeholder={
+                      brainstormMessages.length === 0
+                        ? '例如：希望为看板增加深色模式、或优化某条工作流…'
+                        : '回复上一问，或补充约束与验收标准…'
+                    }
+                    disabled={brainstormStreaming || busy || draftMode !== 'idle'}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
+                        e.preventDefault();
+                        void sendBrainstormMessage();
+                      }
+                    }}
+                  />
+                </label>
+              </section>
+              <aside
+                style={{
+                  flex: '0 1 460px',
+                  minWidth: 320,
+                  display: 'flex',
+                  flexDirection: 'column',
+                  minHeight: 0,
+                  border: '1px solid rgba(148, 163, 184, 0.22)',
+                  borderRadius: 8,
+                  padding: '12px',
+                  background: 'rgba(15, 23, 42, 0.28)',
+                }}
+              >
+                <div style={{ display: 'flex', justifyContent: 'space-between', gap: '0.5rem', alignItems: 'center' }}>
+                  <strong>方案稿</strong>
+                  {brainstormDrafts.length > 0 ? (
+                    <select className="ui-input" style={{ width: 150 }} value={selectedDraft?.id ?? ''} onChange={(e) => setSelectedDraftId(e.target.value)}>
+                      {brainstormDrafts.map((draft) => (
+                        <option key={draft.id} value={draft.id}>
+                          v{draft.version}
+                        </option>
+                      ))}
+                    </select>
+                  ) : null}
+                </div>
+                <p className="ui-muted ui-small" style={{ margin: '0.5rem 0' }}>
+                  {selectedDraft
+                    ? `${selectedDraft.title} · ${new Date(selectedDraft.createdAt).toLocaleString()} · 来源 ${selectedDraft.sourceMessageCount} 条消息`
+                    : draftMode === 'generating'
+                      ? '正在生成结构化方案稿…'
+                      : '先讨论需求，再生成方案稿。'}
                 </p>
-              ) : (
-                brainstormMessages.map((msg, i) => (
-                  <div
-                    key={i}
-                    style={{
-                      marginBottom: '0.75rem',
-                      textAlign: msg.role === 'user' ? 'right' : 'left',
+                <div
+                  className="ui-task-detail-scroll"
+                  style={{
+                    flex: 1,
+                    minHeight: 220,
+                    overflow: 'auto',
+                    border: '1px solid rgba(148, 163, 184, 0.16)',
+                    borderRadius: 8,
+                    padding: '10px',
+                    whiteSpace: 'pre-wrap',
+                    wordBreak: 'break-word',
+                    background: 'rgba(2, 6, 23, 0.2)',
+                  }}
+                >
+                  {draftMode === 'generating'
+                    ? '生成中…'
+                    : draftMode === 'revising'
+                      ? '改稿中…'
+                      : selectedDraft?.content || '暂无方案稿。'}
+                </div>
+                <label style={{ display: 'block', marginTop: '0.75rem' }}>
+                  改稿意见
+                  <textarea
+                    className="ui-input"
+                    style={{ width: '100%', minHeight: 72, marginTop: 6 }}
+                    value={revisionInstruction}
+                    onChange={(e) => setRevisionInstruction(e.target.value)}
+                    placeholder="例如：缩小范围，只保留 MVP；或把 UI 拆得更细…"
+                    disabled={!selectedDraft || brainstormStreaming || draftMode !== 'idle'}
+                  />
+                </label>
+                <div className="ui-actions-bar" style={{ marginTop: '0.75rem', display: 'flex', gap: '0.5rem', flexWrap: 'wrap' }}>
+                  <button
+                    type="button"
+                    className="ui-btn secondary"
+                    disabled={brainstormStreaming || draftMode !== 'idle' || brainstormMessages.length === 0 || !effectiveProjectId}
+                    onClick={() => void generateBrainstormDraft()}
+                  >
+                    {draftMode === 'generating' ? '生成中…' : '生成方案稿'}
+                  </button>
+                  <button
+                    type="button"
+                    className="ui-btn secondary"
+                    disabled={brainstormStreaming || draftMode !== 'idle' || !selectedDraft || !revisionInstruction.trim()}
+                    onClick={() => void reviseBrainstormDraft()}
+                  >
+                    {draftMode === 'revising' ? '改稿中…' : '按意见改稿'}
+                  </button>
+                  <button
+                    type="button"
+                    className="ui-btn ghost"
+                    disabled={!selectedDraft}
+                    onClick={() => {
+                      if (selectedDraft) void navigator.clipboard.writeText(selectedDraft.content);
                     }}
                   >
-                    <span
-                      className="ui-muted ui-small"
-                      style={{ display: 'block', marginBottom: 4 }}
-                    >
-                      {msg.role === 'user' ? '你' : '高级开发'}
-                    </span>
-                    <div
-                      style={{
-                        display: 'inline-block',
-                        maxWidth: '100%',
-                        textAlign: 'left',
-                        padding: '8px 12px',
-                        borderRadius: 8,
-                        background:
-                          msg.role === 'user'
-                            ? 'rgba(59, 130, 246, 0.22)'
-                            : 'rgba(148, 163, 184, 0.12)',
-                        whiteSpace: 'pre-wrap',
-                        wordBreak: 'break-word',
-                      }}
-                    >
-                      {msg.content || (msg.role === 'assistant' && brainstormStreaming ? '…' : '')}
-                    </div>
-                  </div>
-                ))
-              )}
+                    复制方案稿
+                  </button>
+                </div>
+              </aside>
             </div>
-            <label style={{ display: 'block', flexShrink: 0 }}>
-              消息
-              <textarea
-                className="ui-input"
-                style={{ width: '100%', minHeight: 88, marginTop: 6 }}
-                value={brainstormInput}
-                onChange={(e) => setBrainstormInput(e.target.value)}
-                placeholder={
-                  brainstormMessages.length === 0
-                    ? '例如：希望为看板增加深色模式、或优化某条工作流…'
-                    : '回复上一问，或补充约束与验收标准…'
-                }
-                disabled={brainstormStreaming || busy}
-                onKeyDown={(e) => {
-                  if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
-                    e.preventDefault();
-                    void sendBrainstormMessage();
-                  }
-                }}
-              />
-            </label>
             <div className="ui-actions-bar" style={{ marginTop: '0.75rem', display: 'flex', gap: '0.5rem', flexWrap: 'wrap' }}>
-              <button type="button" className="ui-btn ghost" disabled={brainstormStreaming} onClick={() => setBrainstormOpen(false)}>
+              <button type="button" className="ui-btn ghost" disabled={brainstormStreaming || draftMode !== 'idle'} onClick={() => setBrainstormOpen(false)}>
                 关闭
               </button>
               <button
                 type="button"
                 className="ui-btn secondary"
-                disabled={brainstormStreaming || batchPreviewLoading}
+                disabled={brainstormStreaming || batchPreviewLoading || draftMode !== 'idle'}
                 onClick={() => {
                   setBrainstormSessionId(
                     typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
@@ -2546,6 +2749,10 @@ export default function BoardPage() {
                   setBrainstormSdkSessionId(null);
                   setBrainstormMessages([]);
                   setBrainstormInput('');
+                  setBrainstormDrafts([]);
+                  setSelectedDraftId('');
+                  setRevisionInstruction('');
+                  setDraftMode('idle');
                   setError(null);
                 }}
               >
@@ -2558,34 +2765,37 @@ export default function BoardPage() {
                   brainstormStreaming ||
                   busy ||
                   batchPreviewLoading ||
+                  draftMode !== 'idle' ||
                   !effectiveProjectId ||
                   !sprintId ||
-                  brainstormMessages.length === 0
+                  (!selectedDraft && brainstormMessages.length === 0)
                 }
                 title={
                   !effectiveProjectId
                     ? '请先添加至少一个项目'
                     : !sprintId
                       ? '请先在下方「迭代」中选择当前迭代'
-                      : brainstormMessages.length === 0
-                        ? '先发送至少一条消息'
-                        : undefined
+                      : !selectedDraft && brainstormMessages.length === 0
+                        ? '先发送至少一条消息或生成方案稿'
+                        : selectedDraft
+                          ? `将使用 ${selectedDraft.title} 生成任务`
+                          : '未生成方案稿，将使用聊天记录生成任务'
                 }
                 onClick={() => void confirmBrainstormPlanAndOpenBatch()}
               >
-                {batchPreviewLoading ? '生成任务预览中…' : '确认方案并生成待办任务'}
+                {batchPreviewLoading ? '生成任务预览中…' : selectedDraft ? '确认当前稿并生成待办' : '用聊天记录生成待办'}
               </button>
               <button
                 type="button"
                 className="ui-btn primary"
-                disabled={brainstormStreaming || busy || !effectiveProjectId || !brainstormInput.trim()}
+                disabled={brainstormStreaming || busy || draftMode !== 'idle' || !effectiveProjectId || !brainstormInput.trim()}
                 onClick={() => void sendBrainstormMessage()}
               >
                 {brainstormStreaming ? '流式生成中…' : '发送'}
               </button>
             </div>
             <p className="ui-muted ui-small" style={{ marginTop: '0.5rem', marginBottom: 0 }}>
-              快捷键：⌘/Ctrl + Enter 发送。方案成熟后可点「确认方案并生成待办任务」打开批量创建；平时以助手引导的{' '}
+              快捷键：⌘/Ctrl + Enter 发送。方案成熟后先生成/改稿方案稿，再点「确认当前稿并生成待办」打开批量创建；平时以助手引导的{' '}
               <code className="ui-mono" style={{ fontSize: 12 }}>
                 docs/plans/
               </code>

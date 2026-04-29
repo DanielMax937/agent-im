@@ -30,7 +30,7 @@
     "ws": "^8.18.0"
   },
   "optionalDependencies": {
-    "@openai/codex-sdk": "^0.110.0",
+    "@openai/codex-sdk": "^0.124.0",
     "redis": "^4.7.0"
   },
   "devDependencies": {
