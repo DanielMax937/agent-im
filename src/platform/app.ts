@@ -21,12 +21,16 @@ import {
   listBridgeSlugs,
   loadConfig,
   loadKanbanPlatformConfig,
+  normalizeRunners,
   normalizeRunnersWithProcessEnvOverride,
+  type RunnerConfig,
 } from '../config';
 import { readMonitorMessages, readRunnerStatusForMonitor } from '../lib/monitor-messages';
 import { getLogger } from '../logger';
-import { getBridgeContext, hasBridgeContext } from '../lib/bridge/context';
-import type { FileAttachment } from '../lib/bridge/host';
+import { hasBridgeContext } from '../lib/bridge/context';
+import type { FileAttachment, LLMProvider } from '../lib/bridge/host';
+import { PendingPermissions } from '../permission-gateway';
+import { resolveProvider } from '../runtime-provider';
 import type {
   PendingApprovalRecord,
   Project,
@@ -312,6 +316,24 @@ interface ParsedOpenAIPrompt {
   files: FileAttachment[];
 }
 
+interface ParsedOpenAIModel {
+  provider: string;
+  runtimeModel: string;
+  key: string;
+}
+
+interface ApiSessionEnvelope {
+  v: 1;
+  provider: string;
+  model: string;
+  providerSessionId: string;
+}
+
+const API_SESSION_PREFIX = 'cti_';
+const apiProviderCache = new Map<string, Promise<LLMProvider>>();
+const apiProviderPermissions = new PendingPermissions();
+const apiSessionModelKeys = new Map<string, string>();
+
 export function parseBase64DataUrl(url: string): { mime: string; base64: string } | null {
   const match = /^data:([^;,]+);base64,(.+)$/i.exec(url.trim());
   if (!match) return null;
@@ -361,6 +383,111 @@ export function parseOpenAIMessagesAsPrompt(messages: OpenAIChatMessage[]): Pars
   }
 
   return { prompt: lines.join('\n\n').trim(), files };
+}
+
+export function parseOpenAIProviderModel(model: string | undefined): ParsedOpenAIModel | null {
+  const raw = model?.trim();
+  if (!raw) return null;
+  const slash = raw.indexOf('/');
+  if (slash <= 0 || slash === raw.length - 1) return null;
+  const provider = raw.slice(0, slash).trim().toLowerCase();
+  const runtimeModel = raw.slice(slash + 1).trim();
+  if (!provider || !runtimeModel || runtimeModel.includes('\0')) return null;
+  return {
+    provider,
+    runtimeModel,
+    key: `${provider}/${runtimeModel}`,
+  };
+}
+
+function encodeApiSessionId(session: ApiSessionEnvelope): string {
+  return `${API_SESSION_PREFIX}${Buffer.from(JSON.stringify(session), 'utf8').toString('base64url')}`;
+}
+
+function decodeApiSessionId(sessionId: string | undefined): ApiSessionEnvelope | null {
+  const raw = sessionId?.trim();
+  if (!raw?.startsWith(API_SESSION_PREFIX)) return null;
+  try {
+    const parsed = JSON.parse(Buffer.from(raw.slice(API_SESSION_PREFIX.length), 'base64url').toString('utf8')) as
+      Partial<ApiSessionEnvelope>;
+    if (
+      parsed.v !== 1 ||
+      typeof parsed.provider !== 'string' ||
+      typeof parsed.model !== 'string' ||
+      typeof parsed.providerSessionId !== 'string' ||
+      !parsed.provider ||
+      !parsed.model ||
+      !parsed.providerSessionId
+    ) {
+      return null;
+    }
+    return {
+      v: 1,
+      provider: parsed.provider,
+      model: parsed.model,
+      providerSessionId: parsed.providerSessionId,
+    };
+  } catch {
+    return null;
+  }
+}
+
+function runnerForOpenAIProvider(provider: string, runners: RunnerConfig[]): RunnerConfig | null {
+  const configured = runners.find((runner) => runner.id.toLowerCase() === provider);
+  if (configured) return configured;
+
+  if (provider === 'claude-login') return { id: provider, runtime: 'claude', claudeUseLogin: true };
+  if (provider === 'claude') return { id: provider, runtime: 'claude', claudeUseLogin: false };
+  if (provider === 'codex-login') return { id: provider, runtime: 'codex', codexUseLogin: true };
+  if (provider === 'codex') return { id: provider, runtime: 'codex', codexUseLogin: false };
+  if (provider === 'cursor') return { id: provider, runtime: 'cursor' };
+  if (provider === 'copilot') return { id: provider, runtime: 'copilot' };
+  if (provider === 'opencode') return { id: provider, runtime: 'opencode' };
+  return null;
+}
+
+async function resolveOpenAIProvider(parsed: ParsedOpenAIModel): Promise<LLMProvider> {
+  const cfg = loadKanbanPlatformConfig();
+  const runners = normalizeRunners(cfg);
+  const runner = runnerForOpenAIProvider(parsed.provider, runners);
+  if (!runner) {
+    throw new Error(`unknown provider: ${parsed.provider}`);
+  }
+  const cacheKey = JSON.stringify({
+    provider: parsed.provider,
+    runtime: runner.runtime,
+    claudeUseLogin: runner.claudeUseLogin === true,
+    codexUseLogin: runner.codexUseLogin === true,
+    runnerId: runner.id,
+  });
+  let cached = apiProviderCache.get(cacheKey);
+  if (!cached) {
+    cached = resolveProvider({
+      config: cfg,
+      pendingPermissions: apiProviderPermissions,
+      runtimeOverride: runner.runtime,
+      runner: {
+        ...runner,
+        defaultModel: undefined,
+        cursorDefaultModel: undefined,
+      },
+    });
+    apiProviderCache.set(cacheKey, cached);
+  }
+  return cached;
+}
+
+function resolveProviderSessionIdForModel(inputSessionId: string | undefined, parsed: ParsedOpenAIModel): string | undefined {
+  const raw = inputSessionId?.trim();
+  if (!raw) return undefined;
+  const envelope = decodeApiSessionId(raw);
+  if (envelope) {
+    if (`${envelope.provider}/${envelope.model}` !== parsed.key) return undefined;
+    return envelope.providerSessionId;
+  }
+  const knownKey = apiSessionModelKeys.get(raw);
+  if (knownKey && knownKey !== parsed.key) return undefined;
+  return raw;
 }
 
 function parseSingleOpenAIMessageAsPrompt(message: OpenAIChatMessage): ParsedOpenAIPrompt {
@@ -573,7 +700,34 @@ export function createPlatformApp(options: CreatePlatformAppOptions): PlatformAp
             400,
           );
         }
-        const sdkSessionId = body.session_id?.trim() || undefined;
+        const parsedModel = parseOpenAIProviderModel(body.model);
+        if (!parsedModel) {
+          return jsonResponse(
+            {
+              error: {
+                message: 'model must use provider/model format',
+                type: 'invalid_request_error',
+              },
+            },
+            400,
+          );
+        }
+        let llm: LLMProvider;
+        try {
+          llm = await resolveOpenAIProvider(parsedModel);
+        } catch (err) {
+          return jsonResponse(
+            {
+              error: {
+                message: err instanceof Error ? err.message : 'failed to resolve provider',
+                type: 'invalid_request_error',
+              },
+            },
+            400,
+          );
+        }
+
+        const sdkSessionId = resolveProviderSessionIdForModel(body.session_id, parsedModel);
         const parsed = sdkSessionId
           ? (() => {
               const latestUserMessage = findLatestUserMessage(body.messages);
@@ -602,10 +756,9 @@ export function createPlatformApp(options: CreatePlatformAppOptions): PlatformAp
         }
 
         const requestId = `chatcmpl-${crypto.randomUUID()}`;
-        const model = body.model || process.env.CTI_COPILOT_MODEL || 'copilot';
+        const model = parsedModel.runtimeModel;
         const workingDirectory = body.working_directory?.trim() || process.cwd();
-        const ctx = getBridgeContext();
-        const stream = ctx.llm.streamChat({
+        const stream = llm.streamChat({
           prompt,
           files,
           sessionId: requestId,
@@ -615,6 +768,18 @@ export function createPlatformApp(options: CreatePlatformAppOptions): PlatformAp
           disableLlmStreaming: true,
         });
         const completion = await collectProviderResponse(stream);
+        const apiSessionId = completion.sessionId
+          ? encodeApiSessionId({
+              v: 1,
+              provider: parsedModel.provider,
+              model: parsedModel.runtimeModel,
+              providerSessionId: completion.sessionId,
+            })
+          : undefined;
+        if (completion.sessionId) {
+          apiSessionModelKeys.set(completion.sessionId, parsedModel.key);
+          if (apiSessionId) apiSessionModelKeys.set(apiSessionId, parsedModel.key);
+        }
         if (completion.errors.length > 0 && !completion.text.trim()) {
           return jsonResponse(
             {
@@ -631,7 +796,7 @@ export function createPlatformApp(options: CreatePlatformAppOptions): PlatformAp
           id: requestId,
           object: 'chat.completion',
           created: Math.floor(Date.now() / 1000),
-          model,
+          model: parsedModel.key,
           choices: [
             {
               index: 0,
@@ -647,8 +812,8 @@ export function createPlatformApp(options: CreatePlatformAppOptions): PlatformAp
             completion_tokens: completion.usage.output,
             total_tokens: completion.usage.input + completion.usage.output,
           },
-          ...(completion.sessionId
-            ? { _session_id: completion.sessionId, session_id: completion.sessionId }
+          ...(apiSessionId
+            ? { _session_id: apiSessionId, session_id: apiSessionId }
             : {}),
         });
       }
