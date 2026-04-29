@@ -162,6 +162,23 @@ function overlaySlaveEnv(env: Map<string, string>, ctiHomeOverride?: string): vo
   }
 }
 
+function overlaySlaveRunnerSpec(
+  config: Config,
+  env: Map<string, string>,
+  runners: RunnerConfig[] | undefined,
+  defaultRunnerId: string | undefined,
+): void {
+  if (!isSlaveBridgeProcess() || !env.has("CTI_RUNNERS") || !config.imBot || !runners?.length) return;
+  const id = defaultRunnerId ?? config.imBot.autoSlaveRunner?.id?.trim() ?? runners[0]?.id;
+  const runner = runners.find((r) => r.id === id) ?? runners[0];
+  if (!runner) return;
+  config.imBot.autoSlaveRunner = {
+    ...config.imBot.autoSlaveRunner,
+    ...runner,
+    id: runner.id,
+  };
+}
+
 /** Build env var entries from a slave runner config + auto mode settings. */
 export function buildSlaveEnvFromRunner(
   runner: RunnerConfig,
@@ -1180,6 +1197,7 @@ export function loadConfig(ctiHomeOverride?: string): Config {
       base.imBot.runners = fallback.map((r) => ({ ...r }));
     }
   }
+  overlaySlaveRunnerSpec(base, env, runners, defaultRunnerId);
 
   applyImBotToFlatConfig(base, env);
   base.enabledChannels = effectiveEnabledChannels(base);

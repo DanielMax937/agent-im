@@ -593,6 +593,13 @@ describe('loadConfig/saveConfig round-trip', () => {
       ['slave', 'copilot', 'mimo-v2.5-pro'],
     ]);
     assert.equal(loaded.imBot?.id, 't');
+    assert.equal(loaded.imBot?.autoSlaveRunner?.id, 'slave');
+    assert.equal(loaded.imBot?.autoSlaveRunner?.runtime, 'copilot');
+    assert.equal(loaded.imBot?.autoSlaveRunner?.defaultModel, 'mimo-v2.5-pro');
+    assert.deepEqual(normalizeRunnersForChannelType(loaded, 'telegram:t').map((r) => [r.id, r.runtime, r.defaultModel]), [
+      ['master', 'codex', 'gpt-5.5'],
+      ['slave', 'copilot', 'mimo-v2.5-pro'],
+    ]);
   });
 
   it('keeps config.slave.env values after syncing config.env into a slave process env', () => {
