@@ -11,6 +11,7 @@ import {
   configForAdminResponse,
   saveConfig,
   loadConfig,
+  syncConfigFileToProcessEnv,
   invalidateBridgePathsCache,
   normalizeRunnersForChannelType,
   type Config,
@@ -415,16 +416,36 @@ describe('configForAdminResponse imBot', () => {
 describe('loadConfig/saveConfig round-trip', () => {
   let tmpDir: string;
   let origHome: string;
+  let savedSlaveBridge: string | undefined;
+  let savedRuntime: string | undefined;
+  let savedRunners: string | undefined;
+  let savedDefaultRunner: string | undefined;
+  let savedDefaultModel: string | undefined;
 
   beforeEach(() => {
     tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cti-config-test-'));
     origHome = process.env.HOME || '';
+    savedSlaveBridge = process.env.CTI_SLAVE_BRIDGE;
+    savedRuntime = process.env.CTI_RUNTIME;
+    savedRunners = process.env.CTI_RUNNERS;
+    savedDefaultRunner = process.env.CTI_DEFAULT_RUNNER;
+    savedDefaultModel = process.env.CTI_DEFAULT_MODEL;
     // loadConfig/saveConfig paths use getCtiHome() from env; round-trip uses configToSettings here.
     // so we test the parsing logic indirectly through configToSettings
   });
 
   afterEach(() => {
     process.env.HOME = origHome;
+    if (savedSlaveBridge === undefined) delete process.env.CTI_SLAVE_BRIDGE;
+    else process.env.CTI_SLAVE_BRIDGE = savedSlaveBridge;
+    if (savedRuntime === undefined) delete process.env.CTI_RUNTIME;
+    else process.env.CTI_RUNTIME = savedRuntime;
+    if (savedRunners === undefined) delete process.env.CTI_RUNNERS;
+    else process.env.CTI_RUNNERS = savedRunners;
+    if (savedDefaultRunner === undefined) delete process.env.CTI_DEFAULT_RUNNER;
+    else process.env.CTI_DEFAULT_RUNNER = savedDefaultRunner;
+    if (savedDefaultModel === undefined) delete process.env.CTI_DEFAULT_MODEL;
+    else process.env.CTI_DEFAULT_MODEL = savedDefaultModel;
     fs.rmSync(tmpDir, { recursive: true, force: true });
   });
 
@@ -533,6 +554,78 @@ describe('loadConfig/saveConfig round-trip', () => {
     );
     const loaded = loadConfig(tmpDir);
     assert.equal(loaded.autoLogStreamChunks, true);
+  });
+
+  it('overlays config.slave.env over config.env when loading a slave bridge config', () => {
+    fs.writeFileSync(
+      path.join(tmpDir, 'config.env'),
+      [
+        'CTI_RUNNERS=[{"id":"master","runtime":"codex","defaultModel":"gpt-5.5"}]',
+        'CTI_DEFAULT_RUNNER=master',
+        'CTI_RUNTIME=codex',
+        'CTI_ENABLED_CHANNELS=telegram',
+        `CTI_DEFAULT_WORKDIR=${process.cwd()}`,
+        'CTI_DEFAULT_MODEL=gpt-5.5',
+        'CTI_IM_BOT={"id":"t","channel":"telegram","runners":[{"id":"master","runtime":"codex","defaultModel":"gpt-5.5"}]}',
+        '',
+      ].join('\n'),
+      'utf-8',
+    );
+    fs.writeFileSync(
+      path.join(tmpDir, 'config.slave.env'),
+      [
+        'CTI_RUNNERS=[{"id":"slave","runtime":"copilot","defaultModel":"mimo-v2.5-pro"}]',
+        'CTI_DEFAULT_RUNNER=slave',
+        'CTI_RUNTIME=copilot',
+        'CTI_DEFAULT_MODEL=mimo-v2.5-pro',
+        '',
+      ].join('\n'),
+      'utf-8',
+    );
+
+    process.env.CTI_SLAVE_BRIDGE = '1';
+    const loaded = loadConfig(tmpDir);
+
+    assert.equal(loaded.runtime, 'copilot');
+    assert.equal(loaded.defaultRunnerId, 'slave');
+    assert.equal(loaded.defaultModel, 'mimo-v2.5-pro');
+    assert.deepEqual(loaded.runners?.map((r) => [r.id, r.runtime, r.defaultModel]), [
+      ['slave', 'copilot', 'mimo-v2.5-pro'],
+    ]);
+    assert.equal(loaded.imBot?.id, 't');
+  });
+
+  it('keeps config.slave.env values after syncing config.env into a slave process env', () => {
+    fs.writeFileSync(
+      path.join(tmpDir, 'config.env'),
+      [
+        'CTI_RUNNERS=[{"id":"master","runtime":"codex","defaultModel":"gpt-5.5"}]',
+        'CTI_DEFAULT_RUNNER=master',
+        'CTI_RUNTIME=codex',
+        'CTI_DEFAULT_MODEL=gpt-5.5',
+        '',
+      ].join('\n'),
+      'utf-8',
+    );
+    fs.writeFileSync(
+      path.join(tmpDir, 'config.slave.env'),
+      [
+        'CTI_RUNNERS=[{"id":"slave","runtime":"copilot","defaultModel":"mimo-v2.5-pro"}]',
+        'CTI_DEFAULT_RUNNER=slave',
+        'CTI_RUNTIME=copilot',
+        'CTI_DEFAULT_MODEL=mimo-v2.5-pro',
+        '',
+      ].join('\n'),
+      'utf-8',
+    );
+
+    process.env.CTI_SLAVE_BRIDGE = '1';
+    syncConfigFileToProcessEnv(tmpDir);
+
+    assert.equal(process.env.CTI_RUNTIME, 'copilot');
+    assert.equal(process.env.CTI_DEFAULT_RUNNER, 'slave');
+    assert.equal(process.env.CTI_DEFAULT_MODEL, 'mimo-v2.5-pro');
+    assert.match(process.env.CTI_RUNNERS ?? '', /mimo-v2\.5-pro/);
   });
 });
 

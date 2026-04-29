@@ -150,6 +150,18 @@ export function loadSlaveEnv(ctiHomeOverride?: string): Record<string, string> {
   }
 }
 
+function isSlaveBridgeProcess(): boolean {
+  return process.env.CTI_SLAVE_BRIDGE === "1";
+}
+
+function overlaySlaveEnv(env: Map<string, string>, ctiHomeOverride?: string): void {
+  if (!isSlaveBridgeProcess()) return;
+  const slaveEnv = loadSlaveEnv(ctiHomeOverride);
+  for (const [key, value] of Object.entries(slaveEnv)) {
+    env.set(key, value);
+  }
+}
+
 /** Build env var entries from a slave runner config + auto mode settings. */
 export function buildSlaveEnvFromRunner(
   runner: RunnerConfig,
@@ -796,6 +808,12 @@ export function syncConfigFileToProcessEnv(ctiHomeOverride?: string): void {
     for (const [key, value] of env) {
       if (value !== undefined) process.env[key] = value;
     }
+    if (isSlaveBridgeProcess()) {
+      const slaveEnv = loadSlaveEnv(ctiHomeOverride);
+      for (const [key, value] of Object.entries(slaveEnv)) {
+        if (value !== undefined) process.env[key] = value;
+      }
+    }
     try {
       process.env.CTI_RUNTIME = resolveEffectiveRuntime(loadConfig(ctiHomeOverride));
     } catch {
@@ -1005,16 +1023,19 @@ function splitCsv(value: string | undefined): string[] | undefined {
 }
 
 /** Merge `imBot` bridge fields into top-level `Config` for code paths that read `config.proxy`, etc. */
-function applyImBotToFlatConfig(c: Config): void {
+function applyImBotToFlatConfig(c: Config, env: Map<string, string> = new Map()): void {
   const b = c.imBot;
   if (!b) return;
-  if (b.defaultWorkDir !== undefined && b.defaultWorkDir !== "") {
+  const slave = isSlaveBridgeProcess();
+  if (b.defaultWorkDir !== undefined && b.defaultWorkDir !== "" && !(slave && env.has("CTI_DEFAULT_WORKDIR"))) {
     c.defaultWorkDir = b.defaultWorkDir;
   }
-  if (b.proxy !== undefined) c.proxy = b.proxy;
-  if (b.autoApprove !== undefined) c.autoApprove = b.autoApprove;
-  c.runners = normalizeRunners(c).map((x) => ({ ...x }));
-  if (b.defaultRunnerId) c.defaultRunnerId = b.defaultRunnerId;
+  if (b.proxy !== undefined && !(slave && env.has("CTI_PROXY"))) c.proxy = b.proxy;
+  if (b.autoApprove !== undefined && !(slave && env.has("CTI_AUTO_APPROVE"))) c.autoApprove = b.autoApprove;
+  if (!(slave && env.has("CTI_RUNNERS"))) {
+    c.runners = normalizeRunners(c).map((x) => ({ ...x }));
+  }
+  if (b.defaultRunnerId && !(slave && env.has("CTI_DEFAULT_RUNNER"))) c.defaultRunnerId = b.defaultRunnerId;
 }
 
 /**
@@ -1075,6 +1096,7 @@ export function loadConfig(ctiHomeOverride?: string): Config {
   } catch {
     // Config file doesn't exist yet — use defaults
   }
+  overlaySlaveEnv(env, ctiHomeOverride);
 
   const rawRuntime = env.get("CTI_RUNTIME")?.trim() || "claude";
   const runtime = normalizeRuntimeKind(rawRuntime);
@@ -1143,7 +1165,13 @@ export function loadConfig(ctiHomeOverride?: string): Config {
   };
 
   if (runners && runners.length > 0) {
-    base.runtime = resolveEffectiveRuntime(base);
+    if (isSlaveBridgeProcess() && env.has("CTI_RUNNERS")) {
+      const id = defaultRunnerId ?? runners[0]?.id;
+      const p = runners.find((x) => x.id === id) ?? runners[0];
+      base.runtime = normalizeRuntimeKind(p?.runtime ?? base.runtime);
+    } else {
+      base.runtime = resolveEffectiveRuntime(base);
+    }
   }
 
   if (base.imBot) {
@@ -1153,7 +1181,7 @@ export function loadConfig(ctiHomeOverride?: string): Config {
     }
   }
 
-  applyImBotToFlatConfig(base);
+  applyImBotToFlatConfig(base, env);
   base.enabledChannels = effectiveEnabledChannels(base);
   return base;
 }
