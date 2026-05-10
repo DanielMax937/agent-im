@@ -53,7 +53,9 @@ export default function MonitorPage() {
       if (Array.isArray(json.bridges)) setBridges(json.bridges);
       else if (json.botName) setBridges([json.botName]);
       if (json.daemonStatusByBridge) setDaemonStatus(json.daemonStatusByBridge);
-    } catch { /* ignore */ }
+    } catch {
+      /* ignore */
+    }
   }, []);
 
   const fetchMonitor = useCallback(async () => {
@@ -82,8 +84,7 @@ export default function MonitorPage() {
     return () => clearInterval(id);
   }, [autoRefresh, fetchMonitor, fetchBridges]);
 
-  const toggle = (slug: string) =>
-    setExpanded((prev) => ({ ...prev, [slug]: !prev[slug] }));
+  const toggle = (slug: string) => setExpanded((prev) => ({ ...prev, [slug]: !prev[slug] }));
 
   const isExpanded = (slug: string) => expanded[slug] !== false;
 
@@ -91,41 +92,35 @@ export default function MonitorPage() {
   const slaveCount = monitorData?.slaveOut?.length ?? 0;
 
   return (
-    <div className="page-shell" style={{ maxWidth: 1200, margin: '0 auto', padding: '1.5rem 1rem' }}>
-      <header style={{ marginBottom: '1.5rem', display: 'flex', alignItems: 'center', gap: '1rem' }}>
-        <h1 style={{ margin: 0, fontSize: '1.5rem' }}>Auto Mode Monitor</h1>
-        <a href="/admin" style={{ fontSize: '0.85rem', color: '#38bdf8' }}>← Admin</a>
-        <label style={{ marginLeft: 'auto', fontSize: '0.85rem', display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
-          <input type="checkbox" checked={autoRefresh} onChange={(e) => setAutoRefresh(e.target.checked)} />
-          Auto-refresh (5s)
-        </label>
-        <button
-          type="button"
-          className="ui-btn secondary"
-          style={{ fontSize: '0.8rem', padding: '0.3rem 0.7rem' }}
-          onClick={() => void fetchMonitor()}
-        >
-          刷新
-        </button>
+    <main className="page-shell ui-monitor">
+      <header className="ui-monitor-header">
+        <h1>Auto Mode Monitor</h1>
+        <a className="ui-monitor-back" href="/admin">
+          ← 管理后台
+        </a>
+        <div className="ui-monitor-toolbar">
+          <label className="ui-small ui-muted ui-monitor-checkbox-label">
+            <input type="checkbox" checked={autoRefresh} onChange={(e) => setAutoRefresh(e.target.checked)} />
+            每 5 秒刷新
+          </label>
+          <button type="button" className="ui-btn secondary ui-small" onClick={() => void fetchMonitor()}>
+            刷新
+          </button>
+        </div>
       </header>
 
-      {loading && <p className="ui-muted">Loading…</p>}
-      {monitorData?.error && (
-        <div style={{ background: '#2a1a1a', border: '1px solid #f87171', borderRadius: 8, padding: '0.75rem', marginBottom: '1rem' }}>
-          <strong>Error:</strong> {monitorData.error}
+      {loading ? <p className="ui-muted">加载中…</p> : null}
+      {monitorData?.error ? (
+        <div className="ui-banner-error" role="alert">
+          <strong>错误：</strong> {monitorData.error}
         </div>
-      )}
+      ) : null}
 
-      {/* Stats bar */}
-      <div style={{
-        display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(140px, 1fr))',
-        gap: '0.5rem', marginBottom: '1.5rem',
-      }}>
-        <StatCard label="Master Messages" value={masterCount} />
-        <StatCard label="Slave Messages" value={slaveCount} />
+      <div className="ui-stat-grid">
+        <StatCard label="Master 消息" value={masterCount} />
+        <StatCard label="Slave 消息" value={slaveCount} />
       </div>
 
-      {/* Bridge accordion */}
       <div className="ui-bridge-accordion" role="list">
         {(bridges.length > 0 ? bridges : ['default']).map((b) => {
           const dm = daemonStatus[b];
@@ -138,50 +133,58 @@ export default function MonitorPage() {
           );
           return (
             <div key={b} className="ui-bridge-accordion-item" role="listitem">
-              <div className="ui-bridge-accordion-head" style={{ cursor: 'pointer' }} onClick={() => toggle(b)}>
-                <span style={{ marginRight: '0.5rem' }}>{isExpanded(b) ? '▼' : '▶'}</span>
-                <code style={{ fontWeight: 600 }}>{b}</code>
-                <span style={{ marginLeft: '0.75rem', fontSize: '0.8rem' }} className="ui-muted">
-                  Master: {dm?.effectiveRunning ? '🟢' : '⚫'}
-                  {' '}Slave: {dm?.slave?.effectiveRunning ? '🟢' : '⚫'}
-                  {' '}({bridgeMaster.length}M / {bridgeSlave.length}S)
+              <button
+                type="button"
+                className="ui-bridge-accordion-head ui-bridge-accordion-head-interactive"
+                onClick={() => toggle(b)}
+              >
+                <span className="ui-bridge-accordion-chevron ui-bridge-accordion-chevron-gap" aria-hidden>
+                  {isExpanded(b) ? '▼' : '▶'}
                 </span>
-              </div>
+                <code className="ui-bridge-code-strong">{b}</code>
+                <span className="ui-muted ui-small ui-bridge-head-meta">
+                  <span className="ui-inline-cluster-tight">
+                    Master
+                    <span className={dm?.effectiveRunning ? 'ui-dot ui-dot-on' : 'ui-dot ui-dot-off'} title={dm?.effectiveRunning ? '运行中' : '未运行'} />
+                  </span>
+                  <span className="ui-inline-cluster-tight">
+                    Slave
+                    <span
+                      className={dm?.slave?.effectiveRunning ? 'ui-dot ui-dot-on' : 'ui-dot ui-dot-off'}
+                      title={dm?.slave?.effectiveRunning ? '运行中' : '未运行'}
+                    />
+                  </span>
+                  <span className="ui-muted-dim ui-bridge-count-note">
+                    ({bridgeMaster.length}M / {bridgeSlave.length}S)
+                  </span>
+                </span>
+              </button>
 
-              {isExpanded(b) && (
-                <div style={{ padding: '1rem 0' }}>
-                  {/* Runner working status */}
+              {isExpanded(b) ? (
+                <div className="ui-bridge-accordion-body-monitor">
                   <RunnerStatusBar status={rs} />
 
-                  <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '1rem' }}>
+                  <div className="ui-monitor-split">
                     <div>
-                      <h3 style={{ margin: '0 0 0.75rem', fontSize: '1rem', color: '#38bdf8' }}>
-                        Master Responses ({bridgeMaster.length})
+                      <h3 className="ui-monitor-section-title ui-monitor-section-title-master">
+                        Master（{bridgeMaster.length}）
                       </h3>
-                      <MessageList
-                        entries={bridgeMaster}
-                        emptyText="No master responses yet"
-                        roleTag="master"
-                      />
+                      <MessageList entries={bridgeMaster} emptyText="暂无 Master 回复" roleTag="master" />
                     </div>
                     <div>
-                      <h3 style={{ margin: '0 0 0.75rem', fontSize: '1rem', color: '#a78bfa' }}>
-                        Slave Responses ({bridgeSlave.length})
+                      <h3 className="ui-monitor-section-title ui-monitor-section-title-slave">
+                        Slave（{bridgeSlave.length}）
                       </h3>
-                      <MessageList
-                        entries={bridgeSlave}
-                        emptyText="No slave responses yet"
-                        roleTag="slave"
-                      />
+                      <MessageList entries={bridgeSlave} emptyText="暂无 Slave 回复" roleTag="slave" />
                     </div>
                   </div>
                 </div>
-              )}
+              ) : null}
             </div>
           );
         })}
       </div>
-    </div>
+    </main>
   );
 }
 
@@ -189,12 +192,9 @@ export default function MonitorPage() {
 
 function StatCard({ label, value }: { label: string; value: string | number }) {
   return (
-    <div style={{
-      background: '#151f30', border: '1px solid #1e3a5f', borderRadius: 8,
-      padding: '0.6rem 0.8rem', textAlign: 'center',
-    }}>
-      <div className="ui-muted" style={{ fontSize: '0.75rem', marginBottom: '0.25rem' }}>{label}</div>
-      <div style={{ fontSize: '1.1rem', fontWeight: 600 }}>{value}</div>
+    <div className="ui-stat-card">
+      <div className="ui-muted ui-small ui-stat-card-label">{label}</div>
+      <div className="ui-stat-card-value">{value}</div>
     </div>
   );
 }
@@ -216,106 +216,77 @@ function RunnerStatusBar({ status }: { status?: RunnerStatusEntry }) {
   const hasStatus = !!status?.updatedAt;
 
   return (
-    <div style={{
-      display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0.75rem',
-      marginBottom: '1rem',
-    }}>
-      <RunnerChip
-        label="Master"
-        busy={status?.masterBusy ?? false}
-        since={status?.masterSince}
-        hasStatus={hasStatus}
-        color="#38bdf8"
-      />
-      <RunnerChip
-        label="Slave"
-        busy={status?.slaveBusy ?? false}
-        since={status?.slaveSince}
-        hasStatus={hasStatus}
-        color="#a78bfa"
-      />
+    <div className="ui-runner-grid">
+      <RunnerChip label="Master" busy={status?.masterBusy ?? false} since={status?.masterSince} hasStatus={hasStatus} accent="master" />
+      <RunnerChip label="Slave" busy={status?.slaveBusy ?? false} since={status?.slaveSince} hasStatus={hasStatus} accent="slave" />
     </div>
   );
 }
 
-function RunnerChip({ label, busy, since, hasStatus, color }: {
+function RunnerChip({
+  label,
+  busy,
+  since,
+  hasStatus,
+  accent,
+}: {
   label: string;
   busy: boolean;
   since?: number;
   hasStatus: boolean;
-  color: string;
+  accent: 'master' | 'slave';
 }) {
-  // A busy runner with a valid `since` is never stale — long tasks are normal.
-  // Only show "Unknown" when no status file has ever been written.
   const unknown = !hasStatus;
-  const bg = busy ? '#1a2e1a' : '#151f30';
-  const border = busy ? '#4ade80' : '#1e3a5f';
-  const statusText = unknown ? 'Unknown' : busy ? 'Working' : 'Idle';
-  const icon = unknown ? '❓' : busy ? '⚡' : '💤';
+  const statusText = unknown ? '未知' : busy ? '工作中' : '空闲';
   const elapsed = busy ? formatElapsed(since) : '';
+  const labelClass = accent === 'master' ? 'ui-runner-chip-label ui-msg-role-master' : 'ui-runner-chip-label ui-msg-role-slave';
 
   return (
-    <div style={{
-      background: bg, border: `1px solid ${border}`, borderRadius: 8,
-      padding: '0.5rem 0.75rem', display: 'flex', alignItems: 'center', gap: '0.5rem',
-    }}>
-      <span style={{ fontSize: '1.1rem' }}>{icon}</span>
-      <div style={{ flex: 1 }}>
-        <div style={{ fontWeight: 600, fontSize: '0.8rem', color }}>{label} Runner</div>
-        <div style={{ fontSize: '0.75rem', color: busy ? '#4ade80' : '#94a3b8' }}>
-          {statusText}{elapsed ? ` · ${elapsed}` : ''}
+    <div className={`ui-runner-chip${busy ? ' ui-runner-chip-busy' : ''}`}>
+      <div className="ui-flex-fill-min">
+        <div className={labelClass}>{label} Runner</div>
+        <div className="ui-runner-chip-meta">
+          <span className="ui-runner-status-word">{statusText}</span>
+          {elapsed ? ` · ${elapsed}` : null}
         </div>
       </div>
-      {busy && (
-        <span style={{
-          width: 8, height: 8, borderRadius: '50%',
-          background: '#4ade80', display: 'inline-block',
-          animation: 'pulse 1.5s infinite',
-        }} />
-      )}
+      {busy ? <span className="ui-runner-pulse" aria-hidden /> : null}
     </div>
   );
 }
 
-function MessageList({ entries, emptyText, roleTag }: {
+function MessageList({
+  entries,
+  emptyText,
+  roleTag,
+}: {
   entries: MonitorEntry[];
   emptyText: string;
   roleTag: 'master' | 'slave';
 }) {
-  const borderColor = roleTag === 'master' ? '#1e3a5f' : '#3b2070';
-  const tagColor = roleTag === 'master' ? '#38bdf8' : '#a78bfa';
+  const roleClass = roleTag === 'master' ? 'ui-msg-role-master' : 'ui-msg-role-slave';
 
   if (entries.length === 0) {
-    return <p className="ui-muted" style={{ fontSize: '0.85rem' }}>{emptyText}</p>;
+    return (
+      <p className="ui-muted ui-small">
+        {emptyText}
+      </p>
+    );
   }
 
-  // Show newest first
   const reversed = [...entries].reverse();
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem', maxHeight: '70vh', overflowY: 'auto' }}>
+    <div className="ui-msg-stack">
       {reversed.map((entry, i) => (
-        <div
-          key={`${entry.ts}-${i}`}
-          style={{
-            background: '#0d1525', border: `1px solid ${borderColor}`, borderRadius: 8,
-            padding: '0.6rem 0.8rem', fontSize: '0.85rem', lineHeight: 1.5,
-          }}
-        >
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.3rem' }}>
-            <span style={{ color: tagColor, fontWeight: 600, fontSize: '0.75rem' }}>
+        <div key={`${entry.ts}-${i}`} className="ui-msg-card">
+          <div className="ui-msg-card-head">
+            <span className={`ui-msg-role ${roleClass}`}>
               [{roleTag}] #{entries.length - i}
             </span>
-            <span className="ui-muted" style={{ fontSize: '0.7rem' }}>
-              {formatTime(entry.ts)}
-            </span>
+            <span className="ui-muted ui-text-12">{formatTime(entry.ts)}</span>
           </div>
-          <pre style={{
-            margin: 0, whiteSpace: 'pre-wrap', wordBreak: 'break-word',
-            fontFamily: 'inherit', fontSize: 'inherit',
-          }}>
-            {entry.text}
-          </pre>
+          <pre className="ui-msg-body-pre">{entry.text}</pre>
         </div>
       ))}
     </div>

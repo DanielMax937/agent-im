@@ -19,28 +19,28 @@ const platformEndpoints = [
 export default function HomePage() {
   return (
     <main className="page-shell">
-      <section className="hero-card">
+      <section className="hero-card" aria-labelledby="home-title">
         <p className="eyebrow">agent-im</p>
-        <h1>基于 Next.js 的 DevOps 智能体平台</h1>
+        <h1 id="home-title">基于 Next.js 的 DevOps 智能体平台</h1>
         <p className="lead">
-          Web 服务由 Next.js 承载；平台 API、本地 Kanban 工作流与多实例运行器仍通过统一的 HTTP 层对外提供，便于复用与集成。
+          Web 由 Next.js 承载；平台 API、Kanban 与多实例运行器通过统一 HTTP 暴露，便于集成。
         </p>
-        <div className="actions">
-          <a href="/admin">管理后台（桥接与配置）</a>
+        <nav className="actions" aria-label="主要入口">
+          <a href="/admin">管理后台</a>
           <a href="/projects">项目管理</a>
           <a href="/board">任务看板</a>
           <a href="/health">健康检查</a>
-          <a href="/api/bridge/status">桥接状态（JSON）</a>
-        </div>
+          <a href="/api/bridge/status">桥接状态 JSON</a>
+        </nav>
       </section>
 
-      <section className="grid">
+      <div className="grid">
         <article className="panel">
           <h2>技术栈</h2>
           <ul>
-            <li>Next.js App Router：页面与 API 路由</li>
-            <li>Pino 结构化日志，敏感信息脱敏</li>
-            <li>工作流与实例服务位于 <code>src/platform</code>，与 UI 解耦</li>
+            <li>Next.js App Router（页面与 API）</li>
+            <li>Pino 结构化日志与脱敏</li>
+            <li>核心逻辑在 <code>src/platform</code>，与 UI 解耦</li>
           </ul>
         </article>
 
@@ -48,11 +48,15 @@ export default function HomePage() {
           <h2>常用 API</h2>
           <ul>
             {platformEndpoints.map((endpoint) => (
-              <li key={endpoint}>{endpoint}</li>
+              <li key={endpoint}>
+                <code className="ui-mono ui-mono-12">
+                  {endpoint}
+                </code>
+              </li>
             ))}
           </ul>
         </article>
-      </section>
+      </div>
     </main>
   );
 }

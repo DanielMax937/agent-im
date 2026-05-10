@@ -73,21 +73,19 @@ function LaneSkillPicker(props: {
     [catalog, selectedIds],
   );
   return (
-    <div style={{ marginBottom: '1.5rem' }}>
-      <p className="ui-muted ui-small" style={{ marginBottom: '0.35rem' }}>
+    <div className="ui-lane-block">
+      <p className="ui-muted ui-small ui-mb-xs">
         <strong>{laneLabel}</strong>
         ：未选任何项时使用下方「代码内置默认」；选中后任务 prompt 会注入对应 skill 的展示名。
       </p>
-      <div className="skill-tag-row" style={{ marginBottom: '0.35rem' }}>
+      <div className="skill-tag-row ui-mb-xs">
         {selectedIds.map((id) => {
           const opt = catalog.find((o) => o.id === id);
           return (
             <span key={id} className="skill-tag">
               <span>{opt?.label ?? id}</span>
               {opt?.source ? (
-                <span className="ui-mono" style={{ opacity: 0.75, fontSize: '11px' }}>
-                  [{opt.source}]
-                </span>
+                <span className="ui-mono ui-skill-source">[{opt.source}]</span>
               ) : null}
               <button
                 type="button"
@@ -119,9 +117,9 @@ function LaneSkillPicker(props: {
           ))}
         </select>
       </label>
-      <details className="ui-small" style={{ marginTop: '0.5rem' }}>
+      <details className="ui-small ui-details-mt">
         <summary className="ui-muted">本 lane 默认（代码内置）</summary>
-        <ul className="ui-muted" style={{ margin: '0.35rem 0 0', paddingLeft: '1.1rem' }}>
+        <ul className="ui-muted ui-list-tight ui-mt-code-meta">
           {defaultLines.map((line, i) => (
             <li key={i}>{line}</li>
           ))}
@@ -323,7 +321,7 @@ export default function BoardRolesPage() {
           每个 Kanban  lane 可配置<strong>多个人员</strong>，每人绑定一个 runner。自动分配时：若该任务历史上该 lane 已有负责人则继续派给 TA；否则派给当前负载（该 lane 在制任务数）最少的人。优先级：接口显式{' '}
           <code>runtimeProfileId</code> &gt; 人员绑定 &gt; 下方「单 lane 默认 runner」&gt; 任务会话已有值。
         </p>
-        <p className="ui-muted ui-small" style={{ marginTop: '0.6rem', maxWidth: '52rem' }}>
+        <p className="ui-muted ui-small ui-lead-narrow">
           下方 Runner 下拉列表固定读取 <code>~/.claude-to-im/kanban/config.env</code>（与 <code>CTI_HOME</code>、
           <code>CTI_BOT_NAME</code>、Telegram 桥 <code>.active_bridge</code> 无关）。
         </p>
@@ -337,7 +335,7 @@ export default function BoardRolesPage() {
       {error ? <p className="ui-banner">{error}</p> : null}
       {runnerHint ? <p className="ui-banner">{runnerHint}</p> : null}
 
-      <section className="ui-panel" style={{ marginBottom: '1.5rem' }}>
+      <section className="ui-panel ui-panel-section">
         <h2 className="ui-h2">项目</h2>
         {loading ? (
           <p className="ui-muted">加载中…</p>
@@ -349,8 +347,7 @@ export default function BoardRolesPage() {
           <label>
             选择项目
             <select
-              className="ui-input"
-              style={{ maxWidth: '420px' }}
+              className="ui-input ui-max-w-field"
               value={projectId}
               onChange={(e) => setProjectId(e.target.value)}
             >
@@ -365,30 +362,20 @@ export default function BoardRolesPage() {
       </section>
 
       {projectId && kinds.length > 0 ? (
-        <section key={projectId} className="ui-panel" style={{ marginBottom: '1.5rem' }}>
+        <section key={projectId} className="ui-panel ui-panel-section">
           <h2 className="ui-h2">人员与 Runner（多选）</h2>
-          <p className="ui-muted ui-small" style={{ marginBottom: '1rem' }}>
+          <p className="ui-muted ui-small ui-mb-xl">
             若某 lane 人员列表为空，则仍可使用下方「单 lane 默认 runner」或运行时默认。展示名可留空，将使用 id。
           </p>
           {kinds.map((kind) => (
-            <div key={kind} style={{ marginBottom: '1.75rem' }}>
-              <h3 className="ui-h3" style={{ fontSize: '1rem', marginBottom: '0.5rem' }}>
-                {roleLabels[kind] ?? kind}
-              </h3>
+            <div key={kind} className="ui-role-block">
+              <h3 className="ui-h3-role">{roleLabels[kind] ?? kind}</h3>
               {(members[kind] ?? []).length === 0 ? (
                 <p className="ui-muted ui-small">暂无人员，点击添加。</p>
               ) : (
-                <div className="ui-projects-form" style={{ gap: '0.5rem' }}>
+                <div className="ui-projects-form ui-projects-form-tight">
                   {(members[kind] ?? []).map((row, index) => (
-                    <div
-                      key={`${projectId}-${kind}-${row.id}-${index}`}
-                      style={{
-                        display: 'grid',
-                        gridTemplateColumns: '1fr 1fr minmax(120px, 1fr) auto',
-                        gap: '0.5rem',
-                        alignItems: 'end',
-                      }}
-                    >
+                    <div key={`${projectId}-${kind}-${row.id}-${index}`} className="ui-member-row-grid">
                       <label className="ui-small">
                         展示名
                         <input
@@ -428,21 +415,19 @@ export default function BoardRolesPage() {
                   ))}
                 </div>
               )}
-              <button type="button" className="ui-btn" style={{ marginTop: '0.5rem' }} onClick={() => addMemberRow(kind)}>
+              <button type="button" className="ui-btn ui-mt-md" onClick={() => addMemberRow(kind)}>
                 添加人员
               </button>
             </div>
           ))}
-          <h2 className="ui-h2" style={{ marginTop: '2rem' }}>
-            Lane skills（每 lane 可选）
-          </h2>
-          <p className="ui-muted ui-small" style={{ marginBottom: '1rem' }}>
+          <h2 className="ui-h2 ui-mt-3xl">Lane skills（每 lane 可选）</h2>
+          <p className="ui-muted ui-small ui-mb-xl">
             扫描本机与项目目录下的 <code>.cursor/skills</code>、<code>.codex/skills</code>、<code>.claude/skills</code>、
             <code>.agent/skills</code>（及 <code>.agents/skills</code>）中的 SKILL 文件夹。下拉多选以 tag 展示；未选则使用各 lane
             的代码内置默认。
           </p>
           {skillCatalog.length === 0 ? (
-            <p className="ui-muted ui-small" style={{ marginBottom: '1rem' }}>
+            <p className="ui-muted ui-small ui-mb-xl">
               当前未扫描到任何 skill（或目录不存在）。配置好上述路径后刷新本页。
             </p>
           ) : null}
@@ -461,10 +446,8 @@ export default function BoardRolesPage() {
               }
             />
           ))}
-          <h2 className="ui-h2" style={{ marginTop: '2rem' }}>
-            单 lane 默认 runner（可选）
-          </h2>
-          <p className="ui-muted ui-small" style={{ marginBottom: '1rem' }}>
+          <h2 className="ui-h2 ui-mt-3xl">单 lane 默认 runner（可选）</h2>
+          <p className="ui-muted ui-small ui-mb-xl">
             当该 lane <strong>没有配置人员</strong>时使用。与旧版行为兼容。
           </p>
           <div className="ui-projects-form">
@@ -491,7 +474,7 @@ export default function BoardRolesPage() {
               </label>
             ))}
           </div>
-          <div className="ui-actions-bar" style={{ marginTop: '1.25rem' }}>
+          <div className="ui-actions-footer">
             <button type="button" className="ui-btn primary" disabled={busy} onClick={() => void save()}>
               保存
             </button>

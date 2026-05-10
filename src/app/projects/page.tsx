@@ -265,14 +265,14 @@ export default function ProjectsPage() {
 
       {error ? <p className="ui-banner">{error}</p> : null}
 
-      <section className="ui-panel" style={{ marginBottom: '1.5rem' }}>
+      <section className="ui-panel ui-panel-section">
         <h2 className="ui-h2">项目列表</h2>
         {loading ? (
           <p className="ui-muted">加载中…</p>
         ) : sortedProjects.length === 0 ? (
           <p className="ui-muted">暂无项目，点击「新建项目」添加。</p>
         ) : (
-          <div style={{ overflowX: 'auto' }}>
+          <div className="ui-overflow-x-auto">
             <table className="ui-table">
               <thead>
                 <tr>
@@ -280,7 +280,7 @@ export default function ProjectsPage() {
                   <th>名称</th>
                   <th>本地路径</th>
                   <th>SCM</th>
-                  <th style={{ width: '180px' }}>操作</th>
+                  <th className="ui-th-w-180">操作</th>
                 </tr>
               </thead>
               <tbody>
@@ -291,17 +291,19 @@ export default function ProjectsPage() {
                     </td>
                     <td>{p.name}</td>
                     <td>
-                      <span className="ui-mono" style={{ fontSize: '11px' }}>
-                        {p.repository.localPath}
-                      </span>
+                      <span className="ui-mono ui-mono-11">{p.repository.localPath}</span>
                     </td>
                     <td>
                       {p.repository.scmProvider} · {p.repository.scmProject}
                       {(p as { isPrivate?: boolean }).isPrivate ? (
-                        <span style={{ marginLeft: 6, fontSize: '0.75rem', color: '#94a3b8' }} title="私有仓库 — Self-Hosted Runner CI">🔒</span>
+                        <span className="ui-tag ui-tag-muted ui-ml-6" title="私有仓库（Self-Hosted Runner CI）">
+                          私有
+                        </span>
                       ) : null}
                       {p.deployment?.enabled !== false ? (
-                        <span style={{ marginLeft: 6, fontSize: '0.75rem', color: '#94a3b8' }} title="启用自动部署 workflow 约束">deploy</span>
+                        <span className="ui-tag ui-tag-muted ui-ml-6" title="合并后自动部署 workflow">
+                          Deploy
+                        </span>
                       ) : null}
                     </td>
                     <td>
@@ -334,7 +336,7 @@ export default function ProjectsPage() {
 
       <section className="ui-panel">
         <h2 className="ui-h2">{isEditMode ? `编辑：${editingExisting?.id}` : '新建项目'}</h2>
-        <p className="ui-muted ui-small" style={{ marginBottom: '1rem' }}>
+        <p className="ui-muted ui-small ui-mb-xl">
           {isEditMode ? '项目 ID 创建后不可在此修改；若需改名请删除后重建或手动改 JSON。' : '新建时请填写唯一 ID。'}
         </p>
 
@@ -377,7 +379,7 @@ export default function ProjectsPage() {
               placeholder="留空则取项目 ID 首段，如 demo-app → DEMO"
             />
           </label>
-          <label style={{ gridColumn: '1 / -1' }}>
+          <label className="ui-projects-form-label-full">
             远程 URL *
             <input
               className="ui-input"
@@ -386,9 +388,9 @@ export default function ProjectsPage() {
               placeholder="git@github.com:org/repo.git"
             />
           </label>
-          <label style={{ gridColumn: '1 / -1' }}>
+          <label className="ui-projects-form-label-full">
             本地路径 *
-            <span className="ui-muted ui-small" style={{ display: 'block', marginBottom: '0.35rem', fontWeight: 'normal' }}>
+            <span className="ui-muted ui-small ui-form-hint-under-label">
               填本机已 clone 的仓库根目录（绝对路径）。勿填 git@… / https://…（那些填在「远程 URL」）。
             </span>
             <input
@@ -464,7 +466,7 @@ export default function ProjectsPage() {
               placeholder="GITHUB_TOKEN"
             />
           </label>
-          <label style={{ gridColumn: '1 / -1', display: 'flex', alignItems: 'center', gap: '0.5rem', cursor: 'pointer' }}>
+          <label className="ui-projects-form-checkbox-row">
             <input
               type="checkbox"
               checked={form.isPrivate}
@@ -472,12 +474,12 @@ export default function ProjectsPage() {
             />
             <span>
               私有仓库（使用 Self-Hosted Runner 进行 CI）
-              <span className="ui-muted" style={{ fontSize: '0.78rem', marginLeft: '0.5rem' }}>
+              <span className="ui-muted ui-muted-caption-inline">
                 启用后，回归测试阶段不启动 AI agent，改为等待 GitHub Actions self-hosted runner webhook 回调
               </span>
             </span>
           </label>
-          <label style={{ gridColumn: '1 / -1', display: 'flex', alignItems: 'center', gap: '0.5rem', cursor: 'pointer' }}>
+          <label className="ui-projects-form-checkbox-row">
             <input
               type="checkbox"
               checked={form.deploymentEnabled}
@@ -485,7 +487,7 @@ export default function ProjectsPage() {
             />
             <span>
               合并后自动部署要求
-              <span className="ui-muted" style={{ fontSize: '0.78rem', marginLeft: '0.5rem' }}>
+              <span className="ui-muted ui-muted-caption-inline">
                 默认开启。开启后，平台会在项目创建和 sprint 启动时配置 Vercel；合并并 push 到当前迭代分支后，由 Vercel 自动构建，平台侧轮询成功结果并发送 Telegram 通知
               </span>
             </span>
@@ -508,7 +510,7 @@ export default function ProjectsPage() {
               placeholder="team-slug"
             />
           </label>
-          <label style={{ gridColumn: '1 / -1', display: 'flex', alignItems: 'center', gap: '0.5rem', cursor: 'pointer' }}>
+          <label className="ui-projects-form-checkbox-row">
             <input
               type="checkbox"
               checked={form.deploymentNotifyTelegram}
@@ -516,20 +518,19 @@ export default function ProjectsPage() {
             />
             <span>Vercel 部署成功后发送 Telegram 通知</span>
           </label>
-          <label style={{ gridColumn: '1 / -1' }}>
+          <label className="ui-projects-form-label-full">
             Agent 配置（JSON 数组，可选）
             <textarea
-              className="ui-input"
+              className="ui-input ui-textarea-code"
               rows={6}
               value={form.agentsJson}
               onChange={(e) => setForm((f) => ({ ...f, agentsJson: e.target.value }))}
               spellCheck={false}
-              style={{ fontFamily: 'ui-monospace, monospace', resize: 'vertical' }}
             />
           </label>
         </div>
 
-        <div className="ui-actions-bar" style={{ marginTop: '1.25rem' }}>
+        <div className="ui-actions-footer">
           <button type="button" className="ui-btn primary" disabled={busy} onClick={() => void save()}>
             保存
           </button>

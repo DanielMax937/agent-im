@@ -225,7 +225,7 @@ function MonitorDetailModal(props: { row: KanbanAgentTurnRecord; onClose: () => 
             <h2 id="monitor-detail-modal-title" className="ui-h2 monitor-modal-title">
               调用详情
             </h2>
-            <p className="ui-muted ui-small" style={{ margin: '0.35rem 0 0' }}>
+            <p className="ui-muted ui-small ui-mt-code-meta">
               <code>{row.id}</code>
             </p>
           </div>
@@ -235,7 +235,7 @@ function MonitorDetailModal(props: { row: KanbanAgentTurnRecord; onClose: () => 
         </div>
         <div className="monitor-modal-body">
           {row.streamError ? (
-            <p className="ui-banner" style={{ marginTop: 0 }}>
+            <p className="ui-banner">
               <strong>流式错误：</strong> {row.streamError}
             </p>
           ) : null}

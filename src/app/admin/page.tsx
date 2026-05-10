@@ -171,16 +171,9 @@ function EnvCheckRow({
   optional?: boolean;
 }) {
   return (
-    <div
-      style={{
-        display: 'flex',
-        justifyContent: 'space-between',
-        gap: '0.75rem',
-        fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace',
-      }}
-    >
+    <div className="ui-env-row">
       <span>{name}{optional ? '（可选）' : ''}</span>
-      <span style={{ color: exists ? '#86efac' : optional ? '#94a3b8' : '#fca5a5' }}>
+      <span className={exists ? 'ui-env-status-ok' : optional ? 'ui-env-status-soft' : 'ui-env-status-bad'}>
         {exists ? 'exists' : optional ? 'missing' : 'missing'}
       </span>
     </div>
@@ -199,26 +192,20 @@ function RunnerEnvTip({
       envPresent(envPresence, 'ANTHROPIC_API_KEY') ||
       envPresent(envPresence, 'ANTHROPIC_AUTH_TOKEN');
     return (
-      <div
-        style={{
-          marginTop: '0.5rem',
-          padding: '0.75rem 0.9rem',
-          border: '1px solid #334155',
-          borderRadius: '0.75rem',
-          background: '#0f172a',
-        }}
-      >
-        <p className="ui-muted ui-small" style={{ margin: 0 }}>
+      <div className="ui-env-callout">
+        <p className="ui-muted ui-small ui-m-0">
           Claude API 模式会读取当前服务进程环境变量。需要至少一个主凭证：
           <code>ANTHROPIC_API_KEY</code> 或 <code>ANTHROPIC_AUTH_TOKEN</code>；
           自定义网关可再提供 <code>ANTHROPIC_BASE_URL</code>。
         </p>
-        <div style={{ marginTop: '0.55rem' }}>
+        <div className="ui-env-callout-rows">
           <EnvCheckRow name="ANTHROPIC_API_KEY" exists={envPresent(envPresence, 'ANTHROPIC_API_KEY')} />
           <EnvCheckRow name="ANTHROPIC_AUTH_TOKEN" exists={envPresent(envPresence, 'ANTHROPIC_AUTH_TOKEN')} />
           <EnvCheckRow name="ANTHROPIC_BASE_URL" exists={envPresent(envPresence, 'ANTHROPIC_BASE_URL')} optional />
         </div>
-        <p className="ui-small" style={{ margin: '0.55rem 0 0', color: hasPrimary ? '#86efac' : '#fca5a5' }}>
+        <p
+          className={`ui-small ui-env-runner-summary ${hasPrimary ? 'ui-env-runner-summary-ok' : 'ui-env-runner-summary-bad'}`}
+        >
           {hasPrimary ? '主凭证已找到。' : '未找到 Claude 主凭证，关闭 CLI login 后仍无法用 API 模式。'}
         </p>
       </div>
@@ -231,26 +218,20 @@ function RunnerEnvTip({
       envPresent(envPresence, 'CODEX_API_KEY') ||
       envPresent(envPresence, 'OPENAI_API_KEY');
     return (
-      <div
-        style={{
-          marginTop: '0.5rem',
-          padding: '0.75rem 0.9rem',
-          border: '1px solid #334155',
-          borderRadius: '0.75rem',
-          background: '#0f172a',
-        }}
-      >
-        <p className="ui-muted ui-small" style={{ margin: 0 }}>
+      <div className="ui-env-callout">
+        <p className="ui-muted ui-small ui-m-0">
           Codex API 模式按顺序读取 <code>CTI_CODEX_API_KEY</code>、<code>CODEX_API_KEY</code>、
           <code>OPENAI_API_KEY</code>；自定义网关使用 <code>CTI_CODEX_BASE_URL</code>。
         </p>
-        <div style={{ marginTop: '0.55rem' }}>
+        <div className="ui-env-callout-rows">
           <EnvCheckRow name="CTI_CODEX_API_KEY" exists={envPresent(envPresence, 'CTI_CODEX_API_KEY')} />
           <EnvCheckRow name="CODEX_API_KEY" exists={envPresent(envPresence, 'CODEX_API_KEY')} />
           <EnvCheckRow name="OPENAI_API_KEY" exists={envPresent(envPresence, 'OPENAI_API_KEY')} />
           <EnvCheckRow name="CTI_CODEX_BASE_URL" exists={envPresent(envPresence, 'CTI_CODEX_BASE_URL')} optional />
         </div>
-        <p className="ui-small" style={{ margin: '0.55rem 0 0', color: hasPrimary ? '#86efac' : '#fca5a5' }}>
+        <p
+          className={`ui-small ui-env-runner-summary ${hasPrimary ? 'ui-env-runner-summary-ok' : 'ui-env-runner-summary-bad'}`}
+        >
           {hasPrimary ? '主凭证已找到。' : '未找到 Codex 主凭证，关闭 CLI login 后将无法走 API 模式。'}
         </p>
       </div>
@@ -566,19 +547,10 @@ export default function AdminPage() {
 
   return (
     <main className="page-shell ui-admin">
-      <header
-        className="ui-admin-header"
-        style={{
-          display: 'flex',
-          flexWrap: 'wrap',
-          justifyContent: 'space-between',
-          alignItems: 'flex-start',
-          gap: '1rem',
-        }}
-      >
+      <header className="ui-admin-header ui-admin-header-bar">
         <div>
           <p className="eyebrow">本机管理</p>
-          <h1 style={{ marginBottom: '0.5rem' }}>桥接与平台</h1>
+          <h1>桥接与平台</h1>
           <nav className="ui-nav">
             <a href="/">首页</a>
             <a href="/projects">项目管理</a>
@@ -587,8 +559,8 @@ export default function AdminPage() {
             <a href="/monitor">Auto Monitor</a>
           </nav>
         </div>
-        <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: '0.35rem' }}>
-          <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.5rem', justifyContent: 'flex-end' }}>
+        <div className="ui-admin-header-actions">
+          <div className="ui-admin-header-actions-row">
             <button
               type="button"
               className="ui-btn secondary"
@@ -605,21 +577,12 @@ export default function AdminPage() {
 
       <section className="ui-section hero-card">
         <h2>Bridge（桥接）</h2>
-        <div
-          className="ui-bridge-status"
-          style={{
-            marginBottom: '1rem',
-            padding: '0.75rem 1rem',
-            borderRadius: '8px',
-            border: '1px solid var(--ui-border, #333)',
-            background: 'rgba(148, 163, 184, 0.08)',
-          }}
-        >
-          <p style={{ margin: 0, fontSize: '0.95rem' }}>
+        <div className="ui-bridge-intro-panel">
+          <p className="ui-bridge-intro-lead">
             每个桥接目录相互独立，可同时运行；请在下方各行查看该目录的独立进程状态并启动或停止。
           </p>
           {!canSwitchBridges ? (
-            <p className="ui-muted ui-small" style={{ margin: '0.4rem 0 0' }}>
+            <p className="ui-muted ui-small ui-bridge-intro-note">
               已设置 <code>CTI_HOME</code> 时由环境固定单一数据目录，无法在此新建多个桥接目录。
             </p>
           ) : null}
@@ -628,7 +591,7 @@ export default function AdminPage() {
           <p className="ui-muted">正在加载配置表单…</p>
         ) : (
         <div className="ui-bridge-subsection">
-        <h3 style={{ marginTop: 0, marginBottom: '0.75rem', fontSize: '1.1rem' }}>桥接目录</h3>
+        <h3 className="ui-bridge-subsection-title">桥接目录</h3>
         {displayBridgeList.length === 0 ? (
           <p className="ui-muted ui-small">暂无桥接目录。</p>
         ) : (
@@ -759,22 +722,8 @@ export default function AdminPage() {
                     role="region"
                     aria-labelledby={`admin-bridge-head-${b}`}
                   >
-        <div
-          className="ui-card"
-          style={{
-            padding: '0.9rem 1rem',
-            marginBottom: '1rem',
-            border: '1px solid var(--ui-border, #333)',
-            background: 'rgba(148, 163, 184, 0.06)',
-          }}
-        >
-          <div
-            style={{
-              display: 'grid',
-              gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))',
-              gap: '0.75rem 1rem',
-            }}
-          >
+        <div className="ui-card ui-admin-auto-summary-card">
+          <div className="ui-status-grid">
             <div>
               <div className="ui-muted ui-small">Auto 模式</div>
               <div>{autoSummary.modeLabel}</div>
@@ -805,7 +754,7 @@ export default function AdminPage() {
             </div>
           </div>
           {autoSummary.enabled ? (
-            <p className="ui-muted ui-small" style={{ margin: '0.75rem 0 0' }}>
+            <p className="ui-muted ui-small ui-mt-bridge-hint">
               master 队列按当前聊天 <code>/runner</code> 分流；slave 固定使用上方摘要里的 Runner。
             </p>
           ) : null}
@@ -829,11 +778,11 @@ export default function AdminPage() {
             {(() => {
               const spec = cfgB.imBot!;
               return (
-              <div key="im-bot" className="ui-card" style={{ padding: '1rem', border: '1px solid var(--ui-border, #333)' }}>
-                <div className="ui-grid" style={{ alignItems: 'flex-end' }}>
+              <div key="im-bot" className="ui-card ui-card-im-bot">
+                <div className="ui-grid ui-grid-end">
                   <div className="ui-field">
                     <span>桥接实例标识（路由与存储）</span>
-                    <p className="ui-muted ui-small" style={{ margin: '0.35rem 0 0' }}>
+                    <p className="ui-muted ui-small ui-mt-code-meta">
                       与本行目录名一致，保存时由服务端写入 <code>CTI_IM_BOT.id</code>：
                       <code>{b}</code>
                     </p>
@@ -855,7 +804,7 @@ export default function AdminPage() {
                   </label>
                 </div>
                 {spec.channel === 'telegram' ? (
-                  <div className="ui-grid" style={{ marginTop: '0.75rem' }}>
+                  <div className="ui-grid ui-grid-mt-lg">
                     <label className="ui-field">
                       <span>tgBotToken</span>
                       <input
@@ -889,7 +838,7 @@ export default function AdminPage() {
                   </div>
                 ) : null}
                 {spec.channel === 'discord' ? (
-                  <div className="ui-grid" style={{ marginTop: '0.75rem' }}>
+                  <div className="ui-grid ui-grid-mt-lg">
                     <label className="ui-field">
                       <span>discordBotToken</span>
                       <input
@@ -945,7 +894,7 @@ export default function AdminPage() {
                   </div>
                 ) : null}
                 {spec.channel === 'feishu' ? (
-                  <div className="ui-grid" style={{ marginTop: '0.75rem' }}>
+                  <div className="ui-grid ui-grid-mt-lg">
                     <label className="ui-field">
                       <span>feishuAppId</span>
                       <input
@@ -987,7 +936,7 @@ export default function AdminPage() {
                   </div>
                 ) : null}
                 {spec.channel === 'qq' ? (
-                  <div className="ui-grid" style={{ marginTop: '0.75rem' }}>
+                  <div className="ui-grid ui-grid-mt-lg">
                     <label className="ui-field">
                       <span>qqAppId</span>
                       <input
@@ -1039,17 +988,7 @@ export default function AdminPage() {
                     </label>
                   </div>
                 ) : null}
-                <h4
-                  style={{
-                    marginTop: '1rem',
-                    marginBottom: '0.5rem',
-                    fontSize: '0.95rem',
-                    fontWeight: 600,
-                    color: '#cbd5e1',
-                  }}
-                >
-                  桥接默认值（写入顶格 CTI_*）
-                </h4>
+                <h4 className="ui-im-subheading">桥接默认值（写入顶格 CTI_*）</h4>
                 <div className="ui-grid">
                   <label className="ui-field">
                     <span>默认工作目录（CTI_DEFAULT_WORKDIR）</span>
@@ -1116,16 +1055,10 @@ export default function AdminPage() {
                     <span>Auto 模式记录 SSE 分片日志（关则 CTI_AUTO_LOG_STREAM_CHUNKS=0）</span>
                   </label>
                 </div>
-                <p className="ui-muted ui-small" style={{ marginTop: '0.5rem' }}>
+                <p className="ui-muted ui-small ui-mt-md">
                   默认模型与模式（code / plan / ask）由各 Runner 单独配置；不再使用桥接级 CTI_DEFAULT_MODEL / CTI_DEFAULT_MODE。
                 </p>
-                <div
-                  style={{
-                    marginTop: '0.75rem',
-                    borderTop: '1px solid var(--ui-border, #333)',
-                    paddingTop: '0.75rem',
-                  }}
-                >
+                <div className="ui-im-section-divider">
                   <p className="ui-muted ui-small">
                     <strong>Runners</strong>（<code>imBot.runners</code>，保存时同步 <code>CTI_RUNNERS</code>）
                   </p>
@@ -1143,7 +1076,7 @@ export default function AdminPage() {
                     </select>
                   </label>
                   {(spec.runners ?? normalizeRunners(asConfig(cfgB))).map((prof, ridx) => (
-                    <div key={`${ridx}-${prof.id}`} className="ui-slot" style={{ marginTop: '0.5rem' }}>
+                    <div key={`${ridx}-${prof.id}`} className="ui-slot ui-mt-md">
                       <div className="ui-slot-head">
                         <strong>Runner</strong>
                         <button type="button" className="ui-btn ghost" onClick={() => removeImRunner(ridx)}>
@@ -1227,10 +1160,7 @@ export default function AdminPage() {
                       </div>
                       {prof.runtime === 'claude' && (
                         <>
-                          <div
-                            className="ui-grid"
-                            style={{ marginTop: '0.75rem', marginBottom: '0.75rem' }}
-                          >
+                          <div className="ui-grid ui-grid-runner-runtime">
                             <label className="ui-field">
                               <span>Claude CLI 路径</span>
                               <input
@@ -1256,10 +1186,7 @@ export default function AdminPage() {
                       )}
                       {prof.runtime === 'codex' && (
                         <>
-                          <div
-                            className="ui-grid"
-                            style={{ marginTop: '0.75rem', marginBottom: '0.75rem' }}
-                          >
+                          <div className="ui-grid ui-grid-runner-runtime">
                             <label className="ui-field">
                               <span>Codex wrapper 路径</span>
                               <input
@@ -1284,10 +1211,7 @@ export default function AdminPage() {
                         </>
                       )}
                       {prof.runtime === 'cursor' && (
-                        <div
-                          className="ui-grid"
-                          style={{ marginTop: '0.75rem', marginBottom: '0.75rem' }}
-                        >
+                        <div className="ui-grid ui-grid-runner-runtime">
                           <label className="ui-field">
                             <span>Cursor agent 路径</span>
                             <input
@@ -1300,10 +1224,7 @@ export default function AdminPage() {
                         </div>
                       )}
                       {prof.runtime === 'copilot' && (
-                        <div
-                          className="ui-grid"
-                          style={{ marginTop: '0.75rem', marginBottom: '0.75rem' }}
-                        >
+                        <div className="ui-grid ui-grid-runner-runtime">
                           <label className="ui-field">
                             <span>Copilot CLI 路径</span>
                             <input
@@ -1316,10 +1237,7 @@ export default function AdminPage() {
                         </div>
                       )}
                       {prof.runtime === 'opencode' && (
-                        <div
-                          className="ui-grid"
-                          style={{ marginTop: '0.75rem', marginBottom: '0.75rem' }}
-                        >
+                        <div className="ui-grid ui-grid-runner-runtime">
                           <label className="ui-field">
                             <span>OpenCode CLI 路径</span>
                             <input
@@ -1333,17 +1251,11 @@ export default function AdminPage() {
                       )}
                     </div>
                   ))}
-                  <button type="button" className="ui-btn secondary" style={{ marginTop: '0.5rem' }} onClick={() => addImRunner()}>
+                  <button type="button" className="ui-btn secondary ui-mt-md" onClick={() => addImRunner()}>
                     添加 Runner
                   </button>
                 </div>
-                <div
-                  style={{
-                    marginTop: '1rem',
-                    borderTop: '1px solid var(--ui-border, #333)',
-                    paddingTop: '0.75rem',
-                  }}
-                >
+                <div className="ui-im-section-divider-lg">
                   <p className="ui-muted ui-small">
                     <strong>Auto 模式（混合 Telegram + Redis）</strong>：同时填写 Telegram token 与 Redis URL 后，用户文本进入<strong>当前聊天所选 Runner</strong>（<code>/runner</code>）对应的 master <code>input</code>；桥从 Redis 取出后跑该 Runner 作为协调器，回复发到 Telegram 并写入 master <code>out</code>，随后下发给 slave（工具）。<strong>master 与 slave 同一条桥接进程</strong>；slave 若需独立 API Key 等，在下方「Slave Runner」配置后点击「保存 config.slave.env」。可选：<strong>另起桥接目录</strong>专跑 slave（两桥同一 Redis 命名空间 + 勾选「Slave 由独立桥接消费」）。前缀 <code>[master]</code> / <code>[slave]</code>。Telegram token 与 Redis URL 均<strong>必填</strong>。启用后关闭<strong>流式预览</strong>与<strong>运行时 token 级流式输出</strong>。
                   </p>
@@ -1437,12 +1349,12 @@ export default function AdminPage() {
                         />
                       </label>
                       {spec.channel !== 'telegram' && (
-                        <p className="ui-muted ui-small" style={{ gridColumn: '1 / -1', margin: 0 }}>
+                        <p className="ui-muted ui-small ui-grid-span-full ui-m-0">
                           Auto 模式仅支持 Telegram 混合模式；请先将平台切换为 Telegram 并填写 Bot Token。
                         </p>
                       )}
-                      <div style={{ gridColumn: '1 / -1' }}>
-                        <p className="ui-muted ui-small" style={{ marginBottom: '0.5rem' }}>
+                      <div className="ui-grid-span-full">
+                        <p className="ui-muted ui-small ui-mb-md-half">
                           <strong>Slave 专用 Runner</strong>：字段与上方 Runners 相同；留空 Runner ID 则不使用专用配置，slave 与<strong>默认 Runner</strong>相同。Master 与 Slave 始终为独立桥接进程；配置完成后点击「保存 config.slave.env」将 Slave Runner 配置导出，另起桥接加载。
                         </p>
                         {(() => {
@@ -1466,7 +1378,7 @@ export default function AdminPage() {
                             });
                           };
                           return (
-                            <div className="ui-slot" style={{ marginTop: '0.25rem' }}>
+                            <div className="ui-slot ui-mt-xs">
                               <div className="ui-slot-head">
                                 <strong>Slave Runner</strong>
                                 {spec.autoSlaveRunner?.id?.trim() ? (
@@ -1558,10 +1470,7 @@ export default function AdminPage() {
                               </div>
                               {slaveProf.runtime === 'claude' && (
                                 <>
-                                  <div
-                                    className="ui-grid"
-                                    style={{ marginTop: '0.75rem', marginBottom: '0.75rem' }}
-                                  >
+                                  <div className="ui-grid ui-grid-runner-runtime">
                                     <label className="ui-field">
                                       <span>Claude CLI 路径</span>
                                       <input
@@ -1587,10 +1496,7 @@ export default function AdminPage() {
                               )}
                               {slaveProf.runtime === 'codex' && (
                                 <>
-                                  <div
-                                    className="ui-grid"
-                                    style={{ marginTop: '0.75rem', marginBottom: '0.75rem' }}
-                                  >
+                                  <div className="ui-grid ui-grid-runner-runtime">
                                     <label className="ui-field">
                                       <span>Codex wrapper 路径</span>
                                       <input
@@ -1615,10 +1521,7 @@ export default function AdminPage() {
                                 </>
                               )}
                               {slaveProf.runtime === 'cursor' && (
-                                <div
-                                  className="ui-grid"
-                                  style={{ marginTop: '0.75rem', marginBottom: '0.75rem' }}
-                                >
+                                <div className="ui-grid ui-grid-runner-runtime">
                                   <label className="ui-field">
                                     <span>Cursor agent 路径</span>
                                     <input
@@ -1631,10 +1534,7 @@ export default function AdminPage() {
                                 </div>
                               )}
                               {slaveProf.runtime === 'copilot' && (
-                                <div
-                                  className="ui-grid"
-                                  style={{ marginTop: '0.75rem', marginBottom: '0.75rem' }}
-                                >
+                                <div className="ui-grid ui-grid-runner-runtime">
                                   <label className="ui-field">
                                     <span>Copilot CLI 路径</span>
                                     <input
@@ -1647,10 +1547,7 @@ export default function AdminPage() {
                                 </div>
                               )}
                               {slaveProf.runtime === 'opencode' && (
-                                <div
-                                  className="ui-grid"
-                                  style={{ marginTop: '0.75rem', marginBottom: '0.75rem' }}
-                                >
+                                <div className="ui-grid ui-grid-runner-runtime">
                                   <label className="ui-field">
                                     <span>OpenCode CLI 路径</span>
                                     <input
@@ -1663,7 +1560,7 @@ export default function AdminPage() {
                                 </div>
                               )}
                               {spec.channel === 'telegram' && spec.tgBotToken?.trim() && spec.autoRedisUrl?.trim() && (
-                                <div style={{ marginTop: '0.75rem' }}>
+                                <div className="ui-grid-mt-lg">
                                   <button
                                     type="button"
                                     className="ui-btn ui-btn-sm"
@@ -1672,7 +1569,7 @@ export default function AdminPage() {
                                   >
                                     {saving ? '保存中…' : '保存 config.slave.env'}
                                   </button>
-                                  <span className="ui-muted ui-small" style={{ marginLeft: '0.75rem' }}>
+                                  <span className="ui-muted ui-small ui-ml-12">
                                     将上方 Slave Runner 配置导出为 <code>config.slave.env</code>，供独立 slave 桥接加载。
                                   </span>
                                 </div>
@@ -1688,31 +1585,20 @@ export default function AdminPage() {
             );})()}
           </div>
         )}
-        <p className="ui-muted ui-small" style={{ marginTop: '1rem' }}>
+        <p className="ui-muted ui-small ui-mt-xl">
           写入配置中的 CTI_RUNTIME（本目录）：<code>{cfgB.runtime}</code>
         </p>
-        <div
-          className="ui-actions-bar ui-bridge-panel-actions"
-          style={{
-            marginTop: '1.25rem',
-            paddingTop: '1rem',
-            borderTop: '1px solid var(--ui-border, #333)',
-            display: 'flex',
-            flexWrap: 'wrap',
-            gap: '0.75rem',
-            alignItems: 'flex-end',
-          }}
-        >
+        <div className="ui-actions-bar ui-bridge-panel-actions ui-bridge-save-footer">
           {isKanbanBridgeRow ? (
-            <p className="ui-muted ui-small" style={{ margin: 0, flex: '1 1 200px' }}>
+            <p className="ui-muted ui-small ui-flex-note-200">
               Kanban 平台目录：仅可保存 <code>config.env</code>；启动与停止由平台进程管理，不在此操作。
             </p>
           ) : !canSwitchBridges ? (
-            <p className="ui-muted ui-small" style={{ margin: 0, flex: '1 1 200px' }}>
+            <p className="ui-muted ui-small ui-flex-note-200">
               已设置 <code>CTI_HOME</code> 时由环境固定目录，无法在此新建多个桥接目录。
             </p>
           ) : (
-            <p className="ui-muted ui-small" style={{ margin: 0, flex: '1 1 200px' }}>
+            <p className="ui-muted ui-small ui-flex-note-200">
               左侧箭头只展开/收起本行表单；各行可独立保存、启动或停止。
             </p>
           )}

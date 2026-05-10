@@ -1512,7 +1512,7 @@ export default function BoardPage() {
           <strong>点击卡片标题</strong>查看任务详情（分配快照、工作流记录、各角色发言）；待办卡片点「领取」分配任务。<strong>活跃列</strong>可「手动推进」（向当前 lane 入队用户消息）。自动推进失败时由 <code>system_check</code> 循环确认，上限{' '}
           <code>CTI_KANBAN_CONFIRMATION_MAX_LOOPS</code>（默认 10）。提交评审、PR、测试/回归、关单等仍由各 lane agent 调 API 完成。
         </p>
-        <p className="lead ui-muted" style={{ marginTop: '0.75rem' }}>
+        <p className="lead ui-muted ui-lead-gap">
           Telegram：<code>CTI_KANBAN_TELEGRAM_*</code>；worktree：<code>CTI_KANBAN_USE_WORKTREE=1</code>。Slave goal 与 <code>CTI_SLAVE_REPORT_GOAL</code> 等同原说明。
         </p>
         <nav className="ui-nav">
@@ -1533,7 +1533,7 @@ export default function BoardPage() {
       {error ? <p className="ui-banner">{error}</p> : null}
 
       {kanbanStatus ? (
-        <section className="ui-panel" style={{ marginBottom: '1.5rem' }}>
+        <section className="ui-panel ui-panel-section">
           <h2 className="ui-h2">项目与任务计数</h2>
           <p className="ui-muted">
             待办 {kanbanStatus.tasksByState.todo} · 队列 {kanbanStatus.tasksByState.pending_start ?? 0} · 开发中{' '}
@@ -1551,7 +1551,7 @@ export default function BoardPage() {
                   <li key={row.projectId}>
                     <strong>{row.name}</strong>
                     {row.owner ? <span className="ui-muted"> — 负责人 {row.owner}</span> : null}
-                    <span className="ui-muted" style={{ display: 'block', marginTop: '0.25rem' }}>
+                    <span className="ui-muted ui-block-mt-xs">
                       待办 {row.tasksByState.todo} · 队列 {row.tasksByState.pending_start ?? 0} · 开发中{' '}
                       {row.tasksByState.in_progress} · 前置测试 {row.tasksByState.pre_testing ?? 0} · 评审 {row.tasksByState.review} · 测试 {row.tasksByState.testing} · 回归{' '}
                       {row.tasksByState.regression_testing}
@@ -1571,16 +1571,15 @@ export default function BoardPage() {
         </section>
       ) : null}
 
-      <section className="ui-panel" style={{ marginBottom: '1.5rem' }}>
+      <section className="ui-panel ui-panel-section">
         <h2 className="ui-h2">看板筛选</h2>
-        <p className="ui-muted ui-small" style={{ marginBottom: '0.75rem' }}>
+        <p className="ui-muted ui-small ui-mb-lg">
           仅影响上方任务列显示；与下方「新建任务 / 迭代」独立。选「全部项目」可一次查看所有任务。
         </p>
         <label>
           筛选项目
           <select
-            className="ui-input"
-            style={{ maxWidth: '420px' }}
+            className="ui-input ui-max-w-field"
             value={filterProjectId}
             onChange={(e) => setFilterProjectId(e.target.value)}
           >
@@ -1594,13 +1593,13 @@ export default function BoardPage() {
         </label>
       </section>
 
-      <section className="ui-panel" style={{ marginBottom: '1.5rem' }}>
+      <section className="ui-panel ui-panel-section">
         <h2 className="ui-h2">迭代（Sprint）</h2>
-        <p className="ui-muted ui-small" style={{ marginBottom: '0.75rem' }}>
+        <p className="ui-muted ui-small ui-mb-lg">
           先选项目，再开启迭代（会在仓库中创建 <code>feature/&lt;名称&gt;</code> 分支）。无迭代时无法新建任务。也可在{' '}
           <a href="/projects">项目管理</a> 中维护仓库路径与分支前缀。
         </p>
-        <div className="ui-form-row" style={{ display: 'flex', flexWrap: 'wrap', gap: '0.75rem', alignItems: 'flex-end' }}>
+        <div className="ui-form-row">
           <label>
             项目
             <select
@@ -1634,7 +1633,7 @@ export default function BoardPage() {
           </button>
         </div>
         {createProjectId && sprints.length > 0 ? (
-          <ul className="ui-list" style={{ marginTop: '1rem' }}>
+          <ul className="ui-list ui-list-mt">
             {sprints.map((s) => (
               <li key={s.id}>
                 <strong>{s.name}</strong> — <span className="ui-mono">{s.branchName}</span>
@@ -1642,27 +1641,18 @@ export default function BoardPage() {
             ))}
           </ul>
         ) : createProjectId ? (
-          <p className="ui-muted" style={{ marginTop: '0.75rem' }}>
+          <p className="ui-muted ui-mt-lg">
             当前项目尚无迭代，请填写名称并点击「开启迭代」。
           </p>
         ) : null}
       </section>
 
-      <section className="ui-panel" style={{ marginBottom: '1.5rem' }}>
-        <div
-          style={{
-            display: 'flex',
-            justifyContent: 'space-between',
-            alignItems: 'center',
-            flexWrap: 'wrap',
-            gap: '0.75rem',
-            marginBottom: '0.5rem',
-          }}
-        >
-          <h2 className="ui-h2" style={{ margin: 0 }}>
+      <section className="ui-panel ui-panel-section">
+        <div className="ui-section-head">
+          <h2 className="ui-h2 ui-h2-zero">
             新建任务（进入待办）
           </h2>
-          <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.5rem', alignItems: 'center' }}>
+          <div className="ui-toolbar-cluster">
             <button
               type="button"
               className="ui-btn secondary"
@@ -1699,7 +1689,7 @@ export default function BoardPage() {
             </button>
           </div>
         </div>
-        <p className="ui-muted ui-small" style={{ marginBottom: '0.75rem' }}>
+        <p className="ui-muted ui-small ui-mb-lg">
           Issue ID 由服务端按项目自动生成（格式 <code>前缀-序号</code>）。前缀默认取项目 ID 的第一段（如 <code>demo-app</code> →{' '}
           <code>DEMO</code>），可在 <a href="/projects">项目管理</a> 中设置「Issue 前缀」覆盖。
           {nextIssueHint ? (
@@ -1709,7 +1699,7 @@ export default function BoardPage() {
             </>
           ) : null}
         </p>
-        <div className="ui-form-row" style={{ display: 'flex', flexWrap: 'wrap', gap: '0.75rem', alignItems: 'flex-end' }}>
+        <div className="ui-form-row">
           <label>
             项目
             <select
@@ -1784,7 +1774,7 @@ export default function BoardPage() {
                 </div>
               ) : null}
             </div>
-            {/* <span className="ui-muted ui-small" style={{ display: 'block', marginTop: 4 }}>
+            {/* <span className="ui-muted ui-small ui-block-mt-md">
               {createProjectId && createDependencyOptions.length === 0
                 ? '当前项目尚无任务；创建首个任务后，后续任务可依赖已存在的 Issue。'
                 : '点击展开下拉，勾选若干 Issue。'}
@@ -1793,7 +1783,7 @@ export default function BoardPage() {
           <button type="button" className="ui-btn" disabled={busy || !projects.length} onClick={() => void createTask()}>
             创建
           </button>
-          <label style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', fontSize: '0.85rem', cursor: 'pointer' }}>
+          <label className="ui-checkbox-row-sm">
             <input
               type="checkbox"
               checked={createIsHotfix}
@@ -1811,7 +1801,7 @@ export default function BoardPage() {
           {COLUMNS.map((col) => (
             <section key={col.key} className="ui-column">
               <h2>
-                <span style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', flexWrap: 'wrap' }}>
+                <span className="ui-column-card-toolbar">
                   {col.label}
                   {col.key === 'todo' ? (
                     <button
@@ -1848,30 +1838,22 @@ export default function BoardPage() {
                         {task.title}
                       </button>
                       {task.isHotfix ? (
-                        <span style={{ display: 'inline-block', fontSize: '0.65rem', fontWeight: 700, background: '#f59e0b', color: '#000', borderRadius: 4, padding: '1px 6px', marginRight: 4 }}>
-                          HOTFIX
-                        </span>
+                        <span className="ui-badge-hotfix">HOTFIX</span>
                       ) : null}
                       {task.workflowState === 'closing' ? (
-                        <p className="ui-card-meta" style={{ color: 'var(--ui-accent, #38bdf8)' }}>
-                          ⏳ 正在验证合并并检查覆盖率…
-                        </p>
+                        <p className="ui-card-meta ui-text-accent">正在验证合并并检查覆盖率…</p>
                       ) : null}
                       {task.workflowState === 'regression_testing' && task.kanbanAgent === 'self-host-runner' ? (
-                        <p className="ui-card-meta" style={{ color: 'var(--ui-accent, #38bdf8)' }}>
-                          ⏳ 等待 Self-Hosted Runner CI 结果…
-                        </p>
+                        <p className="ui-card-meta ui-text-accent">等待 Self-Hosted Runner CI 结果…</p>
                       ) : null}
                       {task.workflowState === 'blocked' ? (
-                        <p className="ui-card-meta" style={{ color: '#f87171' }}>
-                          🚫 {task.blockReason ?? '已阻塞'}
-                        </p>
+                        <p className="ui-card-meta ui-text-danger">阻塞：{task.blockReason ?? '已阻塞'}</p>
                       ) : null}
                       {task.dependsOnIssueIds?.length ? (
                         <p className="ui-card-meta ui-muted">依赖: {task.dependsOnIssueIds.join(', ')}</p>
                       ) : null}
                       {task.agentGenerating ? (
-                        <p className="ui-card-meta" style={{ color: 'var(--ui-accent, #38bdf8)' }}>
+                        <p className="ui-card-meta ui-text-accent">
                           Agent 正在生成回复…
                         </p>
                       ) : null}
@@ -1984,40 +1966,30 @@ export default function BoardPage() {
       {assignModalTask ? (
         <div
           role="presentation"
-          style={{
-            position: 'fixed',
-            inset: 0,
-            zIndex: 200,
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'center',
-            padding: '16px',
-            background: 'rgba(2, 6, 23, 0.72)',
-          }}
+          className="ui-modal-backdrop"
           onClick={() => setAssignModalTask(null)}
         >
           <div
             role="dialog"
             aria-modal="true"
             aria-labelledby="assign-modal-title"
-            className="ui-panel"
-            style={{ maxWidth: 440, width: '100%' }}
+            className="ui-panel ui-modal-panel-sm"
             onClick={(e) => e.stopPropagation()}
           >
-            <h2 id="assign-modal-title" className="ui-h2" style={{ marginTop: 0 }}>
+            <h2 id="assign-modal-title" className="ui-h2 ui-h2-zero">
               从待办分配：{assignModalTask.issueId}
             </h2>
-            <p className="ui-muted ui-small" style={{ marginBottom: '1rem' }}>
+            <p className="ui-muted ui-small ui-mb-xl">
               负责人决定谁来做，并对应其所在开发 lane（<code>agent-开发</code> / <code>codex-高级开发</code>）与
               runner。<strong>自动分配</strong>时：评审打回次数<strong>大于 2</strong>（第 3 次及以后打回再开发）固定走高级开发 lane，否则走普通开发。
               评审与测试 lane 由后续步骤自动挂载。
             </p>
             {modalTodoAssignOptions.length > 0 ? (
-              <div style={{ marginTop: '0.75rem' }}>
-                <p className="ui-muted ui-small" style={{ marginBottom: '0.35rem' }}>
+              <div className="ui-mt-lg">
+                <p className="ui-muted ui-small ui-mb-xs">
                   分配方式（已配置多名人员时）
                 </p>
-                <label style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', marginBottom: '0.35rem' }}>
+                <label className="ui-label-radio-mb">
                   <input
                     type="radio"
                     name="assign-mode"
@@ -2026,7 +1998,7 @@ export default function BoardPage() {
                   />
                   自动（按对应 lane：历史上该任务该 lane 给谁则继续给谁；否则给当前负载最少的人）
                 </label>
-                <label style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                <label className="ui-label-radio">
                   <input
                     type="radio"
                     name="assign-mode"
@@ -2037,8 +2009,7 @@ export default function BoardPage() {
                 </label>
                 {modalAssignMode === 'manual' ? (
                   <select
-                    className="ui-input"
-                    style={{ width: '100%', marginTop: '0.5rem' }}
+                    className="ui-input ui-input-block-mt"
                     value={modalAssigneeOptionValue}
                     onChange={(e) => setModalAssigneeOptionValue(e.target.value)}
                   >
@@ -2053,11 +2024,11 @@ export default function BoardPage() {
               </div>
             ) : null}
             {assignModalKanbanMapping === null || laneMembersByKind === null ? (
-              <p className="ui-muted ui-small" style={{ marginTop: '0.75rem' }}>
+              <p className="ui-muted ui-small ui-mt-lg">
                 正在加载角色与 Runner 配置…
               </p>
             ) : !assignModalCanAssignFromTodo ? (
-              <p className="ui-small" style={{ marginTop: '0.75rem', color: '#f87171' }}>
+              <p className="ui-small ui-mt-lg ui-text-danger">
                 无法分配：请先打开{' '}
                 <a href="/board/roles" className="ui-link">
                   角色与 Runner
@@ -2066,21 +2037,20 @@ export default function BoardPage() {
                 <code>agent-开发</code> 或 <code>codex-高级开发</code>；指定人员时以所选 lane 为准）。
               </p>
             ) : modalTodoAssignOptions.length === 0 ? (
-              <p className="ui-muted ui-small" style={{ marginTop: '0.75rem' }}>
+              <p className="ui-muted ui-small ui-mt-lg">
                 该项目已为当前将使用的开发 lane 配置「单 lane 默认 runner」或至少一名人员，可分配并启动。
               </p>
             ) : null}
-            <label style={{ display: 'block', marginTop: '0.75rem' }}>
+            <label className="ui-label-block-mt">
               交接说明（可选，有内容时会写入工作流 comment）
               <textarea
-                className="ui-input"
-                style={{ width: '100%', minHeight: 88, marginTop: 4 }}
+                className="ui-input ui-textarea-md"
                 value={modalHandoff}
                 onChange={(e) => setModalHandoff(e.target.value)}
                 placeholder="需要时填写；留空则仅按 lane 分配并启动"
               />
             </label>
-            <div className="ui-actions-bar" style={{ marginTop: '1.25rem', display: 'flex', gap: '0.5rem', flexWrap: 'wrap' }}>
+            <div className="ui-actions-bar ui-actions-footer">
               <button type="button" className="ui-btn ghost" disabled={busy} onClick={() => setAssignModalTask(null)}>
                 取消
               </button>
@@ -2100,54 +2070,25 @@ export default function BoardPage() {
       {bulkAssignOpen ? (
         <div
           role="presentation"
-          style={{
-            position: 'fixed',
-            inset: 0,
-            zIndex: 201,
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'center',
-            padding: '16px',
-            background: 'rgba(2, 6, 23, 0.72)',
-          }}
+          className="ui-modal-backdrop ui-modal-z201"
           onClick={() => setBulkAssignOpen(false)}
         >
           <div
             role="dialog"
             aria-modal="true"
             aria-labelledby="bulk-assign-modal-title"
-            className="ui-panel"
-            style={{ maxWidth: 520, width: '100%', maxHeight: '90vh', display: 'flex', flexDirection: 'column' }}
+            className="ui-panel ui-modal-panel-md"
             onClick={(e) => e.stopPropagation()}
           >
-            <h2 id="bulk-assign-modal-title" className="ui-h2" style={{ marginTop: 0, flexShrink: 0 }}>
+            <h2 id="bulk-assign-modal-title" className="ui-h2 ui-h2-zero-shrink">
               批量领取（待办）
             </h2>
-            <p className="ui-muted ui-small" style={{ marginBottom: '0.75rem' }}>
+            <p className="ui-muted ui-small ui-mb-lg">
               勾选同一项目下的任务，选择分配方式后统一分配并启动 runner。
             </p>
-            <div
-              className="ui-bulk-task-list"
-              style={{
-                flex: 1,
-                minHeight: 0,
-                overflow: 'auto',
-                border: '1px solid rgba(148, 163, 184, 0.25)',
-                borderRadius: 10,
-                padding: '8px 10px',
-                marginBottom: '0.75rem',
-              }}
-            >
+            <div className="ui-modal-scroll">
               <label
-                style={{
-                  display: 'flex',
-                  alignItems: 'flex-start',
-                  gap: '0.5rem',
-                  padding: '6px 0',
-                  borderBottom: '1px solid rgba(148, 163, 184, 0.2)',
-                  marginBottom: 6,
-                  cursor: todoColumnTasks.length ? 'pointer' : 'default',
-                }}
+                className={`ui-bulk-select-all${!todoColumnTasks.length ? ' ui-cursor-default' : ''}`}
               >
                 <input
                   type="checkbox"
@@ -2157,37 +2098,27 @@ export default function BoardPage() {
                   disabled={!todoColumnTasks.length || busy}
                   onChange={() => toggleBulkSelectAll()}
                 />
-                <span style={{ fontWeight: 600 }}>全选</span>
+                <span className="ui-strong">全选</span>
               </label>
               {todoColumnTasks.length === 0 ? (
-                <p className="ui-muted ui-small" style={{ margin: '8px 0 0' }}>
+                <p className="ui-muted ui-small ui-my-tight">
                   当前待办列为空。
                 </p>
               ) : (
                 todoColumnTasks.map((task) => (
-                  <label
-                    key={task.id}
-                    style={{
-                      display: 'flex',
-                      alignItems: 'flex-start',
-                      gap: '0.5rem',
-                      padding: '8px 0',
-                      borderBottom: '1px solid rgba(148, 163, 184, 0.12)',
-                      cursor: 'pointer',
-                    }}
-                  >
+                  <label key={task.id} className="ui-bulk-task-row">
                     <input
                       type="checkbox"
                       checked={bulkSelectedTaskIds.includes(task.id)}
                       disabled={busy}
                       onChange={() => toggleBulkTask(task.id)}
                     />
-                    <span style={{ flex: 1, minWidth: 0 }}>
-                      <span className="ui-mono" style={{ fontSize: 12 }}>
+                    <span className="ui-flex-fill-min">
+                      <span className="ui-mono ui-mono-12">
                         {task.issueId}
                       </span>
-                      <span style={{ display: 'block', marginTop: 2 }}>{task.title}</span>
-                      <span className="ui-muted ui-small" style={{ display: 'block', marginTop: 4 }}>
+                      <span className="ui-block-mt-sm">{task.title}</span>
+                      <span className="ui-muted ui-small ui-block-mt-md">
                         {projectLabel(task.projectId)}
                       </span>
                     </span>
@@ -2197,19 +2128,19 @@ export default function BoardPage() {
             </div>
 
             {bulkSelectedSpansMultipleProjects ? (
-              <p className="ui-small" style={{ margin: '0 0 0.75rem', color: '#fbbf24' }}>
+              <p className="ui-small ui-mb-empty ui-text-warning">
                 已选任务属于多个项目。请只勾选同一项目的任务，或先在顶部筛选项目后再批量领取。
               </p>
             ) : null}
 
             {bulkSelectedTaskIds.length > 0 && !bulkSelectedSpansMultipleProjects ? (
               <>
-                <p className="ui-muted ui-small" style={{ marginBottom: '0.35rem' }}>
+                <p className="ui-muted ui-small ui-mb-xs">
                   分配方式（开发 lane）
                 </p>
                 {bulkModalTodoAssignOptions.length > 0 ? (
-                  <div style={{ marginTop: '0.35rem' }}>
-                    <label style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', marginBottom: '0.35rem' }}>
+                  <div className="ui-mt-sm">
+                    <label className="ui-label-radio-mb">
                       <input
                         type="radio"
                         name="bulk-assign-mode"
@@ -2218,7 +2149,7 @@ export default function BoardPage() {
                       />
                       自动（按 lane 与负载；打回次数 {'>'} 2 时用高级开发 lane）
                     </label>
-                    <label style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                    <label className="ui-label-radio">
                       <input
                         type="radio"
                         name="bulk-assign-mode"
@@ -2229,8 +2160,7 @@ export default function BoardPage() {
                     </label>
                     {bulkAssignMode === 'manual' ? (
                       <select
-                        className="ui-input"
-                        style={{ width: '100%', marginTop: '0.5rem' }}
+                        className="ui-input ui-input-block-mt"
                         value={bulkAssigneeOptionValue}
                         onChange={(e) => setBulkAssigneeOptionValue(e.target.value)}
                       >
@@ -2245,11 +2175,11 @@ export default function BoardPage() {
                   </div>
                 ) : null}
                 {bulkAssignKanbanMapping === null || bulkLaneMembersByKind === null ? (
-                  <p className="ui-muted ui-small" style={{ marginTop: '0.35rem' }}>
+                  <p className="ui-muted ui-small ui-mt-sm">
                     正在加载角色与 Runner 配置…
                   </p>
                 ) : !bulkTodoAssignFromTodoAllowed ? (
-                  <p className="ui-small" style={{ marginTop: '0.35rem', color: '#f87171' }}>
+                  <p className="ui-small ui-mt-sm ui-text-danger">
                     无法分配：请先在{' '}
                     <a href="/board/roles" className="ui-link">
                       角色与 Runner
@@ -2257,15 +2187,14 @@ export default function BoardPage() {
                     为对应项目配置各 lane 的默认 runner 或人员（自动分配时按任务分别使用 agent-开发 / codex-高级开发 lane；指定人员时以所选 lane 为准）。
                   </p>
                 ) : bulkModalTodoAssignOptions.length === 0 ? (
-                  <p className="ui-muted ui-small" style={{ marginTop: '0.35rem' }}>
+                  <p className="ui-muted ui-small ui-mt-sm">
                     已为所选任务将使用的开发 lane 配置 runner 或人员，可批量分配。
                   </p>
                 ) : null}
-                <label style={{ display: 'block', marginTop: '0.75rem' }}>
+                <label className="ui-label-block-mt">
                   交接说明（可选，将写入每个任务的工作流 comment）
                   <textarea
-                    className="ui-input"
-                    style={{ width: '100%', minHeight: 72, marginTop: 4 }}
+                    className="ui-input ui-textarea-sm"
                     value={bulkHandoff}
                     onChange={(e) => setBulkHandoff(e.target.value)}
                     placeholder="需要时填写；留空则仅按 lane 分配并启动"
@@ -2273,12 +2202,12 @@ export default function BoardPage() {
                 </label>
               </>
             ) : (
-              <p className="ui-muted ui-small" style={{ margin: '0 0 0.75rem' }}>
+              <p className="ui-muted ui-small ui-mb-empty">
                 勾选任务后将显示分配方式。
               </p>
             )}
 
-            <div className="ui-actions-bar" style={{ marginTop: '1rem', display: 'flex', gap: '0.5rem', flexWrap: 'wrap' }}>
+            <div className="ui-actions-bar ui-actions-footer-md">
               <button type="button" className="ui-btn ghost" disabled={busy} onClick={() => setBulkAssignOpen(false)}>
                 取消
               </button>
@@ -2303,53 +2232,25 @@ export default function BoardPage() {
       {bulkCloseOpen ? (
         <div
           role="presentation"
-          style={{
-            position: 'fixed',
-            inset: 0,
-            zIndex: 201,
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'center',
-            padding: '16px',
-            background: 'rgba(2, 6, 23, 0.72)',
-          }}
+          className="ui-modal-backdrop ui-modal-z201"
           onClick={() => setBulkCloseOpen(false)}
         >
           <div
             role="dialog"
             aria-modal="true"
             aria-labelledby="bulk-close-modal-title"
-            className="ui-panel"
-            style={{ maxWidth: 520, width: '100%', maxHeight: '90vh', display: 'flex', flexDirection: 'column' }}
+            className="ui-panel ui-modal-panel-md"
             onClick={(e) => e.stopPropagation()}
           >
-            <h2 id="bulk-close-modal-title" className="ui-h2" style={{ marginTop: 0, flexShrink: 0 }}>
+            <h2 id="bulk-close-modal-title" className="ui-h2 ui-h2-zero-shrink">
               批量标记完成（合并主干）
             </h2>
-            <p className="ui-muted ui-small" style={{ marginBottom: '0.75rem' }}>
+            <p className="ui-muted ui-small ui-mb-lg">
               勾选「合并主干」列中的任务，将依次调用关单（与单卡标记完成相同：必要时确保 release PR 等）。
             </p>
-            <div
-              style={{
-                flex: 1,
-                minHeight: 0,
-                overflow: 'auto',
-                border: '1px solid rgba(148, 163, 184, 0.25)',
-                borderRadius: 10,
-                padding: '8px 10px',
-                marginBottom: '0.75rem',
-              }}
-            >
+            <div className="ui-modal-scroll">
               <label
-                style={{
-                  display: 'flex',
-                  alignItems: 'flex-start',
-                  gap: '0.5rem',
-                  padding: '6px 0',
-                  borderBottom: '1px solid rgba(148, 163, 184, 0.2)',
-                  marginBottom: 6,
-                  cursor: pendingReleaseColumnTasks.length ? 'pointer' : 'default',
-                }}
+                className={`ui-bulk-select-all${!pendingReleaseColumnTasks.length ? ' ui-cursor-default' : ''}`}
               >
                 <input
                   type="checkbox"
@@ -2360,37 +2261,27 @@ export default function BoardPage() {
                   disabled={!pendingReleaseColumnTasks.length || busy}
                   onChange={() => toggleBulkCloseSelectAll()}
                 />
-                <span style={{ fontWeight: 600 }}>全选</span>
+                <span className="ui-strong">全选</span>
               </label>
               {pendingReleaseColumnTasks.length === 0 ? (
-                <p className="ui-muted ui-small" style={{ margin: '8px 0 0' }}>
+                <p className="ui-muted ui-small ui-my-tight">
                   当前「合并主干」列为空。
                 </p>
               ) : (
                 pendingReleaseColumnTasks.map((task) => (
-                  <label
-                    key={task.id}
-                    style={{
-                      display: 'flex',
-                      alignItems: 'flex-start',
-                      gap: '0.5rem',
-                      padding: '8px 0',
-                      borderBottom: '1px solid rgba(148, 163, 184, 0.12)',
-                      cursor: 'pointer',
-                    }}
-                  >
+                  <label key={task.id} className="ui-bulk-task-row">
                     <input
                       type="checkbox"
                       checked={bulkCloseSelectedTaskIds.includes(task.id)}
                       disabled={busy}
                       onChange={() => toggleBulkCloseTask(task.id)}
                     />
-                    <span style={{ flex: 1, minWidth: 0 }}>
-                      <span className="ui-mono" style={{ fontSize: 12 }}>
+                    <span className="ui-flex-fill-min">
+                      <span className="ui-mono ui-mono-12">
                         {task.issueId}
                       </span>
-                      <span style={{ display: 'block', marginTop: 2 }}>{task.title}</span>
-                      <span className="ui-muted ui-small" style={{ display: 'block', marginTop: 4 }}>
+                      <span className="ui-block-mt-sm">{task.title}</span>
+                      <span className="ui-muted ui-small ui-block-mt-md">
                         {projectLabel(task.projectId)}
                       </span>
                     </span>
@@ -2398,7 +2289,7 @@ export default function BoardPage() {
                 ))
               )}
             </div>
-            <div className="ui-actions-bar" style={{ marginTop: '0.25rem', display: 'flex', gap: '0.5rem', flexWrap: 'wrap' }}>
+            <div className="ui-actions-bar ui-actions-footer-xs">
               <button type="button" className="ui-btn ghost" disabled={busy} onClick={() => setBulkCloseOpen(false)}>
                 取消
               </button>
@@ -2418,51 +2309,40 @@ export default function BoardPage() {
       {batchCreateOpen ? (
         <div
           role="presentation"
-          style={{
-            position: 'fixed',
-            inset: 0,
-            zIndex: 202,
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'center',
-            padding: '16px',
-            background: 'rgba(2, 6, 23, 0.72)',
-          }}
+          className="ui-modal-backdrop ui-modal-z202"
           onClick={() => setBatchCreateOpen(false)}
         >
           <div
             role="dialog"
             aria-modal="true"
             aria-labelledby="batch-create-modal-title"
-            className="ui-panel"
-            style={{ maxWidth: 640, width: '100%', maxHeight: '92vh', display: 'flex', flexDirection: 'column' }}
+            className="ui-panel ui-modal-panel-lg"
             onClick={(e) => e.stopPropagation()}
           >
-            <h2 id="batch-create-modal-title" className="ui-h2" style={{ marginTop: 0, flexShrink: 0 }}>
+            <h2 id="batch-create-modal-title" className="ui-h2 ui-h2-zero-shrink">
               批量创建任务
             </h2>
-            <p className="ui-muted ui-small" style={{ marginBottom: '0.75rem' }}>
+            <p className="ui-muted ui-small ui-mb-lg">
               使用当前选择的<strong>项目</strong>与<strong>迭代</strong>（与下方「新建任务」表单一致）。粘贴需求、设计或清单后，由{' '}
               <strong>高级开发（codex-senior）</strong> 对应的 Codex runner 生成带依赖关系的任务列表；预览无误后再写入待办。
             </p>
-            <p className="ui-muted ui-small" style={{ marginBottom: '0.5rem' }}>
+            <p className="ui-muted ui-small ui-mb-md">
               项目：<strong>{effectiveProjectId ? projectLabel(effectiveProjectId) : '—'}</strong> · 迭代：
               <strong>
                 {sprintId ? (sprints.find((s) => s.id === sprintId)?.name ?? sprintId) : '—'}
               </strong>
             </p>
-            <label style={{ display: 'block', flexShrink: 0 }}>
+            <label className="ui-block-label-shrink">
               粘贴内容
               <textarea
-                className="ui-input"
-                style={{ width: '100%', minHeight: 160, marginTop: 6 }}
+                className="ui-input ui-textarea-batch"
                 value={batchCreateText}
                 onChange={(e) => setBatchCreateText(e.target.value)}
                 placeholder="粘贴 PRD、技术方案、bullet list 等…"
                 disabled={batchPreviewLoading || busy}
               />
             </label>
-            <div style={{ marginTop: '0.75rem', display: 'flex', gap: '0.5rem', flexWrap: 'wrap', flexShrink: 0 }}>
+            <div className="ui-batch-actions-row">
               <button
                 type="button"
                 className="ui-btn"
@@ -2473,16 +2353,16 @@ export default function BoardPage() {
               </button>
             </div>
             {batchPreviewTasks ? (
-              <div style={{ marginTop: '1rem', flex: 1, minHeight: 0, overflow: 'auto' }}>
-                <p className="ui-muted ui-small" style={{ marginBottom: '0.5rem' }}>
+              <div className="ui-flex-grow-scroll">
+                <p className="ui-muted ui-small ui-mb-md">
                   预览（可再次点击「生成任务列表」覆盖）。「创建到待办」会把下表中的依赖写入真实任务（与「本批序号」一致）。
                 </p>
-                <ol style={{ margin: 0, paddingLeft: '1.25rem' }}>
+                <ol className="ui-ol-spaced">
                   {batchPreviewTasks.map((t, i) => (
-                    <li key={i} style={{ marginBottom: '0.5rem' }}>
+                    <li key={i}>
                       <span>{t.title}</span>
                       {t.dependsOnIndices?.length ? (
-                        <span className="ui-muted ui-small" style={{ display: 'block', marginTop: 2 }}>
+                        <span className="ui-muted ui-small ui-block-mt-sm">
                           依赖（本批序号）：{' '}
                           {t.dependsOnIndices
                             .map((j) => {
@@ -2497,7 +2377,7 @@ export default function BoardPage() {
                 </ol>
               </div>
             ) : null}
-            <div className="ui-actions-bar" style={{ marginTop: '1rem', display: 'flex', gap: '0.5rem', flexWrap: 'wrap' }}>
+            <div className="ui-actions-bar ui-actions-footer-md">
               <button type="button" className="ui-btn ghost" disabled={busy} onClick={() => setBatchCreateOpen(false)}>
                 取消
               </button>
@@ -2517,99 +2397,51 @@ export default function BoardPage() {
       {brainstormOpen ? (
         <div
           role="presentation"
-          style={{
-            position: 'fixed',
-            inset: 0,
-            zIndex: 203,
-            display: 'flex',
-            alignItems: 'stretch',
-            justifyContent: 'stretch',
-            padding: 0,
-            background: 'rgba(2, 6, 23, 0.72)',
-          }}
+          className="ui-modal-backdrop-full"
           onClick={() => setBrainstormOpen(false)}
         >
           <div
             role="dialog"
             aria-modal="true"
             aria-labelledby="brainstorm-modal-title"
-            className="ui-panel"
-            style={{
-              width: '100%',
-              height: '100%',
-              maxWidth: 'none',
-              maxHeight: 'none',
-              minHeight: '100%',
-              boxSizing: 'border-box',
-              borderRadius: 0,
-              display: 'flex',
-              flexDirection: 'column',
-              padding: '1rem 1.25rem',
-            }}
+            className="ui-panel ui-modal-brainstorm-panel"
             onClick={(e) => e.stopPropagation()}
           >
-            <h2 id="brainstorm-modal-title" className="ui-h2" style={{ marginTop: 0, flexShrink: 0 }}>
+            <h2 id="brainstorm-modal-title" className="ui-h2 ui-h2-zero-shrink">
               需求讨论
             </h2>
-            <p className="ui-muted ui-small" style={{ marginBottom: '0.5rem' }}>
+            <p className="ui-muted ui-small ui-mb-md">
               使用当前<strong>项目</strong>仓库与<strong>高级开发（codex-senior）</strong> Codex runner 流式回复；底层为<strong>只读沙箱</strong>，无法写入仓库或执行改码命令。对话按 brainstorming：澄清 → 方案对比 → 分块设计 → 引导将结论整理为{' '}
-              <code className="ui-mono" style={{ fontSize: 12 }}>
+              <code className="ui-mono ui-mono-12">
                 docs/plans/
               </code>
               下的 Markdown 计划（仅产出讨论与计划文案，不实施代码）。
             </p>
-            <p className="ui-muted ui-small" style={{ marginBottom: '0.75rem' }}>
+            <p className="ui-muted ui-small ui-mb-lg">
               项目：<strong>{effectiveProjectId ? projectLabel(effectiveProjectId) : '—'}</strong>
               {' · '}
               迭代：
               <strong>{sprintId ? (sprints.find((s) => s.id === sprintId)?.name ?? sprintId) : '—'}</strong>
               （未在表单选项目时使用列表中的第一个项目；批量拆任务需已选迭代）
             </p>
-            <div style={{ flex: 1, minHeight: 0, display: 'flex', gap: '0.75rem', flexWrap: 'wrap' }}>
-              <section style={{ flex: '1 1 520px', minWidth: 320, display: 'flex', flexDirection: 'column', minHeight: 0 }}>
-                <div
-                  className="ui-task-detail-scroll"
-                  style={{
-                    flex: 1,
-                    minHeight: 260,
-                    overflow: 'auto',
-                    border: '1px solid rgba(148, 163, 184, 0.2)',
-                    borderRadius: 8,
-                    padding: '12px',
-                    marginBottom: '0.75rem',
-                    background: 'rgba(15, 23, 42, 0.35)',
-                  }}
-                >
+            <div className="ui-brainstorm-split">
+              <section className="ui-brainstorm-chat">
+                <div className="ui-brainstorm-chat-scroll">
                   {brainstormMessages.length === 0 ? (
-                    <p className="ui-muted ui-small" style={{ margin: 0 }}>
+                    <p className="ui-muted ui-small ui-m-0">
                       先用一句话说明你的目标；助手会复述理解并<strong>一次只问一个</strong>澄清问题，随后再带你收敛方案并整理成可保存的 plan 文档路径建议。
                     </p>
                   ) : (
                     brainstormMessages.map((msg, i) => (
                       <div
                         key={i}
-                        style={{
-                          marginBottom: '0.75rem',
-                          textAlign: msg.role === 'user' ? 'right' : 'left',
-                        }}
+                        className={`ui-brainstorm-msg-wrap ${msg.role === 'user' ? 'ui-brainstorm-msg-wrap-user' : 'ui-brainstorm-msg-wrap-assistant'}`}
                       >
-                        <span className="ui-muted ui-small" style={{ display: 'block', marginBottom: 4 }}>
+                        <span className="ui-muted ui-small ui-brainstorm-msg-role">
                           {msg.role === 'user' ? '你' : '高级开发'}
                         </span>
                         <div
-                          style={{
-                            display: 'inline-block',
-                            maxWidth: '100%',
-                            textAlign: 'left',
-                            padding: '8px 12px',
-                            borderRadius: 8,
-                            background:
-                              msg.role === 'user'
-                                ? 'rgba(59, 130, 246, 0.22)'
-                                : 'rgba(148, 163, 184, 0.12)',
-                            whiteSpace: 'pre-wrap',
-                            wordBreak: 'break-word',
-                          }}
+                          className={`ui-brainstorm-bubble ${msg.role === 'user' ? 'ui-brainstorm-bubble-user' : 'ui-brainstorm-bubble-assistant'}`}
                         >
                           {msg.content || (msg.role === 'assistant' && brainstormStreaming ? '…' : '')}
                         </div>
@@ -2617,11 +2449,10 @@ export default function BoardPage() {
                     ))
                   )}
                 </div>
-                <label style={{ display: 'block', flexShrink: 0 }}>
+                <label className="ui-block-label-shrink">
                   消息
                   <textarea
-                    className="ui-input"
-                    style={{ width: '100%', minHeight: 88, marginTop: 6 }}
+                    className="ui-input ui-textarea-md-tight"
                     value={brainstormInput}
                     onChange={(e) => setBrainstormInput(e.target.value)}
                     placeholder={
@@ -2639,23 +2470,11 @@ export default function BoardPage() {
                   />
                 </label>
               </section>
-              <aside
-                style={{
-                  flex: '0 1 460px',
-                  minWidth: 320,
-                  display: 'flex',
-                  flexDirection: 'column',
-                  minHeight: 0,
-                  border: '1px solid rgba(148, 163, 184, 0.22)',
-                  borderRadius: 8,
-                  padding: '12px',
-                  background: 'rgba(15, 23, 42, 0.28)',
-                }}
-              >
-                <div style={{ display: 'flex', justifyContent: 'space-between', gap: '0.5rem', alignItems: 'center' }}>
+              <aside className="ui-brainstorm-aside">
+                <div className="ui-between-row">
                   <strong>方案稿</strong>
                   {brainstormDrafts.length > 0 ? (
-                    <select className="ui-input" style={{ width: 150 }} value={selectedDraft?.id ?? ''} onChange={(e) => setSelectedDraftId(e.target.value)}>
+                    <select className="ui-input ui-select-w-sm" value={selectedDraft?.id ?? ''} onChange={(e) => setSelectedDraftId(e.target.value)}>
                       {brainstormDrafts.map((draft) => (
                         <option key={draft.id} value={draft.id}>
                           v{draft.version}
@@ -2664,45 +2483,31 @@ export default function BoardPage() {
                     </select>
                   ) : null}
                 </div>
-                <p className="ui-muted ui-small" style={{ margin: '0.5rem 0' }}>
+                <p className="ui-muted ui-small ui-brainstorm-draft-meta">
                   {selectedDraft
                     ? `${selectedDraft.title} · ${new Date(selectedDraft.createdAt).toLocaleString()} · 来源 ${selectedDraft.sourceMessageCount} 条消息`
                     : draftMode === 'generating'
                       ? '正在生成结构化方案稿…'
                       : '先讨论需求，再生成方案稿。'}
                 </p>
-                <div
-                  className="ui-task-detail-scroll"
-                  style={{
-                    flex: 1,
-                    minHeight: 220,
-                    overflow: 'auto',
-                    border: '1px solid rgba(148, 163, 184, 0.16)',
-                    borderRadius: 8,
-                    padding: '10px',
-                    whiteSpace: 'pre-wrap',
-                    wordBreak: 'break-word',
-                    background: 'rgba(2, 6, 23, 0.2)',
-                  }}
-                >
+                <div className="ui-brainstorm-draft-body">
                   {draftMode === 'generating'
                     ? '生成中…'
                     : draftMode === 'revising'
                       ? '改稿中…'
                       : selectedDraft?.content || '暂无方案稿。'}
                 </div>
-                <label style={{ display: 'block', marginTop: '0.75rem' }}>
+                <label className="ui-label-block-mt">
                   改稿意见
                   <textarea
-                    className="ui-input"
-                    style={{ width: '100%', minHeight: 72, marginTop: 6 }}
+                    className="ui-input ui-textarea-sm"
                     value={revisionInstruction}
                     onChange={(e) => setRevisionInstruction(e.target.value)}
                     placeholder="例如：缩小范围，只保留 MVP；或把 UI 拆得更细…"
                     disabled={!selectedDraft || brainstormStreaming || draftMode !== 'idle'}
                   />
                 </label>
-                <div className="ui-actions-bar" style={{ marginTop: '0.75rem', display: 'flex', gap: '0.5rem', flexWrap: 'wrap' }}>
+                <div className="ui-actions-bar ui-actions-footer-sm">
                   <button
                     type="button"
                     className="ui-btn secondary"
@@ -2732,7 +2537,7 @@ export default function BoardPage() {
                 </div>
               </aside>
             </div>
-            <div className="ui-actions-bar" style={{ marginTop: '0.75rem', display: 'flex', gap: '0.5rem', flexWrap: 'wrap' }}>
+            <div className="ui-actions-bar ui-actions-footer-sm">
               <button type="button" className="ui-btn ghost" disabled={brainstormStreaming || draftMode !== 'idle'} onClick={() => setBrainstormOpen(false)}>
                 关闭
               </button>
@@ -2794,11 +2599,9 @@ export default function BoardPage() {
                 {brainstormStreaming ? '流式生成中…' : '发送'}
               </button>
             </div>
-            <p className="ui-muted ui-small" style={{ marginTop: '0.5rem', marginBottom: 0 }}>
+            <p className="ui-muted ui-small ui-mt-md ui-mb-0">
               快捷键：⌘/Ctrl + Enter 发送。方案成熟后先生成/改稿方案稿，再点「确认当前稿并生成待办」打开批量创建；平时以助手引导的{' '}
-              <code className="ui-mono" style={{ fontSize: 12 }}>
-                docs/plans/
-              </code>
+              <code className="ui-mono ui-mono-12">docs/plans/</code>
               文档为主。
             </p>
           </div>
@@ -2806,53 +2609,28 @@ export default function BoardPage() {
       ) : null}
 
       {taskDetailLoading && !taskDetailModal ? (
-        <div
-          role="status"
-          aria-live="polite"
-          style={{
-            position: 'fixed',
-            inset: 0,
-            zIndex: 205,
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'center',
-            padding: '16px',
-            background: 'rgba(2, 6, 23, 0.72)',
-          }}
-        >
-          <p className="ui-muted" style={{ fontSize: 15 }}>
-            加载任务详情…
-          </p>
+        <div role="status" aria-live="polite" className="ui-modal-loading">
+          <p className="ui-muted ui-muted-15">加载任务详情…</p>
         </div>
       ) : null}
 
       {taskDetailModal ? (
         <div
           role="presentation"
-          style={{
-            position: 'fixed',
-            inset: 0,
-            zIndex: 210,
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'center',
-            padding: '16px',
-            background: 'rgba(2, 6, 23, 0.72)',
-          }}
+          className="ui-modal-backdrop ui-modal-z210"
           onClick={() => closeTaskDetailModal()}
         >
           <div
             role="dialog"
             aria-modal="true"
             aria-labelledby="task-detail-modal-title"
-            className="ui-panel"
-            style={{ maxWidth: 720, width: '100%', maxHeight: '90vh', display: 'flex', flexDirection: 'column' }}
+            className="ui-panel ui-modal-panel-xl"
             onClick={(e) => e.stopPropagation()}
           >
-            <h2 id="task-detail-modal-title" className="ui-h2" style={{ marginTop: 0, flexShrink: 0 }}>
+            <h2 id="task-detail-modal-title" className="ui-h2 ui-h2-zero-shrink">
               {taskDetailModal.issueId} · {taskDetailModal.title}
             </h2>
-            <div className="ui-tab-row" role="tablist" style={{ flexShrink: 0, marginBottom: '0.75rem' }}>
+            <div className="ui-tab-row ui-tab-row-shrink" role="tablist">
               {(
                 [
                   { id: 'overview' as const, label: '概览' },
@@ -2872,22 +2650,16 @@ export default function BoardPage() {
                 </button>
               ))}
             </div>
-            <div className="ui-task-detail-scroll" style={{ flex: 1, minHeight: 0 }}>
+            <div className="ui-task-detail-scroll ui-task-scroll-grow">
               {taskDetailTab === 'overview' ? (
                 <>
-                  <dl style={{ margin: 0, display: 'grid', gap: '0.35rem 1rem', fontSize: 13 }}>
-                    <dt className="ui-muted" style={{ margin: 0 }}>
-                      状态
-                    </dt>
-                    <dd style={{ margin: 0 }}>{workflowStateLabel(taskDetailModal.workflowState)}</dd>
-                    <dt className="ui-muted" style={{ margin: 0 }}>
-                      项目
-                    </dt>
-                    <dd style={{ margin: 0 }}>{projectLabel(taskDetailModal.projectId)}</dd>
-                    <dt className="ui-muted" style={{ margin: 0 }}>
-                      迭代
-                    </dt>
-                    <dd style={{ margin: 0 }}>
+                  <dl className="ui-detail-dl">
+                    <dt className="ui-muted ui-detail-dt">状态</dt>
+                    <dd className="ui-detail-dd">{workflowStateLabel(taskDetailModal.workflowState)}</dd>
+                    <dt className="ui-muted ui-detail-dt">项目</dt>
+                    <dd className="ui-detail-dd">{projectLabel(taskDetailModal.projectId)}</dd>
+                    <dt className="ui-muted ui-detail-dt">迭代</dt>
+                    <dd className="ui-detail-dd">
                       {taskDetailSprint ? (
                         <>
                           {taskDetailSprint.name}{' '}
@@ -2897,47 +2669,37 @@ export default function BoardPage() {
                         <span className="ui-mono">{taskDetailModal.sprintId}</span>
                       )}
                     </dd>
-                    <dt className="ui-muted" style={{ margin: 0 }}>
-                      当前 lane / 角色
-                    </dt>
-                    <dd style={{ margin: 0 }}>
+                    <dt className="ui-muted ui-detail-dt">当前 lane / 角色</dt>
+                    <dd className="ui-detail-dd">
                       {taskDetailModal.kanbanAgent ? KANBAN_AGENT_LABELS[taskDetailModal.kanbanAgent] : '—'} ·{' '}
                       {ROLE_LABELS[taskDetailModal.role] ?? taskDetailModal.role}
                     </dd>
                     {taskDetailModal.reviewRejectionCount != null && taskDetailModal.reviewRejectionCount > 0 ? (
                       <>
-                        <dt className="ui-muted" style={{ margin: 0 }}>
-                          评审打回次数
-                        </dt>
-                        <dd style={{ margin: 0 }}>{taskDetailModal.reviewRejectionCount}</dd>
+                        <dt className="ui-muted ui-detail-dt">评审打回次数</dt>
+                        <dd className="ui-detail-dd">{taskDetailModal.reviewRejectionCount}</dd>
                       </>
                     ) : null}
                     {taskDetailModal.branchName ? (
                       <>
-                        <dt className="ui-muted" style={{ margin: 0 }}>
-                          分支
-                        </dt>
-                        <dd style={{ margin: 0 }} className="ui-mono">
+                        <dt className="ui-muted ui-detail-dt">分支</dt>
+                        <dd className="ui-detail-dd ui-mono">
                           {taskDetailModal.branchName}
                         </dd>
                       </>
                     ) : null}
                     {taskDetailModal.worktreePath ? (
                       <>
-                        <dt className="ui-muted" style={{ margin: 0 }}>
-                          Worktree
-                        </dt>
-                        <dd style={{ margin: 0 }} className="ui-mono">
+                        <dt className="ui-muted ui-detail-dt">Worktree</dt>
+                        <dd className="ui-detail-dd ui-mono">
                           {taskDetailModal.worktreePath}
                         </dd>
                       </>
                     ) : null}
                     {taskDetailModal.pullRequestUrl ? (
                       <>
-                        <dt className="ui-muted" style={{ margin: 0 }}>
-                          Pull request
-                        </dt>
-                        <dd style={{ margin: 0 }}>
+                        <dt className="ui-muted ui-detail-dt">Pull request</dt>
+                        <dd className="ui-detail-dd">
                           <a href={taskDetailModal.pullRequestUrl} target="_blank" rel="noreferrer">
                             {taskDetailModal.pullRequestNumber != null
                               ? `#${taskDetailModal.pullRequestNumber}`
@@ -2948,10 +2710,8 @@ export default function BoardPage() {
                     ) : null}
                     {taskDetailModal.handoffComment ? (
                       <>
-                        <dt className="ui-muted" style={{ margin: 0 }}>
-                          交接说明
-                        </dt>
-                        <dd style={{ margin: 0, whiteSpace: 'pre-wrap' }}>{taskDetailModal.handoffComment}</dd>
+                        <dt className="ui-muted ui-detail-dt">交接说明</dt>
+                        <dd className="ui-detail-dd ui-detail-dd-pre">{taskDetailModal.handoffComment}</dd>
                       </>
                     ) : null}
                   </dl>
@@ -2960,7 +2720,7 @@ export default function BoardPage() {
                     <h3>当前分配（各 lane 负责人）</h3>
                     {taskDetailModal.kanbanAssignees &&
                     Object.keys(taskDetailModal.kanbanAssignees).length > 0 ? (
-                      <ul className="ui-list" style={{ margin: 0, paddingLeft: '1.1rem' }}>
+                      <ul className="ui-list ui-list-tight">
                         {(Object.entries(taskDetailModal.kanbanAssignees) as [KanbanAgentKind, string][]).map(
                           ([kind, id]) => (
                             <li key={kind}>{formatAssigneeCell(kind, id, taskDetailMembers)}</li>
@@ -2968,7 +2728,7 @@ export default function BoardPage() {
                         )}
                       </ul>
                     ) : (
-                      <p className="ui-muted ui-small" style={{ margin: 0 }}>
+                      <p className="ui-muted ui-small ui-m-0">
                         尚无按 lane 记录的负责人（领取或跑过 lane 后会写入）。
                       </p>
                     )}
@@ -2978,31 +2738,26 @@ export default function BoardPage() {
 
               {taskDetailTab === 'history' ? (
                 <>
-                  <p className="ui-muted ui-small" style={{ margin: '0 0 0.75rem' }}>
+                  <p className="ui-muted ui-small ui-mb-empty">
                     每次<strong>状态交接</strong>会自动记录 outgoing 角色在本轮的助手摘要；也可手动添加备注。
                   </p>
                   {taskDetailHistorySorted.length > 0 ? (
                     taskDetailHistorySorted.map((c) => (
                       <article key={c.id} className="ui-task-detail-entry">
                         <time dateTime={c.createdAt}>{new Date(c.createdAt).toLocaleString()}</time>
-                        <p style={{ margin: '0.15rem 0 0.35rem', fontSize: 12, color: '#94a3b8' }}>
-                          {formatHistoryCommentMeta(c, workflowStateLabel)}
-                        </p>
+                        <p className="ui-history-meta">{formatHistoryCommentMeta(c, workflowStateLabel)}</p>
                         <pre className="ui-task-detail-pre">{c.content}</pre>
                       </article>
                     ))
                   ) : (
-                    <p className="ui-muted ui-small" style={{ margin: 0 }}>
-                      暂无交接记录。任务在列之间移动后会自动生成。
-                    </p>
+                    <p className="ui-muted ui-small ui-m-0">暂无交接记录。任务在列之间移动后会自动生成。</p>
                   )}
                   <div className="ui-task-detail-block">
                     <h3>添加备注</h3>
-                    <label style={{ display: 'block', fontSize: 13 }}>
+                    <label className="ui-label-block-13">
                       角色（可选）
                       <select
-                        className="ui-input"
-                        style={{ width: '100%', marginTop: 4 }}
+                        className="ui-input ui-max-w-full ui-mt-xs"
                         value={detailCommentRole}
                         onChange={(e) => setDetailCommentRole(e.target.value as '' | AgentRole)}
                       >
@@ -3012,11 +2767,10 @@ export default function BoardPage() {
                         <option value="tester">测试</option>
                       </select>
                     </label>
-                    <label style={{ display: 'block', fontSize: 13, marginTop: '0.65rem' }}>
+                    <label className="ui-label-block-13-mt">
                       内容
                       <textarea
-                        className="ui-input"
-                        style={{ width: '100%', minHeight: 88, marginTop: 4 }}
+                        className="ui-input ui-textarea-md"
                         value={detailCommentText}
                         onChange={(e) => setDetailCommentText(e.target.value)}
                         placeholder="输入人工备注（写入交接记录）"
@@ -3024,8 +2778,7 @@ export default function BoardPage() {
                     </label>
                     <button
                       type="button"
-                      className="ui-btn primary"
-                      style={{ marginTop: '0.75rem' }}
+                      className="ui-btn primary ui-mt-lg"
                       disabled={busy}
                       onClick={() => void submitTaskDetailComment()}
                     >
@@ -3037,7 +2790,7 @@ export default function BoardPage() {
 
               {taskDetailTab === 'dialog' ? (
                 <>
-                  <div className="ui-task-detail-block" style={{ marginTop: 0, paddingTop: 0, borderTop: 'none' }}>
+                  <div className="ui-task-detail-block ui-task-detail-flush">
                     <h3>工作流与分配记录</h3>
                     {taskDetailWorkflowEntries.length > 0 ? (
                       taskDetailWorkflowEntries.map((e) => (
@@ -3047,9 +2800,7 @@ export default function BoardPage() {
                         </article>
                       ))
                     ) : (
-                      <p className="ui-muted ui-small" style={{ margin: 0 }}>
-                        暂无工作流记录。
-                      </p>
+                      <p className="ui-muted ui-small ui-m-0">暂无工作流记录。</p>
                     )}
                   </div>
 
@@ -3059,7 +2810,7 @@ export default function BoardPage() {
                       {taskDetailUserQueueEntries.map((e) => (
                         <article key={e.id} className="ui-task-detail-entry">
                           <time dateTime={e.createdAt}>{new Date(e.createdAt).toLocaleString()}</time>
-                          <p style={{ margin: 0, fontSize: 12, color: '#64748b' }}>来源: {e.source}</p>
+                          <p className="ui-history-source">来源: {e.source}</p>
                           <pre className="ui-task-detail-pre">{e.content}</pre>
                         </article>
                       ))}
@@ -3081,9 +2832,7 @@ export default function BoardPage() {
                             </article>
                           ))
                         ) : (
-                          <p className="ui-muted ui-small" style={{ margin: 0 }}>
-                            暂无该角色的助手发言。
-                          </p>
+                          <p className="ui-muted ui-small ui-m-0">暂无该角色的助手发言。</p>
                         )}
                       </div>
                     );
@@ -3091,7 +2840,7 @@ export default function BoardPage() {
                 </>
               ) : null}
             </div>
-            <div className="ui-actions-bar" style={{ marginTop: '1rem', flexShrink: 0, display: 'flex', gap: '0.5rem' }}>
+            <div className="ui-footer-bar">
               <button type="button" className="ui-btn ghost" onClick={() => closeTaskDetailModal()}>
                 关闭
               </button>
@@ -3111,16 +2860,7 @@ export default function BoardPage() {
       {manualModalTask ? (
         <div
           role="presentation"
-          style={{
-            position: 'fixed',
-            inset: 0,
-            zIndex: 200,
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'center',
-            padding: '16px',
-            background: 'rgba(2, 6, 23, 0.72)',
-          }}
+          className="ui-modal-backdrop"
           onClick={() => {
             setManualModalTask(null);
             setManualQueueText('');
@@ -3130,33 +2870,31 @@ export default function BoardPage() {
             role="dialog"
             aria-modal="true"
             aria-labelledby="manual-queue-modal-title"
-            className="ui-panel"
-            style={{ maxWidth: 480, width: '100%' }}
+            className="ui-panel ui-modal-panel-xs"
             onClick={(e) => e.stopPropagation()}
           >
-            <h2 id="manual-queue-modal-title" className="ui-h2" style={{ marginTop: 0 }}>
+            <h2 id="manual-queue-modal-title" className="ui-h2 ui-h2-zero">
               手动推进：{manualModalTask.issueId}
             </h2>
-            <p className="ui-muted ui-small" style={{ marginBottom: '1rem' }}>
+            <p className="ui-muted ui-small ui-mb-xl">
               文本将作为 <strong>用户消息</strong> 入队，由当前列（lane）对应的 agent 继续处理。用于补充说明或人工指令。
             </p>
             {manualModalGenerating ? (
-              <p className="ui-muted ui-small" style={{ marginBottom: '0.75rem' }}>
+              <p className="ui-muted ui-small ui-mb-lg">
                 Agent 正在生成回复，请结束后再入队。
               </p>
             ) : null}
-            <label style={{ display: 'block' }}>
+            <label className="ui-label-block">
               消息内容
               <textarea
-                className="ui-input"
-                style={{ width: '100%', minHeight: 120, marginTop: 4 }}
+                className="ui-input ui-textarea-lg"
                 value={manualQueueText}
                 onChange={(e) => setManualQueueText(e.target.value)}
                 placeholder="输入要发送给 agent 的内容"
                 autoFocus
               />
             </label>
-            <div className="ui-actions-bar" style={{ marginTop: '1.25rem', display: 'flex', gap: '0.5rem', flexWrap: 'wrap' }}>
+            <div className="ui-actions-footer">
               <button
                 type="button"
                 className="ui-btn ghost"
