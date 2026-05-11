@@ -18,3 +18,4 @@ exports/
 docs/test-results/
 coverage/
 .vercel
+.DS_Store
