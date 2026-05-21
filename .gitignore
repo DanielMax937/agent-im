@@ -8,6 +8,10 @@ dist/
 config.env
 .next/
 
+# Local scratch / probes — never commit
+.tmp/
+.tmp-*
+
 # Local launchd / PM2 logs (never commit)
 logs/
 
