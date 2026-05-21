@@ -34,6 +34,14 @@ export interface BridgeContext {
    */
   resolveLlmForBinding?: (binding: ChannelBinding) => LLMProvider;
   /**
+   * IM bridge: pick LLM by runner id (channel-agnostic).
+   *
+   * Used by features that select a runner outside the IM routing path
+   * (e.g. Research mode A/B runners). Returns `undefined` when no
+   * provider exists for that id — callers fall back to {@link llm}.
+   */
+  resolveLlmForRunner?: (runnerId: string) => LLMProvider | undefined;
+  /**
    * IM: runner list **for this adapter channel** (`telegram` or `telegram:slug`).
    * Backed by `imBot.runners` in config (not global `CTI_RUNNERS` when absent on bot).
    */

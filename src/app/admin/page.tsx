@@ -241,6 +241,199 @@ function RunnerEnvTip({
   return null;
 }
 
+/**
+ * Editor card for one Research-mode runner slot (A = Researcher, B = Reviewer).
+ *
+ * Mirrors the Slave Runner card pattern from Auto mode: leaving `Runner ID`
+ * empty means "use the bridge default runner"; filling it in promotes the
+ * profile so {@link buildImBridgeLlmStack} builds a dedicated provider and the
+ * orchestrator binds that side of the loop to it.
+ */
+function ResearchRunnerCard({
+  title,
+  runner,
+  envPresence,
+  onChange,
+  onClear,
+}: {
+  title: string;
+  runner: RunnerConfig | undefined;
+  envPresence: EnvPresence;
+  onChange: (next: RunnerConfig) => void;
+  onClear: () => void;
+}) {
+  const prof: RunnerConfig = runner ?? { id: '', runtime: 'claude' };
+  const update = (patch: Partial<RunnerConfig>) => {
+    const merged: RunnerConfig = { ...prof, ...patch };
+    const id = merged.id?.trim();
+    if (!id) {
+      onClear();
+      return;
+    }
+    onChange({ ...merged, id, runtime: merged.runtime ?? 'claude' });
+  };
+  return (
+    <div className="ui-slot ui-mt-xs">
+      <div className="ui-slot-head">
+        <strong>{title}</strong>
+        {prof.id?.trim() ? (
+          <button type="button" className="ui-btn ghost" onClick={onClear}>
+            清除
+          </button>
+        ) : null}
+      </div>
+      <div className="ui-grid">
+        <label className="ui-field">
+          <span>Runner ID</span>
+          <input
+            value={prof.id}
+            onChange={(e) => update({ id: e.target.value })}
+            placeholder="填写后启用专用 runner；留空则用桥接默认"
+          />
+        </label>
+        <label className="ui-field">
+          <span>显示名称</span>
+          <input
+            value={prof.label ?? ''}
+            onChange={(e) => update({ label: e.target.value || undefined })}
+          />
+        </label>
+        <label className="ui-field">
+          <span>后端类型</span>
+          <select
+            value={prof.runtime}
+            onChange={(e) => update({ runtime: e.target.value as RunnerConfig['runtime'] })}
+          >
+            {RUNTIMES.map((r) => (
+              <option key={r} value={r}>
+                {r}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label className="ui-field">
+          <span>默认模型（可选）</span>
+          <input
+            value={prof.defaultModel ?? ''}
+            onChange={(e) => update({ defaultModel: e.target.value || undefined })}
+          />
+        </label>
+        <label className="ui-field">
+          <span>建议模式</span>
+          <select
+            value={prof.defaultMode ?? ''}
+            onChange={(e) => {
+              const v = e.target.value;
+              update({
+                defaultMode:
+                  v === 'code' || v === 'plan' || v === 'ask' ? v : undefined,
+              });
+            }}
+          >
+            <option value="">（未设置）</option>
+            {RUNNER_MODES.map((m) => (
+              <option key={m} value={m}>
+                {m}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label className="ui-field">
+          <span>自动批准工具</span>
+          <select
+            value={prof.autoApprove === undefined ? '' : prof.autoApprove ? 'yes' : 'no'}
+            onChange={(e) => {
+              const v = e.target.value;
+              update({ autoApprove: v === '' ? undefined : v === 'yes' });
+            }}
+          >
+            <option value="">继承桥接默认</option>
+            <option value="yes">是</option>
+            <option value="no">否</option>
+          </select>
+        </label>
+      </div>
+      {prof.runtime === 'claude' && (
+        <>
+          <div className="ui-grid ui-grid-runner-runtime">
+            <label className="ui-field">
+              <span>Claude CLI 路径</span>
+              <input
+                value={prof.claudeExecutable ?? ''}
+                onChange={(e) => update({ claudeExecutable: e.target.value || undefined })}
+              />
+            </label>
+            <label className="ui-field ui-check">
+              <input
+                type="checkbox"
+                checked={prof.claudeUseLogin === true}
+                onChange={(e) => update({ claudeUseLogin: e.target.checked ? true : undefined })}
+              />
+              <span>Claude 使用 CLI login</span>
+            </label>
+          </div>
+          <RunnerEnvTip runner={prof} envPresence={envPresence} />
+        </>
+      )}
+      {prof.runtime === 'codex' && (
+        <>
+          <div className="ui-grid ui-grid-runner-runtime">
+            <label className="ui-field">
+              <span>Codex wrapper 路径</span>
+              <input
+                value={prof.codexExecutable ?? ''}
+                onChange={(e) => update({ codexExecutable: e.target.value || undefined })}
+              />
+            </label>
+            <label className="ui-field ui-check">
+              <input
+                type="checkbox"
+                checked={prof.codexUseLogin === true}
+                onChange={(e) => update({ codexUseLogin: e.target.checked ? true : undefined })}
+              />
+              <span>Codex 使用 CLI login</span>
+            </label>
+          </div>
+          <RunnerEnvTip runner={prof} envPresence={envPresence} />
+        </>
+      )}
+      {prof.runtime === 'cursor' && (
+        <div className="ui-grid ui-grid-runner-runtime">
+          <label className="ui-field">
+            <span>Cursor agent 路径</span>
+            <input
+              value={prof.cursorExecutable ?? ''}
+              onChange={(e) => update({ cursorExecutable: e.target.value || undefined })}
+            />
+          </label>
+        </div>
+      )}
+      {prof.runtime === 'copilot' && (
+        <div className="ui-grid ui-grid-runner-runtime">
+          <label className="ui-field">
+            <span>Copilot CLI 路径</span>
+            <input
+              value={prof.copilotExecutable ?? ''}
+              onChange={(e) => update({ copilotExecutable: e.target.value || undefined })}
+            />
+          </label>
+        </div>
+      )}
+      {prof.runtime === 'opencode' && (
+        <div className="ui-grid ui-grid-runner-runtime">
+          <label className="ui-field">
+            <span>OpenCode CLI 路径</span>
+            <input
+              value={prof.opencodeExecutable ?? ''}
+              onChange={(e) => update({ opencodeExecutable: e.target.value || undefined })}
+            />
+          </label>
+        </div>
+      )}
+    </div>
+  );
+}
+
 export default function AdminPage() {
   /** Per bridge slug — loaded from GET /api/local-config `configsByBridge`. */
   const [bridgeConfigs, setBridgeConfigs] = useState<Record<string, AdminConfig>>({});
@@ -1580,6 +1773,30 @@ export default function AdminPage() {
                       </div>
                     </div>
                   ) : null}
+                </div>
+                <div className="ui-im-section-divider-lg">
+                  <p className="ui-muted ui-small">
+                    <strong>Research 模式（两 agent 对谈）</strong>：通过 <code>POST /api/research</code> 启动；Agent A（研究员，执行工作）与 Agent B（资深评审）轮流对谈，A 先把计划交给 B 评审、B 同意后 A 执行、A 自判完成则 B 验证；只有双方都确认才视为真正完成。下方两个 Runner ID 字段决定 A、B 各由哪个 Runner 承担；任一字段留空即使用<strong>桥接默认 Runner</strong>。研究模式自身不依赖 Telegram；当配置了 Telegram token 时可在调用 API 时附 <code>notifyTelegram</code> 推送完成通知。详细文档：<code>src/lib/bridge/research-mode/README.md</code>。
+                  </p>
+                  <p className="ui-muted ui-small ui-mb-md-half">
+                    Runner 配置写入 <code>imBot.researchResearcherRunner</code> / <code>imBot.researchReviewerRunner</code>，与上方 Runners 共用 LLM 实例；保存后即生效。
+                  </p>
+                  <div className="ui-grid-span-full">
+                    <ResearchRunnerCard
+                      title="Researcher Runner（Agent A）"
+                      runner={spec.researchResearcherRunner}
+                      envPresence={envPresence}
+                      onChange={(next) => updateImBot({ researchResearcherRunner: next })}
+                      onClear={() => updateImBot({ researchResearcherRunner: undefined })}
+                    />
+                    <ResearchRunnerCard
+                      title="Reviewer Runner（Agent B）"
+                      runner={spec.researchReviewerRunner}
+                      envPresence={envPresence}
+                      onChange={(next) => updateImBot({ researchReviewerRunner: next })}
+                      onClear={() => updateImBot({ researchReviewerRunner: undefined })}
+                    />
+                  </div>
                 </div>
               </div>
             );})()}

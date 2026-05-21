@@ -100,7 +100,7 @@ async function main(): Promise<void> {
   const settings = configToSettings(config);
   const store = new JsonFileStore(settings);
   const pendingPerms = new PendingPermissions();
-  const { defaultLlm, resolveLlmForBinding } = await buildImBridgeLlmStack(config, pendingPerms);
+  const { defaultLlm, resolveLlmForBinding, resolveLlmForRunner } = await buildImBridgeLlmStack(config, pendingPerms);
   const bridgeRunners = normalizeRunners(config);
   const bridgeDefaultRunnerId = config.defaultRunnerId ?? bridgeRunners[0]?.id;
   const nBots = config.imBot ? 1 : 0;
@@ -117,6 +117,7 @@ async function main(): Promise<void> {
     store,
     llm: defaultLlm,
     resolveLlmForBinding,
+    resolveLlmForRunner,
     getRunnerConfigsForChannelType: (channelType) =>
       normalizeRunnersForChannelType(loadConfig(), channelType),
     getDefaultRunnerIdForChannelType: (channelType) =>

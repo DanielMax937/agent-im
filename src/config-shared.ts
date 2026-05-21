@@ -192,6 +192,17 @@ export interface ImInstanceSpec {
    */
   autoSlaveRunner?: RunnerConfig;
   /**
+   * Research mode **Agent A (Researcher)**: dedicated runner profile.
+   * Merged into the bot runner list by id (same mechanism as `autoSlaveRunner`) so the LLM
+   * stack builds a provider for it. Leave unset to fall back to the bridge default runner.
+   */
+  researchResearcherRunner?: RunnerConfig;
+  /**
+   * Research mode **Agent B (Senior Reviewer)**: dedicated runner profile.
+   * Merged into the bot runner list by id. Leave unset to fall back to the bridge default runner.
+   */
+  researchReviewerRunner?: RunnerConfig;
+  /**
    * Shared Redis key segment for Auto mode (`cti:auto:{namespace}:…`) so two bridge directories
    * (two `CTI_HOME` / two agents) can share the same queues. If unset, defaults to this bridge’s id.
    */

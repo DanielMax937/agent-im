@@ -542,6 +542,14 @@ function imInstanceSpecFromRow(o: Record<string, unknown>): ImInstanceSpec | nul
     o.autoSlaveRunner && typeof o.autoSlaveRunner === "object"
       ? runnerFromRow(o.autoSlaveRunner as Record<string, unknown>) ?? undefined
       : undefined;
+  const researchResearcherRunner =
+    o.researchResearcherRunner && typeof o.researchResearcherRunner === "object"
+      ? runnerFromRow(o.researchResearcherRunner as Record<string, unknown>) ?? undefined
+      : undefined;
+  const researchReviewerRunner =
+    o.researchReviewerRunner && typeof o.researchReviewerRunner === "object"
+      ? runnerFromRow(o.researchReviewerRunner as Record<string, unknown>) ?? undefined
+      : undefined;
   const autoRedisUrl =
     typeof o.autoRedisUrl === "string"
       ? o.autoRedisUrl
@@ -608,6 +616,8 @@ function imInstanceSpecFromRow(o: Record<string, unknown>): ImInstanceSpec | nul
     autoRedisUrl,
     autoMaxTurns,
     autoSlaveRunner,
+    researchResearcherRunner,
+    researchReviewerRunner,
     autoRedisNamespace,
     autoSlaveExternal,
     autoReviewMaxLoops,
@@ -925,18 +935,33 @@ export function findImInstanceSpec(
 export function normalizeRunnersForInstance(spec: ImInstanceSpec, config: Config): RunnerConfig[] {
   const base =
     spec.runners && spec.runners.length > 0 ? spec.runners : normalizeRunners(config);
+  let out = base;
+
   const s = spec.autoSlaveRunner;
-  if (!s?.id?.trim()) return base;
-  const id = s.id.trim();
-  // Populate slave runner subprocessEnv from config.slave.env (file-based, replaces inline JSON)
-  const fileEnv = loadSlaveEnv();
-  const merged: RunnerConfig = {
-    ...s,
-    id,
-    subprocessEnv: Object.keys(fileEnv).length > 0 ? fileEnv : s.subprocessEnv,
-  };
-  const withoutDup = base.filter((r) => r.id !== id);
-  return [...withoutDup, merged];
+  if (s?.id?.trim()) {
+    const id = s.id.trim();
+    // Populate slave runner subprocessEnv from config.slave.env (file-based, replaces inline JSON)
+    const fileEnv = loadSlaveEnv();
+    const merged: RunnerConfig = {
+      ...s,
+      id,
+      subprocessEnv: Object.keys(fileEnv).length > 0 ? fileEnv : s.subprocessEnv,
+    };
+    const withoutDup = out.filter((r) => r.id !== id);
+    out = [...withoutDup, merged];
+  }
+
+  // Research mode A/B runners: merged so {@link buildImBridgeLlmStack} builds a provider
+  // for each id and the orchestrator can look them up via `resolveLlmForRunner`.
+  for (const research of [spec.researchResearcherRunner, spec.researchReviewerRunner]) {
+    if (!research?.id?.trim()) continue;
+    const id = research.id.trim();
+    const merged: RunnerConfig = { ...research, id };
+    const withoutDup = out.filter((r) => r.id !== id);
+    out = [...withoutDup, merged];
+  }
+
+  return out;
 }
 
 /** Runners visible on a given adapter `channelType` (`telegram` or `telegram:slug`). */
@@ -1343,6 +1368,12 @@ export function validateConfigRunners(config: Config): void {
   validateRunnerList(config.imBot?.runners, 'imBot.runners');
   if (config.imBot?.autoSlaveRunner) {
     validateRunnerList([config.imBot.autoSlaveRunner], 'imBot.autoSlaveRunner');
+  }
+  if (config.imBot?.researchResearcherRunner) {
+    validateRunnerList([config.imBot.researchResearcherRunner], 'imBot.researchResearcherRunner');
+  }
+  if (config.imBot?.researchReviewerRunner) {
+    validateRunnerList([config.imBot.researchReviewerRunner], 'imBot.researchReviewerRunner');
   }
 }
 

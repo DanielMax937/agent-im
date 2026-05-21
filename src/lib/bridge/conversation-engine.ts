@@ -49,8 +49,19 @@ export type OnPartialText = (fullText: string) => void;
 
 export interface ProcessMessageOptions {
   disableLlmStreaming?: boolean;
-  /** `runner` = IM chat; `master` = Redis master coordinator; `slave` = Redis slave (tools). */
-  deliverySource?: 'runner' | 'master' | 'slave';
+  /**
+   * `runner` = IM chat; `master` = Redis master coordinator; `slave` = Redis slave (tools);
+   * `researcher` = Research mode Agent A (executor with tools);
+   * `reviewer`   = Research mode Agent B (senior reviewer, full tools).
+   */
+  deliverySource?: 'runner' | 'master' | 'slave' | 'researcher' | 'reviewer';
+  /**
+   * Bypass the binding-driven LLM selection (`resolveLlmForBinding`) and use the
+   * provided provider for this single call. Used by Research mode to bind each
+   * agent (A/B) to the runner configured in `imBot.researchResearcherRunner` /
+   * `imBot.researchReviewerRunner`. When omitted, normal resolution applies.
+   */
+  llmOverride?: import('./host').LLMProvider;
 }
 
 interface AutoModeToolTelemetry {
@@ -275,7 +286,7 @@ export async function processMessage(
       imRunnerConfigs: legacyRunnerCfgs,
       defaultRunnerId: ctxDefaultRunner,
     } = getBridgeContext();
-  const effectiveLlm = resolveLlmForBinding?.(binding) ?? llm;
+  const effectiveLlm = options?.llmOverride ?? resolveLlmForBinding?.(binding) ?? llm;
   const sessionId = binding.codepilotSessionId;
 
   // Acquire session lock
@@ -428,6 +439,14 @@ export async function processMessage(
     if (options?.deliverySource === 'master' || options?.deliverySource === 'slave') {
       const serviceGuardrail = renderPrompt('system/auto-mode-service-guardrail');
       systemPrompt = systemPrompt ? `${systemPrompt}\n\n${serviceGuardrail}` : serviceGuardrail;
+    }
+    if (options?.deliverySource === 'researcher') {
+      const researcherPrompt = renderPrompt('system/research-mode-researcher');
+      systemPrompt = systemPrompt ? `${systemPrompt}\n\n${researcherPrompt}` : researcherPrompt;
+    }
+    if (options?.deliverySource === 'reviewer') {
+      const reviewerPrompt = renderPrompt('system/research-mode-reviewer');
+      systemPrompt = systemPrompt ? `${systemPrompt}\n\n${reviewerPrompt}` : reviewerPrompt;
     }
 
     try {

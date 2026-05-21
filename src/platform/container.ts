@@ -46,7 +46,7 @@ async function createPlatformContainer(): Promise<PlatformContainer> {
   }
 
   const pendingPermissions = new PendingPermissions();
-  const { defaultLlm, resolveLlmForBinding } = await buildImBridgeLlmStack(config, pendingPermissions);
+  const { defaultLlm, resolveLlmForBinding, resolveLlmForRunner } = await buildImBridgeLlmStack(config, pendingPermissions);
   const bridgeRunners = normalizeRunners(config);
   const bridgeDefaultRunnerId = config.defaultRunnerId ?? bridgeRunners[0]?.id;
 
@@ -54,6 +54,7 @@ async function createPlatformContainer(): Promise<PlatformContainer> {
     store: new JsonFileStore(configToSettings(config)),
     llm: defaultLlm,
     resolveLlmForBinding,
+    resolveLlmForRunner,
     getRunnerConfigsForChannelType: (channelType) =>
       normalizeRunnersForChannelType(loadKanbanPlatformConfig(), channelType),
     getDefaultRunnerIdForChannelType: (channelType) =>

@@ -22,6 +22,14 @@ import { resolveRunnerForChannelBinding } from './im-instance-settings';
 export interface ImBridgeLlmStack {
   defaultLlm: LLMProvider;
   resolveLlmForBinding(binding: ChannelBinding): LLMProvider;
+  /**
+   * Look up the LLM provider for a given runner id without binding context.
+   *
+   * Used by features (e.g. Research mode) that pick a runner outside the IM
+   * routing path. Returns `undefined` when no provider was built for that id —
+   * callers should fall back to `defaultLlm`.
+   */
+  resolveLlmForRunner(runnerId: string): LLMProvider | undefined;
 }
 
 /**
@@ -34,6 +42,7 @@ export async function buildImBridgeLlmStack(
 ): Promise<ImBridgeLlmStack> {
   const entries = collectImLlmBuildEntries(config);
   const idToLlm = new Map<string, LLMProvider>();
+  const runnerIdToLlm = new Map<string, LLMProvider>();
 
   for (const { keyPrefix, runner } of entries) {
     const key = `${keyPrefix}\0${runner.id}`;
@@ -44,6 +53,12 @@ export async function buildImBridgeLlmStack(
       runner,
     });
     idToLlm.set(key, llm);
+    // First wins: per-runner-id lookup is channel-agnostic. The same runner is
+    // built once per enabled channel, so picking the first is sufficient and
+    // avoids spawning extra duplicate providers downstream.
+    if (!runnerIdToLlm.has(runner.id)) {
+      runnerIdToLlm.set(runner.id, llm);
+    }
   }
 
   const defaultKey = defaultImLlmCompositeKey(config);
@@ -52,6 +67,10 @@ export async function buildImBridgeLlmStack(
 
   return {
     defaultLlm,
+    resolveLlmForRunner: (runnerId: string): LLMProvider | undefined => {
+      if (!runnerId) return undefined;
+      return runnerIdToLlm.get(runnerId);
+    },
     resolveLlmForBinding: (binding: ChannelBinding): LLMProvider => {
       const store = getBridgeContext().store;
       const fresh = loadConfig();
