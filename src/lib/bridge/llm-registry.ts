@@ -6,6 +6,7 @@
 import type { Config } from '../../config';
 import {
   collectImLlmBuildEntries,
+  collectResearchRunners,
   defaultImLlmCompositeKey,
   defaultRunnerIdForChannelType,
   imLlmKeyPrefix,
@@ -59,6 +60,20 @@ export async function buildImBridgeLlmStack(
     if (!runnerIdToLlm.has(runner.id)) {
       runnerIdToLlm.set(runner.id, llm);
     }
+  }
+
+  // Research-mode runners live at the top of `Config` and are independent of
+  // any IM bot channel. Build providers for them so the orchestrator can pick
+  // them up via `resolveLlmForRunner`. Skip ids already built above.
+  for (const runner of collectResearchRunners(config)) {
+    if (runnerIdToLlm.has(runner.id)) continue;
+    const llm = await resolveProvider({
+      config,
+      pendingPermissions,
+      runtimeOverride: runner.runtime,
+      runner,
+    });
+    runnerIdToLlm.set(runner.id, llm);
   }
 
   const defaultKey = defaultImLlmCompositeKey(config);

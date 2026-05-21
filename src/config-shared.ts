@@ -129,6 +129,31 @@ export interface Config {
    * Legacy `CTI_IM_INSTANCES` array loads **first element only** for migration.
    */
   imBot?: ImInstanceSpec;
+  /**
+   * Research-mode configuration (Agent A researcher + Agent B reviewer).
+   *
+   * Lives at the top level of `Config`, **not** nested under `imBot`, because
+   * Research mode runs inside the agent-im HTTP process and is independent of
+   * any specific IM bot. Serialized as `CTI_RESEARCH` JSON in `config.env`.
+   *
+   * Legacy `imBot.researchResearcherRunner` / `researchReviewerRunner` fields
+   * are still read for backward compatibility but are migrated up to this
+   * field on next save and should be considered deprecated.
+   */
+  research?: ResearchModeConfig;
+}
+
+/** Top-level configuration for the Research mode A↔B orchestrator. */
+export interface ResearchModeConfig {
+  /** Runner profile that powers Agent A (the executor). */
+  researcherRunner?: RunnerConfig;
+  /** Runner profile that powers Agent B (the senior reviewer). */
+  reviewerRunner?: RunnerConfig;
+  /**
+   * Optional default `maxTurns` used by `POST /api/research` when the request
+   * body omits it. Falls back to the orchestrator's hard default (30) if unset.
+   */
+  defaultMaxTurns?: number;
 }
 
 /** One IM connection (bot) inside the bridge; see docs/IM_BRIDGE_MULTI_INSTANCE.md */
@@ -192,14 +217,15 @@ export interface ImInstanceSpec {
    */
   autoSlaveRunner?: RunnerConfig;
   /**
-   * Research mode **Agent A (Researcher)**: dedicated runner profile.
-   * Merged into the bot runner list by id (same mechanism as `autoSlaveRunner`) so the LLM
-   * stack builds a provider for it. Leave unset to fall back to the bridge default runner.
+   * @deprecated Use top-level {@link Config.research}`.researcherRunner` instead.
+   * Kept here so old `config.env` files keep loading; the value is migrated to
+   * the top-level field on next save.
    */
   researchResearcherRunner?: RunnerConfig;
   /**
-   * Research mode **Agent B (Senior Reviewer)**: dedicated runner profile.
-   * Merged into the bot runner list by id. Leave unset to fall back to the bridge default runner.
+   * @deprecated Use top-level {@link Config.research}`.reviewerRunner` instead.
+   * Kept here so old `config.env` files keep loading; the value is migrated to
+   * the top-level field on next save.
    */
   researchReviewerRunner?: RunnerConfig;
   /**

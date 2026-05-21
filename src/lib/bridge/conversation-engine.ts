@@ -58,8 +58,8 @@ export interface ProcessMessageOptions {
   /**
    * Bypass the binding-driven LLM selection (`resolveLlmForBinding`) and use the
    * provided provider for this single call. Used by Research mode to bind each
-   * agent (A/B) to the runner configured in `imBot.researchResearcherRunner` /
-   * `imBot.researchReviewerRunner`. When omitted, normal resolution applies.
+   * agent (A/B) to the runner configured in `Config.research.researcherRunner`
+   * / `reviewerRunner`. When omitted, normal resolution applies.
    */
   llmOverride?: import('./host').LLMProvider;
 }

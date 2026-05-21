@@ -15,6 +15,7 @@ import type {
   Config,
   ImInstanceChannel,
   ImInstanceSpec,
+  ResearchModeConfig,
   RunnerConfig,
   RuntimeKind,
 } from "./config-shared";
@@ -29,6 +30,7 @@ export type {
   Config,
   ImInstanceChannel,
   ImInstanceSpec,
+  ResearchModeConfig,
   RunnerConfig,
   RuntimeKind,
 } from "./config-shared";
@@ -637,6 +639,59 @@ function imInstanceSpecFromRow(o: Record<string, unknown>): ImInstanceSpec | nul
   };
 }
 
+/**
+ * Parse `CTI_RESEARCH` (top-level Research mode config). Tolerates malformed
+ * JSON by returning `undefined` — the caller may then attempt legacy migration
+ * from `imBot.research*Runner`.
+ */
+function parseResearch(env: Map<string, string>): ResearchModeConfig | undefined {
+  const raw = env.get("CTI_RESEARCH")?.trim();
+  if (!raw) return undefined;
+  try {
+    const o = JSON.parse(raw) as unknown;
+    return researchModeConfigFromRow(o);
+  } catch {
+    return undefined;
+  }
+}
+
+/** Coerce a deserialised object into a {@link ResearchModeConfig}. */
+function researchModeConfigFromRow(o: unknown): ResearchModeConfig | undefined {
+  if (!o || typeof o !== "object" || Array.isArray(o)) return undefined;
+  const obj = o as Record<string, unknown>;
+  const researcher =
+    obj.researcherRunner && typeof obj.researcherRunner === "object"
+      ? runnerFromRow(obj.researcherRunner as Record<string, unknown>) ?? undefined
+      : undefined;
+  const reviewer =
+    obj.reviewerRunner && typeof obj.reviewerRunner === "object"
+      ? runnerFromRow(obj.reviewerRunner as Record<string, unknown>) ?? undefined
+      : undefined;
+  const defaultMaxTurns =
+    typeof obj.defaultMaxTurns === "number" && obj.defaultMaxTurns > 0
+      ? Math.floor(obj.defaultMaxTurns)
+      : undefined;
+  if (!researcher && !reviewer && defaultMaxTurns === undefined) return undefined;
+  return { researcherRunner: researcher, reviewerRunner: reviewer, defaultMaxTurns };
+}
+
+/**
+ * One-way migration: lift `imBot.research*Runner` into top-level `Config.research`
+ * when the top-level field is missing. Mutates `base` and returns the (possibly
+ * new) `research` block. Always preferred over keeping the legacy fields.
+ */
+function migrateLegacyResearchRunners(base: Config): void {
+  if (base.research) return;
+  const spec = base.imBot;
+  const a = spec?.researchResearcherRunner;
+  const b = spec?.researchReviewerRunner;
+  if (!a && !b) return;
+  base.research = {
+    researcherRunner: a,
+    reviewerRunner: b,
+  };
+}
+
 function parseImBot(env: Map<string, string>): ImInstanceSpec | undefined {
   const botJson = env.get("CTI_IM_BOT")?.trim();
   if (botJson) {
@@ -951,16 +1006,25 @@ export function normalizeRunnersForInstance(spec: ImInstanceSpec, config: Config
     out = [...withoutDup, merged];
   }
 
-  // Research mode A/B runners: merged so {@link buildImBridgeLlmStack} builds a provider
-  // for each id and the orchestrator can look them up via `resolveLlmForRunner`.
-  for (const research of [spec.researchResearcherRunner, spec.researchReviewerRunner]) {
-    if (!research?.id?.trim()) continue;
-    const id = research.id.trim();
-    const merged: RunnerConfig = { ...research, id };
-    const withoutDup = out.filter((r) => r.id !== id);
-    out = [...withoutDup, merged];
-  }
+  return out;
+}
 
+/**
+ * Research-mode runners (Agent A + Agent B) deduplicated by id. These live at
+ * the top level of {@link Config} and are built into LLM providers separately
+ * from any IM bot channel — they are not merged into
+ * {@link normalizeRunnersForInstance} on purpose.
+ */
+export function collectResearchRunners(config: Config): RunnerConfig[] {
+  const out: RunnerConfig[] = [];
+  const seen = new Set<string>();
+  for (const r of [config.research?.researcherRunner, config.research?.reviewerRunner]) {
+    if (!r?.id?.trim()) continue;
+    const id = r.id.trim();
+    if (seen.has(id)) continue;
+    seen.add(id);
+    out.push({ ...r, id });
+  }
   return out;
 }
 
@@ -1204,6 +1268,7 @@ export function loadConfig(ctiHomeOverride?: string): Config {
     runners,
     defaultRunnerId,
     imBot: parseImBot(env),
+    research: parseResearch(env),
   };
 
   if (runners && runners.length > 0) {
@@ -1225,6 +1290,10 @@ export function loadConfig(ctiHomeOverride?: string): Config {
   overlaySlaveRunnerSpec(base, env, runners, defaultRunnerId);
 
   applyImBotToFlatConfig(base, env);
+  // Migrate legacy `imBot.research*Runner` → top-level `Config.research` if the
+  // top-level field isn't set yet. After the next `saveConfig`, the legacy
+  // fields will be dropped from `CTI_IM_BOT` JSON.
+  migrateLegacyResearchRunners(base);
   base.enabledChannels = effectiveEnabledChannels(base);
   return base;
 }
@@ -1314,7 +1383,29 @@ export function saveConfig(config: Config, ctiHomeOverride?: string): void {
     out += formatEnvLine("CTI_AGENT_MAX_TURNS", String(config.agentMaxTurns));
 
   if (config.imBot) {
-    out += formatEnvLine("CTI_IM_BOT", JSON.stringify(config.imBot));
+    // Drop legacy research-runner fields from the persisted imBot JSON. They
+    // are migrated up to `Config.research` and serialized via `CTI_RESEARCH`
+    // below, so keeping them here would create two competing sources of truth.
+    const {
+      researchResearcherRunner: _legacyA,
+      researchReviewerRunner: _legacyB,
+      ...imBotForDisk
+    } = config.imBot;
+    void _legacyA;
+    void _legacyB;
+    out += formatEnvLine("CTI_IM_BOT", JSON.stringify(imBotForDisk));
+  }
+
+  if (config.research) {
+    const researchForDisk: ResearchModeConfig = {};
+    if (config.research.researcherRunner) researchForDisk.researcherRunner = config.research.researcherRunner;
+    if (config.research.reviewerRunner) researchForDisk.reviewerRunner = config.research.reviewerRunner;
+    if (config.research.defaultMaxTurns !== undefined) {
+      researchForDisk.defaultMaxTurns = config.research.defaultMaxTurns;
+    }
+    if (Object.keys(researchForDisk).length > 0) {
+      out += formatEnvLine("CTI_RESEARCH", JSON.stringify(researchForDisk));
+    }
   }
 
   const slots = config.agentEnvSlots ?? [];
@@ -1369,10 +1460,18 @@ export function validateConfigRunners(config: Config): void {
   if (config.imBot?.autoSlaveRunner) {
     validateRunnerList([config.imBot.autoSlaveRunner], 'imBot.autoSlaveRunner');
   }
-  if (config.imBot?.researchResearcherRunner) {
+  if (config.research?.researcherRunner) {
+    validateRunnerList([config.research.researcherRunner], 'research.researcherRunner');
+  }
+  if (config.research?.reviewerRunner) {
+    validateRunnerList([config.research.reviewerRunner], 'research.reviewerRunner');
+  }
+  // Legacy nested fields (still tolerated until next save) — validate so a
+  // broken legacy config surfaces the same way.
+  if (config.imBot?.researchResearcherRunner && !config.research?.researcherRunner) {
     validateRunnerList([config.imBot.researchResearcherRunner], 'imBot.researchResearcherRunner');
   }
-  if (config.imBot?.researchReviewerRunner) {
+  if (config.imBot?.researchReviewerRunner && !config.research?.reviewerRunner) {
     validateRunnerList([config.imBot.researchReviewerRunner], 'imBot.researchReviewerRunner');
   }
 }

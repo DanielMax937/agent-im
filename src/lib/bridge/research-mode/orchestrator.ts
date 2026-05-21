@@ -22,8 +22,8 @@
  * Optional integrations:
  *   • Redis mirror (`research-redis-mirror.ts`) — exposes turns to the
  *     existing monitor page when configured.
- *   • Telegram notify (`research-telegram-notify.ts`) — emits a single
- *     completion message when the orchestrator agrees the task is done.
+ *   • Telegram mirror (`telegram-notify.ts`) — every A/B reply plus a
+ *     completion summary; auto-resolves Auto-mode `tgBotToken` / `tgChatId`.
  */
 
 import type { ChannelBinding } from '../types';
@@ -67,7 +67,13 @@ import {
   type ResearchMirror,
   resolveResearchMirror,
 } from './redis-mirror';
-import { notifyTelegramCompletion } from './telegram-notify';
+import {
+  notifyTelegramAgentReply,
+  notifyTelegramCompletion,
+  resolveResearchTelegramTarget,
+  type ResearchTelegramOverride,
+  type ResearchTelegramTarget,
+} from './telegram-notify';
 
 export interface StartResearchSessionInput {
   /** Absolute folder containing `goal.md`. */
@@ -77,8 +83,13 @@ export interface StartResearchSessionInput {
   /** Informational — currently logged for traceability; LLM selection still uses bridge default. */
   runnerA?: string;
   runnerB?: string;
-  /** If set, post a Telegram notice when the loop ends. */
-  notifyTelegram?: { chatId: string; instanceId?: string };
+  /**
+   * Optional Telegram mirror override (`chatId`, `instanceId`, `bridgeSlug`).
+   * When omitted, credentials are auto-resolved from the Auto-mode Telegram bot
+   * (`mybot` / store `telegram_bot_token` + `telegram_chat_id`). Every agent
+   * reply and the session summary are sent when resolution succeeds.
+   */
+  notifyTelegram?: ResearchTelegramOverride;
 }
 
 export interface StartResearchSessionResult {
@@ -188,14 +199,30 @@ interface BackgroundLoopParams {
   llmA?: LLMProvider;
   llmB?: LLMProvider;
   mirror: ResearchMirror | null;
-  notifyTelegram?: StartResearchSessionInput['notifyTelegram'];
+  telegramTarget: ResearchTelegramTarget | null;
   abortRef: { aborted: boolean; reason?: string };
+}
+
+/** Fire-and-forget Telegram mirror for one agent turn (never blocks the loop). */
+function mirrorAgentReplyToTelegram(
+  target: ResearchTelegramTarget | null,
+  payload: {
+    role: 'researcher' | 'reviewer';
+    sessionId: string;
+    turn: number;
+    text: string;
+    meta?: string;
+  },
+): void {
+  if (!target || !payload.text.trim()) return;
+  void notifyTelegramAgentReply({ target, ...payload }).catch(() => {});
 }
 
 /**
  * Resolve the LLM provider for one side, in priority order:
  *   1. HTTP override (`runnerA` / `runnerB` query string / body)
- *   2. Configured `imBot.researchResearcherRunner` / `researchReviewerRunner`
+ *   2. Configured top-level `research.researcherRunner` / `reviewerRunner`
+ *      (with legacy fallback to the deprecated `imBot.research*Runner`)
  *   3. `undefined` (orchestrator falls back to the bridge default LLM)
  *
  * Also returns the **resolved runner id** so the session state can record
@@ -219,11 +246,27 @@ function resolveSideRunner(
   return { runnerId: candidate, llm };
 }
 
+function readConfiguredDefaultMaxTurns(): number | undefined {
+  try {
+    const cfg = loadConfig();
+    const n = cfg.research?.defaultMaxTurns;
+    return typeof n === 'number' && Number.isFinite(n) && n > 0 ? Math.floor(n) : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 function readConfiguredResearchRunnerIds(): { researcher?: string; reviewer?: string } {
   try {
     const cfg = loadConfig();
-    const aId = cfg.imBot?.researchResearcherRunner?.id?.trim();
-    const bId = cfg.imBot?.researchReviewerRunner?.id?.trim();
+    // Prefer top-level `Config.research`; fall back to legacy nested fields so
+    // a stale `config.env` that hasn't been re-saved still works.
+    const aId =
+      cfg.research?.researcherRunner?.id?.trim() ||
+      cfg.imBot?.researchResearcherRunner?.id?.trim();
+    const bId =
+      cfg.research?.reviewerRunner?.id?.trim() ||
+      cfg.imBot?.researchReviewerRunner?.id?.trim();
     return { researcher: aId || undefined, reviewer: bId || undefined };
   } catch {
     return {};
@@ -233,7 +276,7 @@ function readConfiguredResearchRunnerIds(): { researcher?: string; reviewer?: st
 async function runOrchestratorLoop(
   params: BackgroundLoopParams,
 ): Promise<ResearchSessionState> {
-  const { bindingA, bindingB, llmA, llmB, mirror, notifyTelegram, abortRef } = params;
+  const { bindingA, bindingB, llmA, llmB, mirror, telegramTarget, abortRef } = params;
   let { state } = params;
   const log = getLogger().child({ scope: 'research-mode', sessionId: state.sessionId });
 
@@ -257,8 +300,20 @@ async function runOrchestratorLoop(
   try {
     const goalText = readGoalText(state.folder);
 
-    log.info({ event: 'research_loop_start', folder: state.folder }, 'research loop start');
-    recordOrchestratorNote(state, `Loop start. folder=${state.folder} maxTurns=${state.maxTurns}`);
+    log.info(
+      {
+        event: 'research_loop_start',
+        folder: state.folder,
+        telegramMirror: Boolean(telegramTarget),
+        telegramBridge: telegramTarget?.bridgeSlug,
+      },
+      'research loop start',
+    );
+    recordOrchestratorNote(
+      state,
+      `Loop start. folder=${state.folder} maxTurns=${state.maxTurns}` +
+        (telegramTarget ? ` telegram→${telegramTarget.chatId}` : ' telegram=off'),
+    );
 
     let nextResearcherPrompt = buildBootstrapPrompt(state.folder, goalText);
     let nextResearcherKind: 'goal-bootstrap' | 'researcher-followup' = 'goal-bootstrap';
@@ -299,10 +354,18 @@ async function runOrchestratorLoop(
 
       if (aResult.hasError && !aResult.responseText) {
         log.warn({ event: 'research_a_error', err: aResult.errorMessage }, 'researcher errored');
+        const errText = `[orchestrator] Agent A errored: ${aResult.errorMessage}`;
         recordResearcherReply(state, {
-          text: `[orchestrator] Agent A errored: ${aResult.errorMessage}`,
+          text: errText,
           status: null,
           parseError: aResult.errorMessage || 'empty-response',
+        });
+        mirrorAgentReplyToTelegram(telegramTarget, {
+          role: 'researcher',
+          sessionId: state.sessionId,
+          turn: state.turn + 1,
+          text: errText,
+          meta: 'error',
         });
         finalPhase = 'failed';
         finalReason = `Agent A errored: ${aResult.errorMessage}`;
@@ -327,6 +390,18 @@ async function runOrchestratorLoop(
           parseError: aParsed.ok ? undefined : aParsed.error,
           createdAt: nowIso(),
         },
+      });
+
+      mirrorAgentReplyToTelegram(telegramTarget, {
+        role: 'researcher',
+        sessionId: state.sessionId,
+        turn: state.turn,
+        text: aText,
+        meta: aParsed.status
+          ? `phase=${aParsed.status.phase}`
+          : aParsed.error
+            ? `parse-error=${aParsed.error}`
+            : undefined,
       });
 
       if (!aParsed.ok || !aParsed.status) {
@@ -384,10 +459,18 @@ async function runOrchestratorLoop(
 
       if (bResult.hasError && !bResult.responseText) {
         log.warn({ event: 'research_b_error', err: bResult.errorMessage }, 'reviewer errored');
+        const errText = `[orchestrator] Agent B errored: ${bResult.errorMessage}`;
         recordReviewerReply(state, {
-          text: `[orchestrator] Agent B errored: ${bResult.errorMessage}`,
+          text: errText,
           verdict: null,
           parseError: bResult.errorMessage || 'empty-response',
+        });
+        mirrorAgentReplyToTelegram(telegramTarget, {
+          role: 'reviewer',
+          sessionId: state.sessionId,
+          turn: state.turn,
+          text: errText,
+          meta: 'error',
         });
         finalPhase = 'failed';
         finalReason = `Agent B errored: ${bResult.errorMessage}`;
@@ -412,6 +495,18 @@ async function runOrchestratorLoop(
           parseError: bParsed.ok ? undefined : bParsed.error,
           createdAt: nowIso(),
         },
+      });
+
+      mirrorAgentReplyToTelegram(telegramTarget, {
+        role: 'reviewer',
+        sessionId: state.sessionId,
+        turn: state.turn,
+        text: bText,
+        meta: bParsed.evaluation
+          ? `verdict=${bParsed.evaluation.verdict}`
+          : bParsed.error
+            ? `parse-error=${bParsed.error}`
+            : undefined,
       });
 
       if (!bParsed.ok || !bParsed.evaluation) {
@@ -477,11 +572,10 @@ async function runOrchestratorLoop(
     preview: `${finalPhase}: ${finalReason}`,
   });
 
-  if (notifyTelegram) {
+  if (telegramTarget) {
     try {
       await notifyTelegramCompletion({
-        chatId: notifyTelegram.chatId,
-        instanceId: notifyTelegram.instanceId,
+        target: telegramTarget,
         state,
         outcome: finalPhase,
         reason: finalReason,
@@ -543,12 +637,13 @@ export function startResearchSession(
   const { store } = getBridgeContext();
   const goalPath = resolveGoalPath(input.folder);
   const folder = goalPath.slice(0, goalPath.length - ('/' + GOAL_FILE_NAME).length);
-  const maxTurns = input.maxTurns ?? DEFAULT_MAX_TURNS;
+  const maxTurns = input.maxTurns ?? readConfiguredDefaultMaxTurns() ?? DEFAULT_MAX_TURNS;
 
   // Resolve which runner backs each side: explicit HTTP override wins, then
-  // configured `imBot.researchResearcherRunner` / `researchReviewerRunner`, then
-  // the bridge default LLM. The chosen runner id (if any) is persisted so the
-  // session state and result.md show exactly which agent did each role.
+  // configured top-level `Config.research.researcher/reviewerRunner` (with
+  // legacy fallback to `imBot.research*Runner`), then the bridge default LLM.
+  // The chosen runner id (if any) is persisted so the session state and
+  // result.md show exactly which agent did each role.
   const configuredIds = readConfiguredResearchRunnerIds();
   const sideA = resolveSideRunner(input.runnerA, configuredIds.researcher);
   const sideB = resolveSideRunner(input.runnerB, configuredIds.reviewer);
@@ -608,6 +703,14 @@ export function startResearchSession(
     preview: `folder=${state.folder} maxTurns=${state.maxTurns}`,
   });
 
+  const telegramTarget = resolveResearchTelegramTarget(input.notifyTelegram);
+  if (!telegramTarget) {
+    getLogger().info(
+      { event: 'research_telegram_mirror_disabled' },
+      '[research-mode] Telegram mirror off (no bot token + chat id resolved)',
+    );
+  }
+
   const abortRef: { aborted: boolean; reason?: string } = { aborted: false };
   const done = runOrchestratorLoop({
     state,
@@ -616,7 +719,7 @@ export function startResearchSession(
     llmA: sideA.llm,
     llmB: sideB.llm,
     mirror,
-    notifyTelegram: input.notifyTelegram,
+    telegramTarget,
     abortRef,
   });
 

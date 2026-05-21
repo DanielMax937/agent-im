@@ -7,6 +7,7 @@ import {
   type Config,
   type ImInstanceChannel,
   type ImInstanceSpec,
+  type ResearchModeConfig,
   type RunnerConfig,
 } from '../../config-shared';
 
@@ -767,6 +768,92 @@ export default function AdminPage() {
       </header>
 
       {message ? <p className="ui-banner">{message}</p> : null}
+
+      {/*
+        Research 模式 — agent-im 平台级配置，独立于任何 IM bot。
+        值持久化到 kanban 桥接 config.env 的顶层 CTI_RESEARCH（kanban 桥接代表
+        agent-im 平台进程本身），与下方桥接列表中任何 mybot/discord/qq 的 imBot
+        配置都没有耦合关系。
+      */}
+      {!configLoading && (() => {
+        const cfgR = bridgeConfigs[KANBAN_BRIDGE_SLUG] ?? defaultConfig();
+        const baseR = baselineBridgeConfigs?.[KANBAN_BRIDGE_SLUG];
+        const research = cfgR.research;
+        const updateResearch = (patch: Partial<ResearchModeConfig>) => {
+          setBridgeConfigs((prev) => {
+            const cur = prev[KANBAN_BRIDGE_SLUG] ?? defaultConfig();
+            const merged: ResearchModeConfig = { ...(cur.research ?? {}), ...patch };
+            // Apply explicit `undefined` patches by deleting the key so the
+            // "no longer set" case doesn't linger as an empty `RunnerConfig`.
+            for (const k of Object.keys(patch) as (keyof ResearchModeConfig)[]) {
+              if (patch[k] === undefined) delete merged[k];
+            }
+            const isEmpty =
+              !merged.researcherRunner &&
+              !merged.reviewerRunner &&
+              merged.defaultMaxTurns === undefined;
+            return {
+              ...prev,
+              [KANBAN_BRIDGE_SLUG]: { ...cur, research: isEmpty ? undefined : merged },
+            };
+          });
+        };
+        const researchDirty = baseR
+          ? JSON.stringify(cfgR.research ?? null) !== JSON.stringify(baseR.research ?? null)
+          : false;
+        return (
+          <section className="ui-section hero-card">
+            <h2>Research 模式</h2>
+            <div className="ui-bridge-intro-panel">
+              <p className="ui-bridge-intro-lead">
+                <strong>Agent A（研究员）与 Agent B（资深评审）</strong>双 agent 协作模式，
+                由 <code>agent-im</code> 平台进程直接编排；通过 <code>POST /api/research</code> 启动。
+                A 先把计划交给 B 评审、B 同意后 A 执行、A 自判完成则 B 验证；只有双方都确认才视为真正完成。
+              </p>
+              <p className="ui-muted ui-small">
+                此配置 <strong>独立于下方任何 IM bot</strong>（mybot / discord / qq …），
+                因此停止任何具体桥接都不会影响研究模式。配置写入 <code>kanban</code> 桥接 <code>config.env</code> 的顶层
+                <code> CTI_RESEARCH</code>（kanban 即 agent-im 平台进程本身），
+                由平台进程加载并构建独立 LLM Provider。Runner ID 留空则回退到该桥接默认 Runner。
+                详细文档：<code>src/lib/bridge/research-mode/README.md</code>。
+              </p>
+            </div>
+            <div className="ui-bridge-subsection">
+              <div className="ui-grid-span-full">
+                <ResearchRunnerCard
+                  title="Researcher Runner（Agent A）"
+                  runner={research?.researcherRunner}
+                  envPresence={envPresence}
+                  onChange={(next) => updateResearch({ researcherRunner: next })}
+                  onClear={() => updateResearch({ researcherRunner: undefined })}
+                />
+                <ResearchRunnerCard
+                  title="Reviewer Runner（Agent B）"
+                  runner={research?.reviewerRunner}
+                  envPresence={envPresence}
+                  onChange={(next) => updateResearch({ reviewerRunner: next })}
+                  onClear={() => updateResearch({ reviewerRunner: undefined })}
+                />
+              </div>
+              <div className="ui-actions-bar ui-mt-md">
+                <button
+                  type="button"
+                  className="ui-btn primary"
+                  disabled={!researchDirty || configLoading || saving}
+                  onClick={() => void saveBridgeConfig(KANBAN_BRIDGE_SLUG)}
+                  title={!researchDirty ? '没有变更' : undefined}
+                >
+                  {saving ? '保存中…' : '保存 Research 配置'}
+                </button>
+                <span className="ui-muted ui-small">
+                  保存后 agent-im 平台进程立即生效（下次 <code>POST /api/research</code> 调用即采用新配置），
+                  无需重启任何桥接。
+                </span>
+              </div>
+            </div>
+          </section>
+        );
+      })()}
 
       <section className="ui-section hero-card">
         <h2>Bridge（桥接）</h2>
@@ -1773,30 +1860,6 @@ export default function AdminPage() {
                       </div>
                     </div>
                   ) : null}
-                </div>
-                <div className="ui-im-section-divider-lg">
-                  <p className="ui-muted ui-small">
-                    <strong>Research 模式（两 agent 对谈）</strong>：通过 <code>POST /api/research</code> 启动；Agent A（研究员，执行工作）与 Agent B（资深评审）轮流对谈，A 先把计划交给 B 评审、B 同意后 A 执行、A 自判完成则 B 验证；只有双方都确认才视为真正完成。下方两个 Runner ID 字段决定 A、B 各由哪个 Runner 承担；任一字段留空即使用<strong>桥接默认 Runner</strong>。研究模式自身不依赖 Telegram；当配置了 Telegram token 时可在调用 API 时附 <code>notifyTelegram</code> 推送完成通知。详细文档：<code>src/lib/bridge/research-mode/README.md</code>。
-                  </p>
-                  <p className="ui-muted ui-small ui-mb-md-half">
-                    Runner 配置写入 <code>imBot.researchResearcherRunner</code> / <code>imBot.researchReviewerRunner</code>，与上方 Runners 共用 LLM 实例；保存后即生效。
-                  </p>
-                  <div className="ui-grid-span-full">
-                    <ResearchRunnerCard
-                      title="Researcher Runner（Agent A）"
-                      runner={spec.researchResearcherRunner}
-                      envPresence={envPresence}
-                      onChange={(next) => updateImBot({ researchResearcherRunner: next })}
-                      onClear={() => updateImBot({ researchResearcherRunner: undefined })}
-                    />
-                    <ResearchRunnerCard
-                      title="Reviewer Runner（Agent B）"
-                      runner={spec.researchReviewerRunner}
-                      envPresence={envPresence}
-                      onChange={(next) => updateImBot({ researchReviewerRunner: next })}
-                      onClear={() => updateImBot({ researchReviewerRunner: undefined })}
-                    />
-                  </div>
                 </div>
               </div>
             );})()}

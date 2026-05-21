@@ -25,7 +25,8 @@ interface StartRequestBody {
   maxTurns?: number;
   runnerA?: string;
   runnerB?: string;
-  notifyTelegram?: { chatId?: string; instanceId?: string };
+  /** Optional override; omit entirely to auto-resolve Auto-mode Telegram credentials. */
+  notifyTelegram?: { chatId?: string; instanceId?: string; bridgeSlug?: string };
 }
 
 function jsonResponse(status: number, body: unknown): Response {
@@ -52,18 +53,23 @@ function validateStartBody(raw: unknown): { ok: true; input: StartResearchSessio
     maxTurns = Math.floor(b.maxTurns);
   }
   let notifyTelegram: StartResearchSessionInput['notifyTelegram'];
-  if (b.notifyTelegram) {
+  if (b.notifyTelegram !== undefined && b.notifyTelegram !== null) {
     if (typeof b.notifyTelegram !== 'object' || Array.isArray(b.notifyTelegram)) {
-      return { ok: false, error: 'notifyTelegram must be an object { chatId, instanceId? }' };
+      return { ok: false, error: 'notifyTelegram must be an object { chatId?, instanceId?, bridgeSlug? }' };
     }
-    const chatId = b.notifyTelegram.chatId;
-    if (typeof chatId !== 'string' || !chatId.trim()) {
-      return { ok: false, error: 'notifyTelegram.chatId is required' };
-    }
-    notifyTelegram = {
-      chatId: chatId.trim(),
-      instanceId: typeof b.notifyTelegram.instanceId === 'string' ? b.notifyTelegram.instanceId : undefined,
-    };
+    const chatId =
+      typeof b.notifyTelegram.chatId === 'string' && b.notifyTelegram.chatId.trim()
+        ? b.notifyTelegram.chatId.trim()
+        : undefined;
+    const instanceId =
+      typeof b.notifyTelegram.instanceId === 'string' && b.notifyTelegram.instanceId.trim()
+        ? b.notifyTelegram.instanceId.trim()
+        : undefined;
+    const bridgeSlug =
+      typeof b.notifyTelegram.bridgeSlug === 'string' && b.notifyTelegram.bridgeSlug.trim()
+        ? b.notifyTelegram.bridgeSlug.trim()
+        : undefined;
+    notifyTelegram = { chatId, instanceId, bridgeSlug };
   }
   return {
     ok: true,

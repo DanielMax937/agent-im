@@ -5,6 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import {
   buildSlaveEnvFromRunner,
+  collectResearchRunners,
   maskSecret,
   configToSettings,
   mergeConfigPatch,
@@ -665,5 +666,191 @@ describe('buildSlaveEnvFromRunner', () => {
       },
     );
     assert.equal(env.CTI_AUTO_APPROVE, 'false');
+  });
+});
+
+// ── Research mode config (top-level, independent of any IM bot) ──
+
+describe('Research mode config (CTI_RESEARCH)', () => {
+  let tmpDir: string;
+  let savedSlaveBridge: string | undefined;
+
+  beforeEach(() => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cti-research-cfg-'));
+    savedSlaveBridge = process.env.CTI_SLAVE_BRIDGE;
+    delete process.env.CTI_SLAVE_BRIDGE;
+  });
+
+  afterEach(() => {
+    if (savedSlaveBridge === undefined) delete process.env.CTI_SLAVE_BRIDGE;
+    else process.env.CTI_SLAVE_BRIDGE = savedSlaveBridge;
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it('parses CTI_RESEARCH into Config.research', () => {
+    fs.writeFileSync(
+      path.join(tmpDir, 'config.env'),
+      [
+        'CTI_RUNNERS=[{"id":"default","runtime":"claude"}]',
+        'CTI_DEFAULT_RUNNER=default',
+        'CTI_RUNTIME=claude',
+        'CTI_ENABLED_CHANNELS=telegram',
+        `CTI_DEFAULT_WORKDIR=${process.cwd()}`,
+        'CTI_RESEARCH={"researcherRunner":{"id":"claude-a","runtime":"claude","label":"Agent A"},"reviewerRunner":{"id":"codex-b","runtime":"codex","label":"Agent B"},"defaultMaxTurns":15}',
+        '',
+      ].join('\n'),
+      'utf-8',
+    );
+    const loaded = loadConfig(tmpDir);
+    assert.equal(loaded.research?.researcherRunner?.id, 'claude-a');
+    assert.equal(loaded.research?.researcherRunner?.runtime, 'claude');
+    assert.equal(loaded.research?.reviewerRunner?.id, 'codex-b');
+    assert.equal(loaded.research?.reviewerRunner?.runtime, 'codex');
+    assert.equal(loaded.research?.defaultMaxTurns, 15);
+  });
+
+  it('round-trips Config.research through saveConfig → loadConfig', () => {
+    const base: Config = {
+      runtime: 'claude',
+      enabledChannels: ['telegram'],
+      defaultWorkDir: process.cwd(),
+      defaultMode: 'code',
+      runners: [{ id: 'default', runtime: 'claude' }],
+      defaultRunnerId: 'default',
+      research: {
+        researcherRunner: { id: 'claude-a', runtime: 'claude' },
+        reviewerRunner: { id: 'codex-b', runtime: 'codex' },
+        defaultMaxTurns: 12,
+      },
+    };
+    saveConfig(base, tmpDir);
+    const raw = fs.readFileSync(path.join(tmpDir, 'config.env'), 'utf-8');
+    assert.match(raw, /^CTI_RESEARCH=/m);
+
+    const loaded = loadConfig(tmpDir);
+    assert.equal(loaded.research?.researcherRunner?.id, 'claude-a');
+    assert.equal(loaded.research?.reviewerRunner?.id, 'codex-b');
+    assert.equal(loaded.research?.defaultMaxTurns, 12);
+  });
+
+  it('migrates legacy imBot.research*Runner into top-level Config.research', () => {
+    fs.writeFileSync(
+      path.join(tmpDir, 'config.env'),
+      [
+        'CTI_RUNNERS=[{"id":"default","runtime":"claude"}]',
+        'CTI_DEFAULT_RUNNER=default',
+        'CTI_RUNTIME=claude',
+        'CTI_ENABLED_CHANNELS=telegram',
+        `CTI_DEFAULT_WORKDIR=${process.cwd()}`,
+        // Old-style config: research runners nested under imBot, no top-level CTI_RESEARCH.
+        'CTI_IM_BOT={"id":"legacy","channel":"telegram","runners":[{"id":"default","runtime":"claude"}],"researchResearcherRunner":{"id":"claude-a","runtime":"claude"},"researchReviewerRunner":{"id":"codex-b","runtime":"codex"}}',
+        '',
+      ].join('\n'),
+      'utf-8',
+    );
+
+    const loaded = loadConfig(tmpDir);
+    assert.equal(loaded.research?.researcherRunner?.id, 'claude-a');
+    assert.equal(loaded.research?.reviewerRunner?.id, 'codex-b');
+  });
+
+  it('drops legacy imBot.research*Runner from the persisted CTI_IM_BOT JSON on next save', () => {
+    // Simulate a freshly-migrated config: top-level research is set and the
+    // legacy nested fields are still hanging around in memory.
+    const migrated: Config = {
+      runtime: 'claude',
+      enabledChannels: ['telegram'],
+      defaultWorkDir: process.cwd(),
+      defaultMode: 'code',
+      runners: [{ id: 'default', runtime: 'claude' }],
+      defaultRunnerId: 'default',
+      imBot: {
+        id: 'bot',
+        channel: 'telegram',
+        runners: [{ id: 'default', runtime: 'claude' }],
+        researchResearcherRunner: { id: 'claude-a', runtime: 'claude' },
+        researchReviewerRunner: { id: 'codex-b', runtime: 'codex' },
+      },
+      research: {
+        researcherRunner: { id: 'claude-a', runtime: 'claude' },
+        reviewerRunner: { id: 'codex-b', runtime: 'codex' },
+      },
+    };
+    saveConfig(migrated, tmpDir);
+    const raw = fs.readFileSync(path.join(tmpDir, 'config.env'), 'utf-8');
+    const imBotLine = raw.split('\n').find((l) => l.startsWith('CTI_IM_BOT='));
+    assert.ok(imBotLine, 'CTI_IM_BOT line should exist');
+    assert.ok(
+      !imBotLine!.includes('researchResearcherRunner'),
+      'CTI_IM_BOT should not carry legacy researchResearcherRunner field',
+    );
+    assert.ok(
+      !imBotLine!.includes('researchReviewerRunner'),
+      'CTI_IM_BOT should not carry legacy researchReviewerRunner field',
+    );
+    assert.match(raw, /^CTI_RESEARCH=.*claude-a.*codex-b/m);
+  });
+
+  it('omits CTI_RESEARCH from disk when research config is empty', () => {
+    const base: Config = {
+      runtime: 'claude',
+      enabledChannels: ['telegram'],
+      defaultWorkDir: process.cwd(),
+      defaultMode: 'code',
+      runners: [{ id: 'default', runtime: 'claude' }],
+      defaultRunnerId: 'default',
+    };
+    saveConfig(base, tmpDir);
+    const raw = fs.readFileSync(path.join(tmpDir, 'config.env'), 'utf-8');
+    assert.ok(!raw.includes('CTI_RESEARCH='), 'CTI_RESEARCH should be omitted when unset');
+  });
+
+  it('saveConfig rejects unsupported research runner runtime', () => {
+    assert.throws(
+      () =>
+        saveConfig(
+          {
+            runtime: 'claude',
+            enabledChannels: ['telegram'],
+            defaultWorkDir: process.cwd(),
+            defaultMode: 'code',
+            research: {
+              researcherRunner: { id: 'broken', runtime: 'unknown-runtime' as never },
+            },
+          },
+          tmpDir,
+        ),
+      /unsupported runtime "unknown-runtime"/i,
+    );
+  });
+
+  it('collectResearchRunners dedupes by id and trims', () => {
+    const out = collectResearchRunners({
+      runtime: 'claude',
+      enabledChannels: [],
+      defaultWorkDir: process.cwd(),
+      defaultMode: 'code',
+      research: {
+        researcherRunner: { id: '  same  ', runtime: 'claude', label: 'A' },
+        reviewerRunner: { id: 'same', runtime: 'codex', label: 'B' },
+      },
+    });
+    assert.equal(out.length, 1, 'duplicate ids collapse into one provider');
+    assert.equal(out[0].id, 'same');
+    assert.equal(out[0].runtime, 'claude', 'first occurrence wins');
+  });
+
+  it('collectResearchRunners ignores empty id slots', () => {
+    const out = collectResearchRunners({
+      runtime: 'claude',
+      enabledChannels: [],
+      defaultWorkDir: process.cwd(),
+      defaultMode: 'code',
+      research: {
+        researcherRunner: { id: '', runtime: 'claude' },
+        reviewerRunner: { id: 'b', runtime: 'codex' },
+      },
+    });
+    assert.deepEqual(out.map((r) => r.id), ['b']);
   });
 });

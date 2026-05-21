@@ -87,10 +87,65 @@ cat /tmp/research-demo/.research/result-$SID.md
 
 ## Configuration
 
+Research mode is an **agent-im platform-level** feature: it runs inside the
+agent-im HTTP process (the `kanban` bridge) and is **independent of any IM
+bot**. Stopping `mybot` / `discord` / etc. does not stop Research mode.
+
+### Top-level `Config.research` (`CTI_RESEARCH` env var)
+
+Persisted as a single JSON value in the `kanban` bridge's `config.env`:
+
+```bash
+CTI_RESEARCH={"researcherRunner":{"id":"claude-a","runtime":"claude"},"reviewerRunner":{"id":"codex-b","runtime":"codex"},"defaultMaxTurns":30}
+```
+
+| Field              | Purpose                                                                                                          |
+|--------------------|------------------------------------------------------------------------------------------------------------------|
+| `researcherRunner` | Runner profile that powers **Agent A**. Built into a dedicated `LLMProvider` by `buildImBridgeLlmStack`.         |
+| `reviewerRunner`   | Runner profile that powers **Agent B**. Built into a dedicated `LLMProvider` by `buildImBridgeLlmStack`.         |
+| `defaultMaxTurns`  | Default `maxTurns` for `POST /api/research` when the request body omits it (orchestrator hard default: `30`).    |
+
+Either side may be omitted — the orchestrator then falls back to the bridge
+default LLM. `POST /api/research { runnerA, runnerB }` still overrides on a
+per-call basis.
+
+The admin page (`/admin`) renders a top-level **Research 模式** card that
+edits these fields and saves them to the `kanban` bridge's `config.env`.
+
+> **Legacy migration.** Earlier versions stored these inside
+> `imBot.researchResearcherRunner` / `researchReviewerRunner` on each
+> bridge's `imBot` config. `loadConfig` still reads those legacy fields and
+> lifts them up to `Config.research` automatically; the next `saveConfig`
+> drops them from `CTI_IM_BOT` so there is only one source of truth.
+
+### Telegram mirror (every agent reply)
+
+By default, **each Agent A and Agent B reply** is sent to Telegram, plus a short
+summary when the session ends — same bot token / chat as Auto mode
+(`imBot.tgBotToken` + `imBot.tgChatId`, usually on the `mybot` bridge).
+
+Resolution order:
+
+1. `POST /api/research` body `notifyTelegram: { chatId?, instanceId?, bridgeSlug? }` (override chat or pin a bridge for token lookup)
+2. Scan all bridge `config.env` files — prefers `mybot`, then bridges with `autoMode` / `autoRedisUrl`, then `kanban`
+3. Platform JsonFileStore keys `telegram_bot_token` / `telegram_chat_id` (hybrid Auto instances first)
+4. Env `CTI_TELEGRAM_BOT_TOKEN` + `CTI_TG_CHAT_ID`
+
+Message format (HTML):
+
+- `[researcher] turn N · session …` — Agent A reply (parallel to Auto `[master]` / `[slave]`)
+- `[reviewer] turn N · session …` — Agent B reply
+- Final `Research mode — completed|failed|…` block with folder / result path
+
+Omit `notifyTelegram` entirely to use auto-resolution; you do **not** need to pass `chatId` if `mybot` (or kanban) already has Telegram configured.
+
+### Other env vars
+
 | Env var                   | Purpose                                                                 |
 |---------------------------|--------------------------------------------------------------------------|
 | `CTI_RESEARCH_REDIS_URL`  | Redis URL for the optional mirror; falls back to `CTI_TELEGRAM_AUTO_REDIS_URL` / `CTI_AUTO_REDIS_URL` / `CTI_LOCAL_AGENT_REDIS_URL`. Leave unset to disable mirroring entirely. |
-| `CTI_TELEGRAM_BOT_TOKEN`  | Used (env fallback) for the completion notice. Store-scoped `telegram_bot_token` is preferred. |
+| `CTI_TELEGRAM_BOT_TOKEN`  | Env fallback for the bot token when store/config lack `tgBotToken`. |
+| `CTI_TG_CHAT_ID`          | Env fallback for the notify chat when store/config lack `tgChatId`. |
 
 ## Constraints
 
