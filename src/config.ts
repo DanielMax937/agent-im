@@ -134,6 +134,38 @@ export function loadKanbanPlatformConfig(): Config {
   return loadConfig(getKanbanPlatformCtiHome());
 }
 
+/** Default directory name for the Research mode bridge. */
+export const RESEARCH_BRIDGE_DEFAULT_NAME = "research";
+
+/**
+ * Get the home directory for the Research mode bridge.
+ *
+ * Priority:
+ * 1. `CTI_RESEARCH_HOME` environment variable (absolute path)
+ * 2. `~/.claude-to-im/research`
+ */
+export function getResearchBridgeCtiHome(): string {
+  const raw = process.env.CTI_RESEARCH_HOME?.trim();
+  if (raw) {
+    return path.resolve(raw);
+  }
+  return path.join(getCtiBaseDir(), RESEARCH_BRIDGE_DEFAULT_NAME);
+}
+
+/**
+ * Load the Research bridge configuration.
+ *
+ * Returns `null` if the Research bridge directory does not exist,
+ * allowing callers to fall back to the Kanban bridge or global config.
+ */
+export function loadResearchBridgeConfig(): Config | null {
+  const home = getResearchBridgeCtiHome();
+  if (!fs.existsSync(home)) {
+    return null;
+  }
+  return loadConfig(home);
+}
+
 export function getSlaveEnvPath(ctiHomeOverride?: string): string {
   const home = ctiHomeOverride?.trim() ? path.resolve(ctiHomeOverride.trim()) : getCtiHome();
   return path.join(home, "config.slave.env");
@@ -671,8 +703,20 @@ function researchModeConfigFromRow(o: unknown): ResearchModeConfig | undefined {
     typeof obj.defaultMaxTurns === "number" && obj.defaultMaxTurns > 0
       ? Math.floor(obj.defaultMaxTurns)
       : undefined;
-  if (!researcher && !reviewer && defaultMaxTurns === undefined) return undefined;
-  return { researcherRunner: researcher, reviewerRunner: reviewer, defaultMaxTurns };
+
+  // Parse telegram configuration
+  let telegram: { botToken?: string; chatId?: string } | undefined;
+  if (obj.telegram && typeof obj.telegram === "object") {
+    const tg = obj.telegram as Record<string, unknown>;
+    const botToken = typeof tg.botToken === "string" ? tg.botToken.trim() : undefined;
+    const chatId = typeof tg.chatId === "string" ? tg.chatId.trim() : undefined;
+    if (botToken || chatId) {
+      telegram = { botToken, chatId };
+    }
+  }
+
+  if (!researcher && !reviewer && defaultMaxTurns === undefined && telegram === undefined) return undefined;
+  return { researcherRunner: researcher, reviewerRunner: reviewer, defaultMaxTurns, telegram };
 }
 
 /**
@@ -855,25 +899,97 @@ function applyImBotToSettings(m: Map<string, string>, config: Config): void {
   }
 }
 
+/**
+ * Parse a .env file content into a Map of key-value pairs.
+ * Handles multi-line values enclosed in braces (e.g., JSON objects).
+ */
 function parseEnvFile(content: string): Map<string, string> {
   const entries = new Map<string, string>();
-  for (const line of content.split("\n")) {
+  let currentKey = '';
+  let currentValue = '';
+  let inMultiline = false;
+  let braceCount = 0;
+  let hadOpeningBrace = false;
+
+  for (const line of content.split('\n')) {
     const trimmed = line.trim();
-    if (!trimmed || trimmed.startsWith("#")) continue;
-    const eqIdx = trimmed.indexOf("=");
-    if (eqIdx === -1) continue;
-    const key = trimmed.slice(0, eqIdx).trim();
-    let value = trimmed.slice(eqIdx + 1).trim();
-    // Strip surrounding quotes
-    if (
-      (value.startsWith('"') && value.endsWith('"')) ||
-      (value.startsWith("'") && value.endsWith("'"))
-    ) {
-      value = value.slice(1, -1);
+    if (!trimmed || trimmed.startsWith('#')) continue;
+
+    if (!inMultiline) {
+      // Start of a new key-value pair
+      const eqIdx = trimmed.indexOf('=');
+      if (eqIdx === -1) continue;
+      currentKey = trimmed.slice(0, eqIdx).trim();
+      currentValue = trimmed.slice(eqIdx + 1).trim();
+
+      // Check if value is a multi-line JSON object
+      if (currentValue === '{') {
+        inMultiline = true;
+        braceCount = 1;
+        hadOpeningBrace = true;
+        currentValue = ''; // Start fresh, will add content from next lines
+      } else {
+        // Single line value - strip surrounding quotes
+        currentValue = stripQuotes(currentValue);
+        entries.set(currentKey, currentValue);
+      }
+    } else {
+      // Inside a multi-line value
+      braceCount += countOccurrences(line, '{') - countOccurrences(line, '}');
+      currentValue += (currentValue ? '\n' : '') + line;
+
+      if (braceCount <= 0) {
+        // End of multi-line value
+        inMultiline = false;
+        braceCount = 0;
+        // Clean up the trailing brace and extra newlines
+        currentValue = currentValue.replace(/,\s*$/, '').trim();
+        // Prepend opening brace if we started with one
+        if (hadOpeningBrace) {
+          currentValue = '{\n' + currentValue;
+        }
+        hadOpeningBrace = false;
+        try {
+          // Try to parse as JSON to validate and normalize
+          JSON.parse(currentValue);
+          entries.set(currentKey, currentValue);
+        } catch {
+          // If not valid JSON, just store as-is
+          entries.set(currentKey, currentValue);
+        }
+        currentKey = '';
+        currentValue = '';
+      }
     }
-    entries.set(key, value);
   }
+
+  // Handle any remaining multiline value (in case file doesn't end with newline)
+  if (inMultiline && currentKey) {
+    if (hadOpeningBrace) {
+      currentValue = '{\n' + currentValue;
+    }
+    entries.set(currentKey, currentValue.trim());
+  }
+
   return entries;
+}
+
+function stripQuotes(value: string): string {
+  if (
+    (value.startsWith('"') && value.endsWith('"')) ||
+    (value.startsWith("'") && value.endsWith("'"))
+  ) {
+    return value.slice(1, -1);
+  }
+  return value;
+}
+
+function countOccurrences(str: string, char: string): number {
+  let count = 0;
+  for (const c of str) {
+    if (c === char) count++;
+  }
+  return count;
 }
 
 /**

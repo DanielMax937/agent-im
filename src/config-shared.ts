@@ -185,6 +185,18 @@ export interface ResearchModeConfig {
     /** Model to use for expert consultation (codex exec -m). */
     expertModel?: string;
   };
+
+  /**
+   * Dedicated Telegram configuration for Research mode notifications.
+   * When set, all Research mode notifications (agent replies and session completion)
+   * will use these credentials instead of scanning other bridges.
+   */
+  telegram?: {
+    /** Telegram bot token for sending messages. */
+    botToken?: string;
+    /** Target chat ID for notifications. */
+    chatId?: string;
+  };
 }
 
 /** One IM connection (bot) inside the bridge; see docs/IM_BRIDGE_MULTI_INSTANCE.md */

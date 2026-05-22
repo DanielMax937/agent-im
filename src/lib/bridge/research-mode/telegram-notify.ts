@@ -12,6 +12,7 @@ import {
   getCtiHomeForBridgeSlug,
   listBridgeSlugs,
   loadConfig,
+  loadResearchBridgeConfig,
 } from '../../../config';
 import { callTelegramApi, escapeHtml } from '../adapters/telegram-utils';
 import { getBridgeContext } from '../context';
@@ -162,17 +163,50 @@ function resolveTokenFromEnv(): string | null {
 }
 
 /**
+ * Resolve Telegram credentials from the dedicated Research bridge config.
+ * This takes priority over all other sources when configured.
+ */
+function resolveFromResearchBridgeConfig(): ResearchTelegramTarget | null {
+  const researchConfig = loadResearchBridgeConfig();
+  if (!researchConfig?.research?.telegram) return null;
+
+  const { botToken, chatId } = researchConfig.research.telegram;
+  const trimmedToken = botToken?.trim();
+  const trimmedChatId = chatId?.trim();
+
+  if (!trimmedToken || !trimmedChatId) return null;
+
+  return {
+    token: trimmedToken,
+    chatId: trimmedChatId,
+    instanceId: 'research',
+    bridgeSlug: 'research',
+  };
+}
+
+/**
  * Resolve Telegram credentials for Research mode notifications.
  *
  * Priority:
- * 1. Explicit `notifyTelegram.chatId` (+ optional `instanceId` / `bridgeSlug` for token lookup)
- * 2. Best matching bridge `config.env` (prefers `mybot`, then Auto-mode flags, then `kanban`)
- * 3. Bridge JsonFileStore (`telegram_bot_token` / `telegram_chat_id`, hybrid Auto first)
- * 4. `CTI_TELEGRAM_BOT_TOKEN` + `CTI_TG_CHAT_ID` env fallbacks
+ * 1. Dedicated Research bridge config (`Config.research.telegram`) - takes precedence
+ * 2. Explicit `notifyTelegram.chatId` from POST body (+ optional `instanceId` / `bridgeSlug` for token lookup)
+ * 3. Best matching bridge `config.env` (prefers `mybot`, then Auto-mode flags, then `kanban`)
+ * 4. Bridge JsonFileStore (`telegram_bot_token` / `telegram_chat_id`, hybrid Auto first)
+ * 5. `CTI_TELEGRAM_BOT_TOKEN` + `CTI_TG_CHAT_ID` env fallbacks
  */
 export function resolveResearchTelegramTarget(
   override?: ResearchTelegramOverride,
 ): ResearchTelegramTarget | null {
+  // Priority 1: Use dedicated Research bridge Telegram config
+  const fromResearchBridge = resolveFromResearchBridgeConfig();
+  if (fromResearchBridge) {
+    // If POST body specifies a chatId, override only that
+    if (override?.chatId?.trim()) {
+      return { ...fromResearchBridge, chatId: override.chatId.trim() };
+    }
+    return fromResearchBridge;
+  }
+
   const explicitChatId = override?.chatId?.trim();
   if (explicitChatId && override) {
     const fromBridge = resolveFromBridgeConfigs(override);

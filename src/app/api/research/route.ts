@@ -99,7 +99,7 @@ export async function POST(request: Request): Promise<Response> {
   await getPlatformContainer();
 
   try {
-    const result = startResearchSession(validated.input);
+    const result = await startResearchSession(validated.input);
     // Loop runs in background; record an unhandled-rejection guard so node doesn't crash.
     result.done.catch((err) => {
       log.warn(

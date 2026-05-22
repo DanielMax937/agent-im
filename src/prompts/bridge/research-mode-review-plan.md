@@ -14,6 +14,8 @@ Agent A's plan (turn {{turn}}):
 {{aBody}}
 ---
 
+{{firstPlanReviewSocraticGuidance}}
+
 Issue your verdict. Acceptable verdicts here: `approve-plan` or `request-changes`.
 
 End your message with exactly one tagged JSON line:

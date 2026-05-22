@@ -16,11 +16,53 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
-import { execFile } from 'node:child_process';
-import { promisify } from 'node:util';
+import { spawn } from 'node:child_process';
 import { getLogger } from '../../../logger';
 
-const execFileAsync = promisify(execFile);
+/**
+ * Execute codex with prompt piped via stdin (avoids CLI arg length limits).
+ * Returns stdout content.
+ */
+function execCodexWithStdin(
+  cmd: string,
+  args: string[],
+  stdinContent: string,
+  options?: { timeout?: number; signal?: AbortSignal },
+): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const child = spawn(cmd, args, {
+      timeout: options?.timeout ?? 120_000,
+      env: { ...process.env },
+      stdio: ['pipe', 'pipe', 'pipe'],
+    });
+
+    let stdout = '';
+    let stderr = '';
+
+    child.stdout.on('data', (data) => { stdout += data.toString(); });
+    child.stderr.on('data', (data) => { stderr += data.toString(); });
+
+    child.on('error', (err) => reject(err));
+    child.on('close', (code) => {
+      if (code === 0) {
+        resolve(stdout);
+      } else {
+        reject(new Error(`codex exec exited with code ${code}: ${stderr.slice(0, 500)}`));
+      }
+    });
+
+    // Handle abort signal
+    if (options?.signal) {
+      options.signal.addEventListener('abort', () => {
+        child.kill('SIGTERM');
+      });
+    }
+
+    // Write prompt to stdin and close
+    child.stdin.write(stdinContent);
+    child.stdin.end();
+  });
+}
 
 export interface ExpertDefinition {
   id: string;
@@ -63,7 +105,7 @@ export interface ExpertCouncilResult {
   triggeredAt: string;
 }
 
-const DEFAULT_REJECT_THRESHOLD = 3;
+const DEFAULT_REJECT_THRESHOLD = 5;
 const DEFAULT_MAX_EXPERTS = 5;
 const DEFAULT_MAX_COUNCILS = 2;
 
@@ -239,43 +281,38 @@ export async function consultExpert(
   const outputFile = path.join(sessionDir, 'experts', expert.id, 'response.md');
 
   try {
-    // Write instructions to temp file to avoid shell injection
+    // Write instructions to temp file for reference
     fs.writeFileSync(instructionsFile, persona);
 
-    // Read instructions content for -c flag — but use stdin approach instead
-    // to avoid TOML quoting nightmares. Pipe question via stdin.
+    // Construct full prompt embedding persona + question
+    const fullPrompt = `${persona}\n\n---\n\n## Question for ${expert.displayName}\n\n${question}`;
+
     const args = [
       'exec',
       '--dangerously-bypass-approvals-and-sandbox',
       '--ephemeral',
       '--cd', workingDir,
       '-o', outputFile,
+      '-', // read prompt from stdin
     ];
 
     if (options?.model) {
       args.push('-m', options.model);
     }
 
-    // Use instructions from file via config override
-    // Format: -c 'instructions="..."' — but this has quoting issues.
-    // Instead, construct prompt that embeds system context:
-    const fullPrompt = `${persona}\n\n---\n\n## Question for ${expert.displayName}\n\n${question}`;
-    args.push(fullPrompt);
+    log.info({ event: 'expert_consult_start', expert: expert.id, promptLen: fullPrompt.length }, `consulting expert: ${expert.displayName}`);
 
-    log.info({ event: 'expert_consult_start', expert: expert.id }, `consulting expert: ${expert.displayName}`);
-
-    const result = await execFileAsync('codex', args, {
-      timeout: 120_000, // 2 minute timeout per expert
-      maxBuffer: 1024 * 1024,
+    const stdout = await execCodexWithStdin('codex', args, fullPrompt, {
+      timeout: 120_000,
       signal: options?.abortSignal,
     });
 
-    // Read output file
+    // Read output file first, fall back to stdout
     let response = '';
     if (fs.existsSync(outputFile)) {
       response = fs.readFileSync(outputFile, 'utf8');
-    } else if (result.stdout) {
-      response = result.stdout;
+    } else if (stdout) {
+      response = stdout;
     }
 
     log.info({ event: 'expert_consult_done', expert: expert.id, responseLen: response.length }, 'expert consultation complete');
@@ -306,6 +343,7 @@ export async function consultExpert(
 
 /**
  * Determine experts by invoking codex exec with the determination prompt.
+ * Uses stdin to pass the prompt (avoids CLI argument length limits).
  */
 export async function determineExperts(
   goalText: string,
@@ -325,28 +363,30 @@ export async function determineExperts(
       '--ephemeral',
       '--cd', workingDir,
       '-o', outputFile,
+      '-', // read prompt from stdin
     ];
     if (options?.model) {
       args.push('-m', options.model);
     }
-    args.push(prompt);
 
-    log.info({ event: 'expert_determination_start' }, 'determining domain experts');
+    log.info({ event: 'expert_determination_start', promptLen: prompt.length }, 'determining domain experts');
 
-    await execFileAsync('codex', args, {
-      timeout: 90_000,
-      maxBuffer: 1024 * 1024,
+    const output = await execCodexWithStdin('codex', args, prompt, {
+      timeout: 120_000,
       signal: options?.abortSignal,
     });
 
-    let output = '';
+    // Read from output file first, fall back to stdout
+    let result = '';
     if (fs.existsSync(outputFile)) {
-      output = fs.readFileSync(outputFile, 'utf8');
+      result = fs.readFileSync(outputFile, 'utf8');
+    } else if (output) {
+      result = output;
     }
 
-    const experts = parseExpertDefinitions(output);
+    const experts = parseExpertDefinitions(result);
     if (!experts || experts.length === 0) {
-      log.warn({ event: 'expert_determination_parse_failed', output: output.slice(0, 500) }, 'failed to parse expert definitions');
+      log.warn({ event: 'expert_determination_parse_failed', output: result.slice(0, 500) }, 'failed to parse expert definitions');
       return [];
     }
 
@@ -474,16 +514,16 @@ function formatCouncilNotes(consultations: ExpertConsultResult[]): string {
 
 /**
  * Check if the expert council should be triggered based on consecutive rejections.
- * Expert council requires explicit opt-in via config (rejectThreshold must be set).
+ * Uses default threshold of 5 if not explicitly configured.
  */
 export function shouldTriggerExpertCouncil(
   consecutiveRejects: number,
   councilsTriggered: number,
   config?: ExpertCouncilConfig,
 ): boolean {
-  // Only trigger if explicitly configured (rejectThreshold or maxExperts set)
-  if (!config || (!config.rejectThreshold && !config.maxExperts)) return false;
-  const threshold = config.rejectThreshold ?? DEFAULT_REJECT_THRESHOLD;
-  const maxCouncils = config.maxCouncilsPerSession ?? DEFAULT_MAX_COUNCILS;
-  return consecutiveRejects >= threshold && councilsTriggered < maxCouncils;
+  const threshold = config?.rejectThreshold ?? DEFAULT_REJECT_THRESHOLD;
+  const maxCouncils = config?.maxCouncilsPerSession ?? DEFAULT_MAX_COUNCILS;
+  // Trigger at threshold multiples: first at threshold, second at threshold*2, etc.
+  const nextTriggerAt = threshold * (councilsTriggered + 1);
+  return consecutiveRejects >= nextTriggerAt && councilsTriggered < maxCouncils;
 }

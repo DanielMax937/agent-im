@@ -3,6 +3,9 @@
 Two-agent research / work loop, modelled after Auto mode but driven by an
 HTTP API and a `goal.md` file rather than an IM channel.
 
+Research mode uses its own **dedicated bridge** at `~/.claude-to-im/research/`,
+keeping it fully independent from the Kanban platform and IM bridges.
+
 | Concept             | Auto mode               | Research mode                                    |
 |---------------------|--------------------------|---------------------------------------------------|
 | Trigger             | Telegram message / Redis | `POST /api/research`                              |
@@ -87,65 +90,117 @@ cat /tmp/research-demo/.research/result-$SID.md
 
 ## Configuration
 
-Research mode is an **agent-im platform-level** feature: it runs inside the
-agent-im HTTP process (the `kanban` bridge) and is **independent of any IM
-bot**. Stopping `mybot` / `discord` / etc. does not stop Research mode.
+Research mode has its own **dedicated bridge** configuration at `~/.claude-to-im/research/`
+(or `CTI_RESEARCH_HOME` if set). This keeps Research mode fully independent from
+the Kanban platform bridge.
 
-### Top-level `Config.research` (`CTI_RESEARCH` env var)
+### Directory structure
 
-Persisted as a single JSON value in the `kanban` bridge's `config.env`:
+```
+~/.claude-to-im/
+├── kanban/                    # Kanban/Platform bridge (for workflows, Kanban UI)
+├── mybot/                     # IM bridges (Telegram, Discord, etc.)
+└── research/                  # Research mode dedicated bridge (NEW)
+    └── config.env             # CTI_RUNNERS, CTI_RESEARCH, etc.
+```
+
+### Research bridge config.env
+
+Create `~/.claude-to-im/research/config.env` with your runner and Research configuration:
 
 ```bash
-CTI_RESEARCH={"researcherRunner":{"id":"claude-a","runtime":"claude"},"reviewerRunner":{"id":"codex-b","runtime":"codex"},"defaultMaxTurns":30}
+# Runtime setting
+CTI_RUNTIME=claude
+
+# Runner configurations for Agent A (researcher) and Agent B (reviewer)
+CTI_RUNNERS=[{"id":"researcher","runtime":"claude","label":"Researcher"},{"id":"reviewer","runtime":"codex","label":"Reviewer"}]
+
+# Research mode specific settings (including dedicated Telegram)
+CTI_RESEARCH={
+  "researcherRunner":{"id":"researcher","runtime":"claude"},
+  "reviewerRunner":{"id":"reviewer","runtime":"codex"},
+  "defaultMaxTurns":30,
+  "telegram":{
+    "botToken":"123456:ABC-DEF",
+    "chatId":"123456789"
+  }
+}
 ```
+
+### CTI_RESEARCH Configuration
 
 | Field              | Purpose                                                                                                          |
 |--------------------|------------------------------------------------------------------------------------------------------------------|
 | `researcherRunner` | Runner profile that powers **Agent A**. Built into a dedicated `LLMProvider` by `buildImBridgeLlmStack`.         |
 | `reviewerRunner`   | Runner profile that powers **Agent B**. Built into a dedicated `LLMProvider` by `buildImBridgeLlmStack`.         |
 | `defaultMaxTurns`  | Default `maxTurns` for `POST /api/research` when the request body omits it (orchestrator hard default: `30`).    |
+| `telegram`         | Dedicated Telegram bot token and chat ID for Research notifications. When set, this takes precedence over all other Telegram sources. |
 
 Either side may be omitted — the orchestrator then falls back to the bridge
 default LLM. `POST /api/research { runnerA, runnerB }` still overrides on a
 per-call basis.
 
-The admin page (`/admin`) renders a top-level **Research 模式** card that
-edits these fields and saves them to the `kanban` bridge's `config.env`.
+### Fallback behavior
 
-> **Legacy migration.** Earlier versions stored these inside
-> `imBot.researchResearcherRunner` / `researchReviewerRunner` on each
-> bridge's `imBot` config. `loadConfig` still reads those legacy fields and
-> lifts them up to `Config.research` automatically; the next `saveConfig`
-> drops them from `CTI_IM_BOT` so there is only one source of truth.
+If the Research bridge directory (`~/.claude-to-im/research/`) does not exist,
+Research mode falls back to using the global BridgeContext (the `kanban` bridge
+configuration). This ensures backward compatibility for existing deployments.
 
-### Telegram mirror (every agent reply)
-
-By default, **each Agent A and Agent B reply** is sent to Telegram, plus a short
-summary when the session ends — same bot token / chat as Auto mode
-(`imBot.tgBotToken` + `imBot.tgChatId`, usually on the `mybot` bridge).
-
-Resolution order:
-
-1. `POST /api/research` body `notifyTelegram: { chatId?, instanceId?, bridgeSlug? }` (override chat or pin a bridge for token lookup)
-2. Scan all bridge `config.env` files — prefers `mybot`, then bridges with `autoMode` / `autoRedisUrl`, then `kanban`
-3. Platform JsonFileStore keys `telegram_bot_token` / `telegram_chat_id` (hybrid Auto instances first)
-4. Env `CTI_TELEGRAM_BOT_TOKEN` + `CTI_TG_CHAT_ID`
-
-Message format (HTML):
-
-- `[researcher] turn N · session …` — Agent A reply (parallel to Auto `[master]` / `[slave]`)
-- `[reviewer] turn N · session …` — Agent B reply
-- Final `Research mode — completed|failed|…` block with folder / result path
-
-Omit `notifyTelegram` entirely to use auto-resolution; you do **not** need to pass `chatId` if `mybot` (or kanban) already has Telegram configured.
-
-### Other env vars
+### Environment variables
 
 | Env var                   | Purpose                                                                 |
 |---------------------------|--------------------------------------------------------------------------|
+| `CTI_RESEARCH_HOME`       | Override Research bridge directory (default: `~/.claude-to-im/research`) |
 | `CTI_RESEARCH_REDIS_URL`  | Redis URL for the optional mirror; falls back to `CTI_TELEGRAM_AUTO_REDIS_URL` / `CTI_AUTO_REDIS_URL` / `CTI_LOCAL_AGENT_REDIS_URL`. Leave unset to disable mirroring entirely. |
-| `CTI_TELEGRAM_BOT_TOKEN`  | Env fallback for the bot token when store/config lack `tgBotToken`. |
-| `CTI_TG_CHAT_ID`          | Env fallback for the notify chat when store/config lack `tgChatId`. |
+
+### Admin page
+
+The admin page (`/admin`) renders a top-level **Research 模式** card that
+edits these fields and saves them to the `research` bridge's `config.env`
+(if the directory exists) or the `kanban` bridge's `config.env` (fallback).
+
+### Telegram notifications
+
+Each Agent A and Agent B reply is mirrored to Telegram, plus a summary when the session ends.
+
+**Priority for Telegram credentials:**
+
+1. **`CTI_RESEARCH.telegram`** (dedicated Research bridge config) — **recommended**
+2. `POST /api/research` body `notifyTelegram: { chatId? }` (override chat only)
+3. Other bridge configs (`mybot` → `kanban` → others)
+4. Bridge JsonFileStore
+5. `CTI_TELEGRAM_BOT_TOKEN` + `CTI_TG_CHAT_ID` env fallbacks
+
+**Message format (HTML):**
+
+- `[researcher] turn N · session …` — Agent A reply
+- `[reviewer] turn N · session …` — Agent B reply
+- Final `Research mode — completed|failed|…` block with folder / result path
+
+### Example: Complete research/config.env
+
+```bash
+CTI_RUNTIME=claude
+
+CTI_RUNNERS=[
+  {"id":"researcher","runtime":"claude","label":"Researcher","defaultModel":"claude-sonnet-4-20250514"},
+  {"id":"reviewer","runtime":"codex","label":"Senior Reviewer","defaultModel":"o4-mini"}
+]
+
+CTI_RESEARCH={
+  "researcherRunner":{"id":"researcher"},
+  "reviewerRunner":{"id":"reviewer"},
+  "defaultMaxTurns":30,
+  "telegram":{
+    "botToken":"YOUR_BOT_TOKEN",
+    "chatId":"YOUR_CHAT_ID"
+  },
+  "expertCouncil":{
+    "rejectThreshold":3,
+    "maxExperts":5
+  }
+}
+```
 
 ## Constraints
 

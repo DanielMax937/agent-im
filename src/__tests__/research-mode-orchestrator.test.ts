@@ -168,7 +168,7 @@ describe('startResearchSession orchestrator loop', () => {
       lifecycle: {},
     });
 
-    const handle = startResearchSession({ folder, maxTurns: 10 });
+    const handle = await startResearchSession({ folder, maxTurns: 10 });
     const finalState = await handle.done;
 
     assert.equal(finalState.phase, 'completed');
@@ -208,7 +208,7 @@ describe('startResearchSession orchestrator loop', () => {
       permissions: { resolvePendingPermission: () => true },
       lifecycle: {},
     });
-    const handle = startResearchSession({ folder, maxTurns: 3 });
+    const handle = await startResearchSession({ folder, maxTurns: 3 });
     const finalState = await handle.done;
     assert.equal(finalState.phase, 'timeout');
     assert.equal(finalState.turn, 3);
@@ -216,7 +216,65 @@ describe('startResearchSession orchestrator loop', () => {
     assert.ok(fs.existsSync(resultPath));
   });
 
-  it('rejects when goal.md is missing', () => {
+  it('injects Socratic guidance only for Agent B first plan review', async () => {
+    const folder = tempGoalFolder('Design a safer rollout plan for feature flags.');
+    const reviewerPrompts: string[] = [];
+    let aCalls = 0;
+    let bCalls = 0;
+
+    const llm = new ScriptedLLM((params) => {
+      const sp = params.systemPrompt ?? '';
+      const isResearcher = sp.startsWith('You are **Agent A');
+      const isReviewer = sp.startsWith('You are **Agent B');
+      if (isResearcher) {
+        aCalls += 1;
+        return withTaggedJson(
+          RESEARCH_A_STATUS_PREFIX,
+          aCalls === 1
+            ? 'Plan: ship to everyone after one smoke test.'
+            : 'Revised plan: define success metrics, canary cohorts, rollback gates.',
+          {
+            phase: 'plan',
+            summary: aCalls === 1 ? 'initial rollout plan' : 'revised rollout plan',
+            next: 'awaiting reviewer',
+          },
+        );
+      }
+      if (isReviewer) {
+        bCalls += 1;
+        reviewerPrompts.push(params.prompt);
+        return withTaggedJson(
+          RESEARCH_B_VERDICT_PREFIX,
+          bCalls === 1 ? 'Ask sharper questions first.' : 'Revised plan is executable.',
+          {
+            verdict: bCalls === 1 ? 'request-changes' : 'approve-plan',
+            advice: bCalls === 1 ? 'Clarify metrics, risks, and rollback criteria.' : 'execute',
+          },
+        );
+      }
+      throw new Error('unexpected system prompt: neither A nor B');
+    });
+
+    initBridgeContext({
+      store: new InMemoryStore(),
+      llm,
+      permissions: { resolvePendingPermission: () => true },
+      lifecycle: {},
+    });
+
+    const handle = await startResearchSession({ folder, maxTurns: 2 });
+    await handle.done;
+
+    assert.equal(reviewerPrompts.length, 2);
+    assert.match(reviewerPrompts[0]!, /FIRST_REVIEW_SOCRATIC_GUIDANCE/);
+    assert.match(reviewerPrompts[0]!, /socratic-goal-decomposition/);
+    assert.match(reviewerPrompts[0]!, /Design a safer rollout plan/);
+    assert.match(reviewerPrompts[0]!, /ship to everyone after one smoke test/);
+    assert.doesNotMatch(reviewerPrompts[1]!, /FIRST_REVIEW_SOCRATIC_GUIDANCE/);
+    assert.doesNotMatch(reviewerPrompts[1]!, /socratic-goal-decomposition/);
+  });
+
+  it('rejects when goal.md is missing', async () => {
     const folder = fs.mkdtempSync(path.join(os.tmpdir(), 'research-orch-no-goal-'));
     initBridgeContext({
       store: new InMemoryStore(),
@@ -224,6 +282,6 @@ describe('startResearchSession orchestrator loop', () => {
       permissions: { resolvePendingPermission: () => true },
       lifecycle: {},
     });
-    assert.throws(() => startResearchSession({ folder }), /goal file not found/);
+    await assert.rejects(startResearchSession({ folder }), /goal file not found/);
   });
 });
