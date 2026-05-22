@@ -41,14 +41,16 @@ export type ResearchSessionPhase =
 
 export interface ResearchTranscriptEntry {
   turn: number;
-  role: 'orchestrator' | 'researcher' | 'reviewer';
+  role: 'orchestrator' | 'researcher' | 'reviewer' | 'expert';
   /** Researcher-status / reviewer-verdict / orchestrator note. */
   kind:
     | 'goal-bootstrap'
     | 'researcher-followup'
     | 'researcher-reply'
     | 'reviewer-reply'
-    | 'orchestrator-note';
+    | 'orchestrator-note'
+    | 'reference-index'
+    | 'expert-consult';
   /** Body text — for replies, the full reply incl. trailing tagged JSON. */
   text: string;
   /** Parsed marker payload, if any. */
@@ -83,6 +85,22 @@ export interface ResearchSessionState {
   /** Underlying provider session ids (for log-cross-reference). */
   sessionIdA?: string;
   sessionIdB?: string;
+
+  // ── Expert Council state ──────────────────────────────────────────────
+  /** Consecutive reviewer rejection count (reset on approve-plan / confirm-complete). */
+  consecutiveRejects?: number;
+  /** Number of times the expert council has been triggered this session. */
+  expertCouncilCount?: number;
+  /** Timestamp of last expert council trigger. */
+  expertCouncilTriggeredAt?: string;
+  /** IDs of experts determined for this session. */
+  expertsInvoked?: string[];
+
+  // ── Reference state ───────────────────────────────────────────────────
+  /** Number of reference files indexed at startup. */
+  referencesIndexed?: number;
+  /** Total chars of reference pack injected. */
+  referencePackChars?: number;
 }
 
 export interface CreateSessionInput {
@@ -290,6 +308,9 @@ export function writeResultMarkdown(input: FinalizeResultInput): string {
     `- turns recorded: ${transcriptCount}`,
     `- final reviewer verdict: \`${verdict}\``,
     `- termination reason: ${reason}`,
+    ...(state.referencesIndexed ? [`- references indexed: ${state.referencesIndexed}`] : []),
+    ...(state.expertCouncilCount ? [`- expert councils triggered: ${state.expertCouncilCount}`] : []),
+    ...(state.expertsInvoked?.length ? [`- experts consulted: ${state.expertsInvoked.join(', ')}`] : []),
     '',
     '## Goal (`goal.md`)',
     '',

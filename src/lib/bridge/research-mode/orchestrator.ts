@@ -26,6 +26,8 @@
  *     completion summary; auto-resolves Auto-mode `tgBotToken` / `tgChatId`.
  */
 
+import path from 'node:path';
+
 import type { ChannelBinding } from '../types';
 import type { LLMProvider } from '../host';
 import { getBridgeContext } from '../context';
@@ -74,6 +76,24 @@ import {
   type ResearchTelegramOverride,
   type ResearchTelegramTarget,
 } from './telegram-notify';
+import {
+  indexReferences,
+  buildReferencePack,
+  writeManifest,
+  type ReferenceManifest,
+} from './reference-loader';
+import {
+  loadKnowledgeEntries,
+  extractGoalKeywords,
+  isValidKnowledgeVault,
+} from './knowledge-base';
+import {
+  runExpertCouncil,
+  shouldTriggerExpertCouncil,
+  type ExpertDefinition,
+  type ExpertCouncilConfig,
+  type ExpertCouncilResult,
+} from './expert-council';
 
 export interface StartResearchSessionInput {
   /** Absolute folder containing `goal.md`. */
@@ -143,11 +163,22 @@ function syntheticBinding(opts: {
   };
 }
 
-/** Build the bootstrap prompt that seeds Agent A with the goal text. */
-function buildBootstrapPrompt(folder: string, goalText: string): string {
+/** Build the bootstrap prompt that seeds Agent A with goal, references, and KB. */
+function buildBootstrapPrompt(
+  folder: string,
+  goalText: string,
+  referencePack: string,
+  knowledgeSnippets: string,
+): string {
   return renderPrompt('bridge/research-mode-bootstrap', {
     folder,
     goalText: goalText.trim() || '_(goal.md is empty)_',
+    referencePack: referencePack
+      ? `## Reference Materials\n\nThe following reference files were found in \`${folder}/reference/\`. You must consider all of them:\n\n${referencePack}`
+      : '',
+    knowledgeSnippets: knowledgeSnippets
+      ? `## Knowledge Base Entries\n\nRelevant entries from the topic knowledge base:\n\n${knowledgeSnippets}`
+      : '',
   });
 }
 
@@ -297,8 +328,55 @@ async function runOrchestratorLoop(
   let aParseFailStreak = 0;
   let bParseFailStreak = 0;
 
+  // Expert council state — persisted in session state across potential restarts.
+  let consecutiveRejects = state.consecutiveRejects ?? 0;
+  let councilsTriggered = state.expertCouncilCount ?? 0;
+  let sessionExperts: ExpertDefinition[] | undefined;
+  let pendingExpertNotes = '';
+
   try {
     const goalText = readGoalText(state.folder);
+
+    // ── Reference indexing (Agent A reads all references at startup) ─────
+    const cfg = (() => { try { return loadConfig(); } catch { return null; } })();
+    const refDirName = cfg?.research?.reference?.dir ?? 'reference';
+    const refRequired = cfg?.research?.reference?.required ?? false;
+    const refMaxChars = cfg?.research?.reference?.maxChars ?? 40000;
+    const kbVaultPath = cfg?.research?.knowledgeVaultPath;
+    const expertCouncilConfig: ExpertCouncilConfig = cfg?.research?.expertCouncil ?? {};
+
+    // Total bootstrap budget: 60000 chars shared between references (70%) and KB (30%)
+    const BOOTSTRAP_BUDGET = 60000;
+    const refBudget = Math.min(refMaxChars, Math.floor(BOOTSTRAP_BUDGET * 0.7));
+    const kbBudget = Math.floor(BOOTSTRAP_BUDGET * 0.3);
+
+    let referencePack = '';
+    const manifest = indexReferences(state.folder);
+    if (manifest && manifest.totalFiles > 0) {
+      const sDir = path.join(state.folder, '.research', 'sessions', state.sessionId);
+      writeManifest(sDir, manifest);
+      referencePack = buildReferencePack(manifest, refBudget);
+      state.referencesIndexed = manifest.totalFiles;
+      state.referencePackChars = referencePack.length;
+      writeState(state);
+
+      appendTranscript(state, {
+        turn: 0,
+        role: 'orchestrator',
+        kind: 'reference-index',
+        text: `Indexed ${manifest.totalFiles} reference files (${manifest.totalTextBytes} bytes text, ${manifest.skippedFiles.length} binary skipped)`,
+      });
+    } else if (refRequired) {
+      markFinished(state, 'failed', `reference directory required but missing or empty: ${state.folder}/${refDirName}`);
+      return state;
+    }
+
+    // ── Knowledge base loading ───────────────────────────────────────────
+    let knowledgeSnippets = '';
+    if (kbVaultPath && isValidKnowledgeVault(kbVaultPath)) {
+      const keywords = extractGoalKeywords(goalText);
+      knowledgeSnippets = loadKnowledgeEntries(kbVaultPath, keywords, kbBudget);
+    }
 
     log.info(
       {
@@ -306,16 +384,20 @@ async function runOrchestratorLoop(
         folder: state.folder,
         telegramMirror: Boolean(telegramTarget),
         telegramBridge: telegramTarget?.bridgeSlug,
+        referencesIndexed: state.referencesIndexed ?? 0,
+        knowledgeLoaded: knowledgeSnippets.length > 0,
       },
       'research loop start',
     );
     recordOrchestratorNote(
       state,
       `Loop start. folder=${state.folder} maxTurns=${state.maxTurns}` +
+        ` refs=${state.referencesIndexed ?? 0}` +
+        (knowledgeSnippets ? ' kb=loaded' : ' kb=none') +
         (telegramTarget ? ` telegram→${telegramTarget.chatId}` : ' telegram=off'),
     );
 
-    let nextResearcherPrompt = buildBootstrapPrompt(state.folder, goalText);
+    let nextResearcherPrompt = buildBootstrapPrompt(state.folder, goalText, referencePack, knowledgeSnippets);
     let nextResearcherKind: 'goal-bootstrap' | 'researcher-followup' = 'goal-bootstrap';
 
     while (state.turn < state.maxTurns) {
@@ -537,6 +619,19 @@ async function runOrchestratorLoop(
 
       const bEval = bParsed.evaluation;
 
+      // ── Track consecutive rejections for expert council ─────────────────
+      const isRejection = bEval.verdict === 'request-changes' || bEval.verdict === 'reject-complete';
+      const isApproval = bEval.verdict === 'approve-plan' || bEval.verdict === 'confirm-complete';
+      if (isRejection) {
+        consecutiveRejects += 1;
+      }
+      if (isApproval) {
+        consecutiveRejects = 0;
+      }
+      // Persist rejection counter
+      state.consecutiveRejects = consecutiveRejects;
+      writeState(state);
+
       // ── Decide next step ───────────────────────────────────────────────
       if (isMutualCompletion(aStatus, bEval)) {
         finalPhase = 'completed';
@@ -544,8 +639,86 @@ async function runOrchestratorLoop(
         break;
       }
 
-      // Otherwise, hand B's verdict back to A for the next turn.
-      nextResearcherPrompt = buildResearcherFeedbackPrompt(state, bEval);
+      // ── Expert council trigger ─────────────────────────────────────────
+      if (shouldTriggerExpertCouncil(consecutiveRejects, councilsTriggered, expertCouncilConfig)) {
+        log.info(
+          { event: 'expert_council_trigger', consecutiveRejects, councilsTriggered },
+          'triggering expert council due to consecutive rejections',
+        );
+        recordOrchestratorNote(
+          state,
+          `Expert council triggered (${consecutiveRejects} consecutive rejections). Consulting domain experts...`,
+        );
+
+        const sessionDirPath = path.join(state.folder, '.research', 'sessions', state.sessionId);
+        const goalText = readGoalText(state.folder);
+
+        // Build a summary of references for expert determination
+        const refSummary = manifest
+          ? `Reference files available: ${manifest.files.map((f) => f.relativePath).join(', ')}`
+          : '';
+
+        const councilResult: ExpertCouncilResult = await runExpertCouncil({
+          goalText,
+          referencesSummary: refSummary,
+          currentPlanSummary: state.lastStatus?.summary ?? '(no plan summary)',
+          lastReviewerAdvice: bEval.advice,
+          failedAttempts: `${consecutiveRejects} consecutive rejections`,
+          workingDir: state.folder,
+          sessionDir: sessionDirPath,
+          existingExperts: sessionExperts,
+          config: expertCouncilConfig,
+          abortSignal: abortController.signal,
+        });
+
+        sessionExperts = councilResult.experts;
+        councilsTriggered += 1;
+        state.expertCouncilCount = councilsTriggered;
+        state.expertCouncilTriggeredAt = councilResult.triggeredAt;
+        state.expertsInvoked = councilResult.experts.map((e) => e.id);
+        writeState(state);
+
+        pendingExpertNotes = councilResult.formattedNotes;
+
+        // Record expert consultation in transcript
+        appendTranscript(state, {
+          turn: state.turn,
+          role: 'expert',
+          kind: 'expert-consult',
+          text: councilResult.formattedNotes.slice(0, 5000),
+        });
+
+        mirrorAgentReplyToTelegram(telegramTarget, {
+          role: 'researcher',
+          sessionId: state.sessionId,
+          turn: state.turn,
+          text: `[expert-council] ${councilResult.experts.length} experts consulted`,
+          meta: `experts=${councilResult.experts.map((e) => e.id).join(',')}`,
+        });
+      }
+
+      // ── Build next researcher prompt ───────────────────────────────────
+      if (pendingExpertNotes) {
+        // Use the expert-enhanced feedback template
+        const kind = researcherFeedbackKindForVerdict(bEval.verdict);
+        if (kind === 'plan') {
+          nextResearcherPrompt = renderPrompt('bridge/research-mode-feedback-plan-with-experts', {
+            folder: state.folder,
+            turn: String(state.turn),
+            verdict: bEval.verdict,
+            advice: bEval.advice.trim() || '_(no advice provided)_',
+            expertNotes: pendingExpertNotes,
+          });
+        } else {
+          // For blocker/completion, prepend expert notes to standard template
+          const basePrompt = buildResearcherFeedbackPrompt(state, bEval);
+          nextResearcherPrompt = basePrompt + '\n\n' + pendingExpertNotes;
+        }
+        pendingExpertNotes = ''; // Clear after use
+      } else {
+        // Standard feedback (no expert notes)
+        nextResearcherPrompt = buildResearcherFeedbackPrompt(state, bEval);
+      }
       nextResearcherKind = 'researcher-followup';
     }
 

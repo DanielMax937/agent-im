@@ -154,6 +154,37 @@ export interface ResearchModeConfig {
    * body omits it. Falls back to the orchestrator's hard default (30) if unset.
    */
   defaultMaxTurns?: number;
+
+  /**
+   * Reference directory settings. Agent A reads all files here at startup.
+   * Default directory name: `reference` (relative to the working folder).
+   */
+  reference?: {
+    /** Directory name under the working folder. Default: "reference". */
+    dir?: string;
+    /** If true, the session fails to start when reference/ is missing. Default: false. */
+    required?: boolean;
+    /** Max characters for the reference pack injected at bootstrap. Default: 40000. */
+    maxChars?: number;
+  };
+
+  /**
+   * Path to an Obsidian-vault-creator style knowledge vault.
+   * Entries from `01_Wiki/` are injected into Agent A's bootstrap context.
+   */
+  knowledgeVaultPath?: string;
+
+  /** Expert council configuration (triggered on consecutive reviewer rejections). */
+  expertCouncil?: {
+    /** Consecutive rejection count to trigger. Default: 3. */
+    rejectThreshold?: number;
+    /** Max experts to consult. Default: 5. */
+    maxExperts?: number;
+    /** Max council invocations per session. Default: 2. */
+    maxCouncilsPerSession?: number;
+    /** Model to use for expert consultation (codex exec -m). */
+    expertModel?: string;
+  };
 }
 
 /** One IM connection (bot) inside the bridge; see docs/IM_BRIDGE_MULTI_INSTANCE.md */
