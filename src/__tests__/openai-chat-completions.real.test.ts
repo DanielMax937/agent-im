@@ -28,7 +28,7 @@ async function appHandle(): Promise<(request: Request) => Promise<Response>> {
 }
 
 async function postChatCompletion(input: {
-  model: string;
+  model?: string;
   prompt: string;
   sessionId?: string;
 }): Promise<{ status: number; body: ChatCompletionResponse }> {
@@ -37,7 +37,7 @@ async function postChatCompletion(input: {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({
-      model: input.model,
+      ...(input.model ? { model: input.model } : {}),
       messages: [
         {
           role: 'user',
@@ -64,19 +64,18 @@ function assertSuccessfulCompletion(result: { status: number; body: ChatCompleti
 }
 
 describe('OpenAI chat completions real providers', () => {
-  it('calls real codex-login and claude providers, then starts a new provider session on model switch', { timeout: 600_000 }, async () => {
+  it('defaults to codex-login and routes explicit runner/model inputs', { timeout: 600_000 }, async () => {
     const codex = await postChatCompletion({
-      model: 'codex-login/gpt-5.5',
       prompt: 'Reply with one short sentence containing the token CTI_CODEX_REAL_OK.',
     });
     const codexSessionId = assertSuccessfulCompletion(codex, 'codex-login/gpt-5.5');
 
     const claude = await postChatCompletion({
-      model: 'claude/mimo-v2.5-pro',
+      model: 'claude/claude-4-5',
       sessionId: codexSessionId,
       prompt: 'Reply with one short sentence containing the token CTI_CLAUDE_REAL_OK.',
     });
-    const claudeSessionId = assertSuccessfulCompletion(claude, 'claude/mimo-v2.5-pro');
+    const claudeSessionId = assertSuccessfulCompletion(claude, 'claude/claude-4-5');
 
     assert.notEqual(claudeSessionId, codexSessionId);
   });

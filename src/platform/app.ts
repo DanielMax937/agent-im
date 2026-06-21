@@ -305,6 +305,9 @@ interface OpenAIChatCompletionsRequest {
   model?: string;
   messages?: OpenAIChatMessage[];
   stream?: boolean;
+  stream_options?: {
+    include_usage?: boolean;
+  };
   temperature?: number;
   max_tokens?: number;
   session_id?: string;
@@ -330,6 +333,7 @@ interface ApiSessionEnvelope {
 }
 
 const API_SESSION_PREFIX = 'cti_';
+const DEFAULT_OPENAI_COMPAT_MODEL = 'codex-login/gpt-5.5';
 const apiProviderCache = new Map<string, Promise<LLMProvider>>();
 const apiProviderPermissions = new PendingPermissions();
 const apiSessionModelKeys = new Map<string, string>();
@@ -398,6 +402,10 @@ export function parseOpenAIProviderModel(model: string | undefined): ParsedOpenA
     runtimeModel,
     key: `${provider}/${runtimeModel}`,
   };
+}
+
+export function normalizeOpenAICompatModel(model: string | undefined): ParsedOpenAIModel | null {
+  return parseOpenAIProviderModel(model?.trim() || DEFAULT_OPENAI_COMPAT_MODEL);
 }
 
 function encodeApiSessionId(session: ApiSessionEnvelope): string {
@@ -570,6 +578,180 @@ async function collectProviderResponse(stream: ReadableStream<string>): Promise<
   return { text, usage, sessionId, errors };
 }
 
+interface OpenAIChatCompletionStreamOptions {
+  requestId: string;
+  modelKey: string;
+  provider: string;
+  runtimeModel: string;
+  includeUsage?: boolean;
+  created?: number;
+  onSession?: (session: { providerSessionId: string; apiSessionId: string; modelKey: string }) => void;
+}
+
+function openAIStreamChunk(options: {
+  requestId: string;
+  created: number;
+  modelKey: string;
+  delta: { role?: 'assistant'; content?: string };
+  finishReason: string | null;
+  usage?: { input: number; output: number };
+  apiSessionId?: string;
+}): Record<string, unknown> {
+  return {
+    id: options.requestId,
+    object: 'chat.completion.chunk',
+    created: options.created,
+    model: options.modelKey,
+    choices: [
+      {
+        index: 0,
+        delta: options.delta,
+        finish_reason: options.finishReason,
+      },
+    ],
+    ...(options.usage
+      ? {
+          usage: {
+            prompt_tokens: options.usage.input,
+            completion_tokens: options.usage.output,
+            total_tokens: options.usage.input + options.usage.output,
+          },
+        }
+      : {}),
+    ...(options.apiSessionId
+      ? { _session_id: options.apiSessionId, session_id: options.apiSessionId }
+      : {}),
+  };
+}
+
+export function createOpenAIChatCompletionStream(
+  providerStream: ReadableStream<string>,
+  options: OpenAIChatCompletionStreamOptions,
+): ReadableStream<Uint8Array> {
+  const encoder = new TextEncoder();
+  const created = options.created ?? Math.floor(Date.now() / 1000);
+
+  return new ReadableStream<Uint8Array>({
+    async start(controller) {
+      const reader = providerStream.getReader();
+      let buffer = '';
+      let apiSessionId: string | undefined;
+      let providerSessionId: string | undefined;
+      const usage = { input: 0, output: 0 };
+      const errors: string[] = [];
+
+      const send = (payload: unknown) => {
+        controller.enqueue(encoder.encode(`data: ${JSON.stringify(payload)}\n\n`));
+      };
+      const sendDone = () => {
+        controller.enqueue(encoder.encode('data: [DONE]\n\n'));
+      };
+      const rememberSession = (nextProviderSessionId: string | undefined) => {
+        if (!nextProviderSessionId || nextProviderSessionId === providerSessionId) return;
+        providerSessionId = nextProviderSessionId;
+        apiSessionId = encodeApiSessionId({
+          v: 1,
+          provider: options.provider,
+          model: options.runtimeModel,
+          providerSessionId,
+        });
+        options.onSession?.({
+          providerSessionId,
+          apiSessionId,
+          modelKey: options.modelKey,
+        });
+      };
+      const processLine = (line: string) => {
+        const trimmed = line.trim();
+        if (!trimmed || !trimmed.startsWith('data:')) return;
+        const raw = trimmed.slice('data:'.length).trim();
+        let event: { type?: string; data?: unknown } | null = null;
+        try {
+          event = JSON.parse(raw) as { type?: string; data?: unknown };
+        } catch {
+          return;
+        }
+        if (!event?.type) return;
+        const payload = parseSSEPayload(event.data);
+
+        if (event.type === 'text') {
+          const content = typeof payload === 'string' ? payload : String(payload ?? '');
+          if (!content) return;
+          send(openAIStreamChunk({
+            requestId: options.requestId,
+            created,
+            modelKey: options.modelKey,
+            delta: { content },
+            finishReason: null,
+          }));
+          return;
+        }
+
+        if ((event.type === 'result' || event.type === 'status') && payload && typeof payload === 'object') {
+          const result = payload as {
+            session_id?: string;
+            usage?: { input_tokens?: number; output_tokens?: number };
+            is_error?: boolean;
+          };
+          rememberSession(result.session_id);
+          usage.input = Number(result.usage?.input_tokens ?? usage.input);
+          usage.output = Number(result.usage?.output_tokens ?? usage.output);
+          if (result.is_error) errors.push('upstream reported error');
+          return;
+        }
+
+        if (event.type === 'error') {
+          const message = typeof payload === 'string' ? payload : JSON.stringify(payload);
+          errors.push(message);
+          send({ error: { message, type: 'upstream_error' } });
+        }
+      };
+
+      send(openAIStreamChunk({
+        requestId: options.requestId,
+        created,
+        modelKey: options.modelKey,
+        delta: { role: 'assistant' },
+        finishReason: null,
+      }));
+
+      try {
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          if (!value) continue;
+          buffer += value;
+          const lines = buffer.split('\n');
+          buffer = lines.pop() ?? '';
+          for (const line of lines) processLine(line);
+        }
+        if (buffer.trim()) processLine(buffer);
+
+        send(openAIStreamChunk({
+          requestId: options.requestId,
+          created,
+          modelKey: options.modelKey,
+          delta: {},
+          finishReason: errors.length > 0 ? 'length' : 'stop',
+          usage: options.includeUsage ? usage : undefined,
+          apiSessionId,
+        }));
+        sendDone();
+      } catch (err) {
+        send({
+          error: {
+            message: err instanceof Error ? err.message : String(err),
+            type: 'upstream_error',
+          },
+        });
+        sendDone();
+      } finally {
+        controller.close();
+      }
+    },
+  });
+}
+
 async function readRequestBody<T>(request: Request): Promise<T> {
   const text = await request.text();
   if (!text) return {} as T;
@@ -694,18 +876,13 @@ export function createPlatformApp(options: CreatePlatformAppOptions): PlatformAp
             400,
           );
         }
-        if (body.stream) {
-          return jsonResponse(
-            { error: { message: 'stream=true is not supported yet', type: 'invalid_request_error' } },
-            400,
-          );
-        }
-        const parsedModel = parseOpenAIProviderModel(body.model);
+        const shouldStream = body.stream === true;
+        const parsedModel = normalizeOpenAICompatModel(body.model);
         if (!parsedModel) {
           return jsonResponse(
             {
               error: {
-                message: 'model must use provider/model format',
+                message: 'model must use runner/model format',
                 type: 'invalid_request_error',
               },
             },
@@ -765,8 +942,30 @@ export function createPlatformApp(options: CreatePlatformAppOptions): PlatformAp
           sdkSessionId,
           model,
           workingDirectory,
-          disableLlmStreaming: true,
+          disableLlmStreaming: !shouldStream,
         });
+        if (shouldStream) {
+          return new Response(
+            createOpenAIChatCompletionStream(stream, {
+              requestId,
+              modelKey: parsedModel.key,
+              provider: parsedModel.provider,
+              runtimeModel: parsedModel.runtimeModel,
+              includeUsage: body.stream_options?.include_usage === true,
+              onSession: ({ providerSessionId, apiSessionId, modelKey }) => {
+                apiSessionModelKeys.set(providerSessionId, modelKey);
+                apiSessionModelKeys.set(apiSessionId, modelKey);
+              },
+            }),
+            {
+              headers: {
+                'content-type': 'text/event-stream; charset=utf-8',
+                'cache-control': 'no-cache, no-transform',
+                connection: 'keep-alive',
+              },
+            },
+          );
+        }
         const completion = await collectProviderResponse(stream);
         const apiSessionId = completion.sessionId
           ? encodeApiSessionId({

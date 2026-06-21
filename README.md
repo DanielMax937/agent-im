@@ -260,6 +260,43 @@ Platform data is stored separately and persists:
 | `src/lib/bridge/bridge-manager.ts` | IM bridge orchestration |
 | `src/app/page.tsx` | Next.js landing page |
 
+## Safety and reliability
+
+The platform includes built-in safety features to ensure reliable, auditable AI agent execution:
+
+### Safety features
+
+- **Explicit approval flow**: tool usage requiring elevated privileges can be gated on human approval via IM channels
+- **Task isolation**: each task session runs in its own branch and worktree with isolated message queues
+- **Automatic rollback**: failed testing triggers compensation workflows that route tasks back to development
+- **Runtime sandboxing**: agent instances run in controlled environments with configurable resource limits
+
+### Grounding guarantees
+
+- **Git-anchored execution**: all agent work happens on tracked branches with full commit history
+- **Reproducible state**: workflow transitions are logged with task context, branch pointers, and instance metadata
+- **Audit trail**: every state change, approval decision, and agent action is recorded in platform persistence
+
+### Citation integrity
+
+- **Source tracking**: review and testing agents reference specific commits, file paths, and line numbers
+- **PR-native feedback**: agent comments tie directly to code diffs in the review flow
+- **Structured evidence**: test failures include stack traces, coverage deltas, and reproduction steps
+
+### Structured logging
+
+- **Standardized formats**: logs use consistent schemas across bridge, workflow, and runtime layers
+- **Secret masking**: credentials and tokens are redacted before writing to disk
+- **Per-task streams**: each task session maintains isolated logs for debugging and replay
+
+### Testing coverage
+
+- **Unit tests**: core workflow state machine, instance lifecycle, and bridge routing
+- **Integration tests**: end-to-end task flows including branch creation, agent handoffs, and PR submission
+- **Type safety**: full TypeScript coverage with strict mode enabled
+
+See [docs/TESTING.md](docs/TESTING.md) for test execution and coverage reports.
+
 ## Security
 
 - credentials remain local
@@ -275,6 +312,7 @@ More: [SECURITY.md](SECURITY.md)
 - [Product / codebase understanding](docs/PROJECT-UNDERSTANDING.md)
 - [HTTP API](docs/API.md)
 - [Log locations and inspection](docs/LOGS.md)
+- [Testing guide](docs/TESTING.md)
 - [Bridge architecture](src/lib/bridge/ARCHITECTURE.md)
 - [Security](SECURITY.md)
 
