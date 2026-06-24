@@ -38,6 +38,8 @@ import type {
   TaskSession,
   AgentInstanceRecord,
   AgentRole,
+  AsyncJobArtifactRecord,
+  AsyncJobRecord,
   KanbanAgentKind,
   KanbanRoleMember,
   KanbanAgentTurnRecord,
@@ -52,6 +54,14 @@ import {
   parseKanbanPermCallbackData,
 } from './kanban-notify';
 import { ensureActiveSprintNameUniqueForProject, roleForActiveWorkflowState } from './workflow-service';
+import {
+  makeImageGenerationId,
+  parseImagesGenerationsRequest,
+  resolveImageGenerationProvider,
+  type ImageGenerationProvider,
+  type ImagesGenerationsRequest,
+  type ParsedImagesGenerationsRequest,
+} from '../imagegen-provider';
 
 const KANBAN_ROLE_KINDS: KanbanAgentKind[] = [
   'agent-dev',
@@ -184,6 +194,11 @@ export interface PlatformStoreApi {
   getProjectCoverage(projectId: string): import('./types').ProjectCoverageRecord;
   updateProjectCoverage(projectId: string, coverage: number, context?: string): { updated: boolean; coverage: number };
   getCoverageHistory(projectId: string, limit?: number): import('./types').ProjectCoverageHistoryEntry[];
+  saveAsyncJob(record: AsyncJobRecord): AsyncJobRecord;
+  getAsyncJob(jobId: string): AsyncJobRecord | null;
+  saveAsyncJobArtifact(record: AsyncJobArtifactRecord): AsyncJobArtifactRecord;
+  listAsyncJobArtifacts(jobId: string): AsyncJobArtifactRecord[];
+  deleteAsyncJobArtifacts(jobId: string): void;
 }
 
 export interface WorkflowServiceApi {
@@ -249,6 +264,7 @@ export interface CreatePlatformAppOptions {
   store: PlatformStoreApi;
   workflowService: WorkflowServiceApi;
   instanceManager: InstanceManagerApi;
+  imageGenerationProvider?: ImageGenerationProvider;
 }
 
 export interface PlatformApp {
@@ -278,6 +294,190 @@ function jsonResponse(body: unknown, status = 200): Response {
       'content-type': 'application/json',
     },
   });
+}
+
+type ImageGenerationOutput = Awaited<ReturnType<ImageGenerationProvider['generate']>>;
+const IMAGE_GENERATION_JOB_TYPE = 'image.generation';
+
+function imageGenerationJobId(): string {
+  return `imgjob-${crypto.randomUUID()}`;
+}
+
+function imageGenerationJobTimestamp(value: string): number {
+  const ms = Date.parse(value);
+  return Number.isFinite(ms) ? Math.floor(ms / 1000) : Math.floor(Date.now() / 1000);
+}
+
+function imageGenerationRequestPayload(input: ParsedImagesGenerationsRequest): Record<string, unknown> {
+  return {
+    model: input.model,
+    prompt: input.prompt,
+    n: input.n,
+    size: input.size,
+    response_format: input.responseFormat,
+    input_image_count: input.inputImages.length,
+    ...(input.user ? { user: input.user } : {}),
+    ...(input.metadata ? { metadata: input.metadata } : {}),
+  };
+}
+
+function createImageGenerationJob(store: PlatformStoreApi, input: ParsedImagesGenerationsRequest): AsyncJobRecord {
+  const timestamp = new Date().toISOString();
+  return store.saveAsyncJob({
+    id: imageGenerationJobId(),
+    type: IMAGE_GENERATION_JOB_TYPE,
+    status: 'queued',
+    request: imageGenerationRequestPayload(input),
+    metadata: {
+      model: input.model,
+      response_format: input.responseFormat,
+      input_image_count: input.inputImages.length,
+    },
+    createdAt: timestamp,
+    updatedAt: timestamp,
+  });
+}
+
+function imageGenerationJobModel(job: AsyncJobRecord): string | undefined {
+  const model = job.metadata?.model;
+  return typeof model === 'string' ? model : undefined;
+}
+
+function imageGenerationJobResponse(job: AsyncJobRecord, artifacts: AsyncJobArtifactRecord[] = []): Record<string, unknown> {
+  return {
+    id: job.id,
+    job_id: job.id,
+    jobid: job.id,
+    object: 'image.generation.job',
+    type: job.type,
+    status: job.status,
+    created: imageGenerationJobTimestamp(job.createdAt),
+    updated: imageGenerationJobTimestamp(job.updatedAt),
+    model: imageGenerationJobModel(job),
+    ...(job.startedAt ? { started: imageGenerationJobTimestamp(job.startedAt) } : {}),
+    ...(job.completedAt ? { completed: imageGenerationJobTimestamp(job.completedAt) } : {}),
+    ...(artifacts.length > 0
+      ? {
+          artifacts: artifacts.map((artifact) => ({
+            id: artifact.id,
+            type: artifact.type,
+            name: artifact.name,
+            mime_type: artifact.mimeType,
+            storage_kind: artifact.storageKind,
+            uri: artifact.uri,
+            size_bytes: artifact.sizeBytes,
+            metadata: artifact.metadata,
+            created: imageGenerationJobTimestamp(artifact.createdAt),
+          })),
+        }
+      : {}),
+    ...(job.result !== undefined ? { result: job.result } : {}),
+    ...(job.error ? { error: job.error } : {}),
+  };
+}
+
+function saveImageGenerationArtifacts(
+  store: PlatformStoreApi,
+  jobId: string,
+  input: ParsedImagesGenerationsRequest,
+  result: ImageGenerationOutput,
+): void {
+  store.deleteAsyncJobArtifacts(jobId);
+  const artifactBaseTimeMs = Date.now();
+  result.images.forEach((image, index) => {
+    store.saveAsyncJobArtifact({
+      id: `artifact-${crypto.randomUUID()}`,
+      jobId,
+      type: 'image',
+      name: `image-${index + 1}`,
+      mimeType: image.mime,
+      storageKind: 'inline',
+      sizeBytes: Buffer.byteLength(image.b64Json, 'base64'),
+      payload: {
+        b64_json: image.b64Json,
+        revised_prompt: image.revisedPrompt ?? input.prompt,
+        index,
+      },
+      metadata: {
+        response_format: input.responseFormat,
+      },
+      createdAt: new Date(artifactBaseTimeMs + index).toISOString(),
+    });
+  });
+}
+
+function startImageGenerationJob(
+  store: PlatformStoreApi,
+  jobId: string,
+  generate: () => Promise<{ response: Record<string, unknown>; output: ImageGenerationOutput; input: ParsedImagesGenerationsRequest }>,
+): void {
+  queueMicrotask(() => {
+    const job = store.getAsyncJob(jobId);
+    if (!job) return;
+    const startedAt = new Date().toISOString();
+    store.saveAsyncJob({
+      ...job,
+      status: 'running',
+      startedAt,
+      updatedAt: startedAt,
+    });
+
+    void Promise.resolve()
+      .then(generate)
+      .then(({ response, output, input }) => {
+        saveImageGenerationArtifacts(store, jobId, input, output);
+        const latest = store.getAsyncJob(jobId);
+        if (!latest) return;
+        const completedAt = new Date().toISOString();
+        store.saveAsyncJob({
+          ...latest,
+          status: 'succeeded',
+          result: response,
+          error: undefined,
+          completedAt,
+          updatedAt: completedAt,
+        });
+      })
+      .catch((err) => {
+        const latest = store.getAsyncJob(jobId);
+        if (!latest) return;
+        const completedAt = new Date().toISOString();
+        store.saveAsyncJob({
+          ...latest,
+          status: 'failed',
+          error: {
+            message: err instanceof Error ? err.message : String(err),
+            type: 'upstream_error',
+          },
+          completedAt,
+          updatedAt: completedAt,
+        });
+      });
+  });
+}
+
+function buildImagesGenerationResponse(
+  requestId: string,
+  input: ParsedImagesGenerationsRequest,
+  result: ImageGenerationOutput,
+): Record<string, unknown> {
+  return {
+    id: requestId,
+    object: 'image.generation',
+    created: Math.floor(Date.now() / 1000),
+    model: input.model,
+    data: result.images.map((image, index) => {
+      const dataUrl = `data:${image.mime};base64,${image.b64Json}`;
+      return {
+        index,
+        mime_type: image.mime,
+        revised_prompt: image.revisedPrompt ?? input.prompt,
+        ...(input.responseFormat === 'url'
+          ? { url: dataUrl }
+          : { b64_json: image.b64Json }),
+      };
+    }),
+  };
 }
 
 function notFoundResponse(resource: string, id: string): Response {
@@ -860,6 +1060,79 @@ export function createPlatformApp(options: CreatePlatformAppOptions): PlatformAp
           runningInstances: options.instanceManager.listRunningInstanceIds(),
           rssMb: Math.round(mem.rss / 1024 / 1024 * 10) / 10,
         });
+      }
+
+      if (request.method === 'POST' && pathname === '/v1/images/generations/jobs') {
+        const body = await readRequestBody<ImagesGenerationsRequest>(request);
+        const parsed = parseImagesGenerationsRequest(body);
+        if (!parsed.ok) {
+          return jsonResponse(
+            { error: { message: parsed.message, type: 'invalid_request_error' } },
+            parsed.status,
+          );
+        }
+
+        const job = createImageGenerationJob(options.store, parsed.value);
+        const provider = options.imageGenerationProvider ?? resolveImageGenerationProvider();
+        startImageGenerationJob(options.store, job.id, async () => {
+          const requestId = makeImageGenerationId();
+          const result = await provider.generate(parsed.value);
+          return {
+            response: buildImagesGenerationResponse(requestId, parsed.value, result),
+            output: result,
+            input: parsed.value,
+          };
+        });
+
+        return jsonResponse(imageGenerationJobResponse(job), 202);
+      }
+
+      const imageGenerationJobParams = matchPath('/v1/images/generations/jobs/:jobId', pathname);
+      if (request.method === 'GET' && imageGenerationJobParams) {
+        const job = options.store.getAsyncJob(imageGenerationJobParams.jobId);
+        if (!job) {
+          return jsonResponse(
+            {
+              error: {
+                message: `image generation job not found: ${imageGenerationJobParams.jobId}`,
+                type: 'not_found_error',
+              },
+            },
+            404,
+          );
+        }
+
+        return jsonResponse(imageGenerationJobResponse(job, options.store.listAsyncJobArtifacts(job.id)));
+      }
+
+      if (request.method === 'POST' && pathname === '/v1/images/generations') {
+        const body = await readRequestBody<ImagesGenerationsRequest>(request);
+        const parsed = parseImagesGenerationsRequest(body);
+        if (!parsed.ok) {
+          return jsonResponse(
+            { error: { message: parsed.message, type: 'invalid_request_error' } },
+            parsed.status,
+          );
+        }
+
+        const requestId = makeImageGenerationId();
+        let result: ImageGenerationOutput;
+        try {
+          const provider = options.imageGenerationProvider ?? resolveImageGenerationProvider();
+          result = await provider.generate(parsed.value);
+        } catch (err) {
+          return jsonResponse(
+            {
+              error: {
+                message: err instanceof Error ? err.message : String(err),
+                type: 'upstream_error',
+              },
+            },
+            502,
+          );
+        }
+
+        return jsonResponse(buildImagesGenerationResponse(requestId, parsed.value, result));
       }
 
       if (request.method === 'POST' && pathname === '/v1/chat/completions') {

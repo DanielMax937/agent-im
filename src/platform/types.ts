@@ -379,6 +379,44 @@ export interface PendingApprovalRecord {
   resolutionMessage?: string;
 }
 
+export type AsyncJobStatus = 'queued' | 'running' | 'succeeded' | 'failed' | 'cancelled';
+
+export interface AsyncJobRecord {
+  id: string;
+  /** Abstract async task type, e.g. `image.generation`; future async workflows share this table. */
+  type: string;
+  status: AsyncJobStatus;
+  request?: unknown;
+  result?: unknown;
+  error?: {
+    message: string;
+    type?: string;
+    code?: string;
+  };
+  metadata?: Record<string, unknown>;
+  createdAt: string;
+  updatedAt: string;
+  startedAt?: string;
+  completedAt?: string;
+}
+
+export type AsyncJobArtifactStorageKind = 'inline' | 'file' | 'url';
+
+export interface AsyncJobArtifactRecord {
+  id: string;
+  jobId: string;
+  /** Abstract artifact type, e.g. `image`, `log`, `report`, `json`. */
+  type: string;
+  name?: string;
+  mimeType?: string;
+  storageKind: AsyncJobArtifactStorageKind;
+  uri?: string;
+  sizeBytes?: number;
+  payload?: unknown;
+  metadata?: Record<string, unknown>;
+  createdAt: string;
+}
+
 export interface TaskFailurePayload {
   taskSessionId: string;
   summary: string;

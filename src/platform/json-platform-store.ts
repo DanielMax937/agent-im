@@ -9,6 +9,8 @@ import { allocateNextIssueId, resolveIssueIdPrefix } from './issue-id';
 import { assertValidLocalRepositoryPath } from './repository-path';
 import type {
   AgentInstanceRecord,
+  AsyncJobArtifactRecord,
+  AsyncJobRecord,
   KanbanAgentTurnRecord,
   PendingApprovalRecord,
   Project,
@@ -74,6 +76,14 @@ function readJson<T>(filePath: string, fallback: T): T {
 
 function now(): string {
   return new Date().toISOString();
+}
+
+function jsonOrNull(value: unknown): string | null {
+  return value === undefined ? null : JSON.stringify(value);
+}
+
+function parseJsonOrUndefined(value: string | null): unknown {
+  return value === null ? undefined : JSON.parse(value);
 }
 
 export function createTaskQueueKey(taskId: string, suffix = 'inbox'): string {
@@ -240,6 +250,40 @@ export class JsonPlatformStore {
         recorded_at TEXT NOT NULL
       );
       CREATE INDEX IF NOT EXISTS idx_coverage_history_project ON project_coverage_history(project_id, recorded_at);
+
+      CREATE TABLE IF NOT EXISTS async_jobs (
+        id TEXT PRIMARY KEY NOT NULL,
+        type TEXT NOT NULL,
+        status TEXT NOT NULL,
+        request_payload TEXT,
+        result_payload TEXT,
+        error_payload TEXT,
+        metadata_payload TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        started_at TEXT,
+        completed_at TEXT
+      );
+      CREATE INDEX IF NOT EXISTS idx_async_jobs_type_status ON async_jobs(type, status);
+      CREATE INDEX IF NOT EXISTS idx_async_jobs_created ON async_jobs(created_at);
+      CREATE INDEX IF NOT EXISTS idx_async_jobs_updated ON async_jobs(updated_at);
+
+      CREATE TABLE IF NOT EXISTS async_job_artifacts (
+        id TEXT PRIMARY KEY NOT NULL,
+        job_id TEXT NOT NULL,
+        type TEXT NOT NULL,
+        name TEXT,
+        mime_type TEXT,
+        storage_kind TEXT NOT NULL,
+        uri TEXT,
+        size_bytes INTEGER,
+        payload TEXT,
+        metadata_payload TEXT,
+        created_at TEXT NOT NULL,
+        FOREIGN KEY(job_id) REFERENCES async_jobs(id) ON DELETE CASCADE
+      );
+      CREATE INDEX IF NOT EXISTS idx_async_job_artifacts_job_id ON async_job_artifacts(job_id);
+      CREATE INDEX IF NOT EXISTS idx_async_job_artifacts_type ON async_job_artifacts(type);
     `);
   }
 
@@ -701,6 +745,193 @@ export class JsonPlatformStore {
     this.approvals.set(approvalId, nextRecord);
     this.persistApprovals();
     return nextRecord;
+  }
+
+  private asyncJobFromRow(row: {
+    id: string;
+    type: string;
+    status: AsyncJobRecord['status'];
+    request_payload: string | null;
+    result_payload: string | null;
+    error_payload: string | null;
+    metadata_payload: string | null;
+    created_at: string;
+    updated_at: string;
+    started_at: string | null;
+    completed_at: string | null;
+  }): AsyncJobRecord {
+    return {
+      id: row.id,
+      type: row.type,
+      status: row.status,
+      request: parseJsonOrUndefined(row.request_payload),
+      result: parseJsonOrUndefined(row.result_payload),
+      error: parseJsonOrUndefined(row.error_payload) as AsyncJobRecord['error'],
+      metadata: parseJsonOrUndefined(row.metadata_payload) as AsyncJobRecord['metadata'],
+      createdAt: row.created_at,
+      updatedAt: row.updated_at,
+      startedAt: row.started_at ?? undefined,
+      completedAt: row.completed_at ?? undefined,
+    };
+  }
+
+  saveAsyncJob(record: AsyncJobRecord): AsyncJobRecord {
+    const existing = this.getAsyncJob(record.id);
+    const timestamp = now();
+    const nextRecord: AsyncJobRecord = {
+      ...record,
+      createdAt: existing?.createdAt ?? record.createdAt ?? timestamp,
+      updatedAt: record.updatedAt ?? timestamp,
+    };
+    this.db
+      .prepare(
+        `INSERT INTO async_jobs (
+          id, type, status, request_payload, result_payload, error_payload, metadata_payload,
+          created_at, updated_at, started_at, completed_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(id) DO UPDATE SET
+          type = excluded.type,
+          status = excluded.status,
+          request_payload = excluded.request_payload,
+          result_payload = excluded.result_payload,
+          error_payload = excluded.error_payload,
+          metadata_payload = excluded.metadata_payload,
+          updated_at = excluded.updated_at,
+          started_at = excluded.started_at,
+          completed_at = excluded.completed_at`,
+      )
+      .run(
+        nextRecord.id,
+        nextRecord.type,
+        nextRecord.status,
+        jsonOrNull(nextRecord.request),
+        jsonOrNull(nextRecord.result),
+        jsonOrNull(nextRecord.error),
+        jsonOrNull(nextRecord.metadata),
+        nextRecord.createdAt,
+        nextRecord.updatedAt,
+        nextRecord.startedAt ?? null,
+        nextRecord.completedAt ?? null,
+      );
+    return nextRecord;
+  }
+
+  getAsyncJob(jobId: string): AsyncJobRecord | null {
+    const row = this.db
+      .prepare(
+        `SELECT id, type, status, request_payload, result_payload, error_payload, metadata_payload,
+          created_at, updated_at, started_at, completed_at
+        FROM async_jobs WHERE id = ?`,
+      )
+      .get(jobId) as
+      | {
+          id: string;
+          type: string;
+          status: AsyncJobRecord['status'];
+          request_payload: string | null;
+          result_payload: string | null;
+          error_payload: string | null;
+          metadata_payload: string | null;
+          created_at: string;
+          updated_at: string;
+          started_at: string | null;
+          completed_at: string | null;
+        }
+      | undefined;
+    return row ? this.asyncJobFromRow(row) : null;
+  }
+
+  private asyncJobArtifactFromRow(row: {
+    id: string;
+    job_id: string;
+    type: string;
+    name: string | null;
+    mime_type: string | null;
+    storage_kind: AsyncJobArtifactRecord['storageKind'];
+    uri: string | null;
+    size_bytes: number | bigint | null;
+    payload: string | null;
+    metadata_payload: string | null;
+    created_at: string;
+  }): AsyncJobArtifactRecord {
+    return {
+      id: row.id,
+      jobId: row.job_id,
+      type: row.type,
+      name: row.name ?? undefined,
+      mimeType: row.mime_type ?? undefined,
+      storageKind: row.storage_kind,
+      uri: row.uri ?? undefined,
+      sizeBytes: row.size_bytes === null ? undefined : Number(row.size_bytes),
+      payload: parseJsonOrUndefined(row.payload),
+      metadata: parseJsonOrUndefined(row.metadata_payload) as AsyncJobArtifactRecord['metadata'],
+      createdAt: row.created_at,
+    };
+  }
+
+  saveAsyncJobArtifact(record: AsyncJobArtifactRecord): AsyncJobArtifactRecord {
+    const timestamp = now();
+    const nextRecord: AsyncJobArtifactRecord = {
+      ...record,
+      createdAt: record.createdAt ?? timestamp,
+    };
+    this.db
+      .prepare(
+        `INSERT INTO async_job_artifacts (
+          id, job_id, type, name, mime_type, storage_kind, uri, size_bytes, payload, metadata_payload, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(id) DO UPDATE SET
+          job_id = excluded.job_id,
+          type = excluded.type,
+          name = excluded.name,
+          mime_type = excluded.mime_type,
+          storage_kind = excluded.storage_kind,
+          uri = excluded.uri,
+          size_bytes = excluded.size_bytes,
+          payload = excluded.payload,
+          metadata_payload = excluded.metadata_payload,
+          created_at = excluded.created_at`,
+      )
+      .run(
+        nextRecord.id,
+        nextRecord.jobId,
+        nextRecord.type,
+        nextRecord.name ?? null,
+        nextRecord.mimeType ?? null,
+        nextRecord.storageKind,
+        nextRecord.uri ?? null,
+        nextRecord.sizeBytes ?? null,
+        jsonOrNull(nextRecord.payload),
+        jsonOrNull(nextRecord.metadata),
+        nextRecord.createdAt,
+      );
+    return nextRecord;
+  }
+
+  listAsyncJobArtifacts(jobId: string): AsyncJobArtifactRecord[] {
+    const rows = this.db
+      .prepare(
+        `SELECT id, job_id, type, name, mime_type, storage_kind, uri, size_bytes, payload, metadata_payload, created_at
+        FROM async_job_artifacts WHERE job_id = ? ORDER BY created_at ASC, id ASC`,
+      )
+      .all(jobId) as Array<{
+        id: string;
+        job_id: string;
+        type: string;
+        name: string | null;
+        mime_type: string | null;
+        storage_kind: AsyncJobArtifactRecord['storageKind'];
+        uri: string | null;
+        size_bytes: number | bigint | null;
+        payload: string | null;
+        metadata_payload: string | null;
+        created_at: string;
+      }>;
+    return rows.map((row) => this.asyncJobArtifactFromRow(row));
+  }
+
+  deleteAsyncJobArtifacts(jobId: string): void {
+    this.db.prepare('DELETE FROM async_job_artifacts WHERE job_id = ?').run(jobId);
   }
 
   insertKanbanAgentTurn(record: KanbanAgentTurnRecord): KanbanAgentTurnRecord {
