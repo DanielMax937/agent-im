@@ -144,7 +144,7 @@ AGENT_IM_API_KEY=local-only
 
 - 工作目录固定为对应 vault 根目录。
 - 完整提示词通过 stdin 传递，以 `-` 作为 `codex exec` 的 prompt 参数，避免 shell 参数长度和转义问题。
-- 固定命令选项为 `--sandbox read-only --ephemeral --skip-git-repo-check --color never`；同时禁用已安装 CLI 中的 browser、in-app browser、apps 与 standalone web-search 功能。Codex 自身仍需要联网访问模型服务，因此这里只承诺禁用模型可调用的浏览器/搜索能力，不声称隔离 Codex 客户端自身的网络连接。
+- 固定命令选项为 `--sandbox read-only --ephemeral --skip-git-repo-check --color never`，并在同一次命令上追加 `--disable browser_use --disable browser_use_external --disable browser_use_full_cdp_access --disable computer_use --disable in_app_browser --disable apps --disable standalone_web_search --disable web_search_cached --disable web_search_request`。这些 `--disable` 只覆盖当前 invocation，不写入 `~/.codex/config.toml`。Codex 自身仍需要联网访问模型服务，因此这里只承诺禁用模型可调用的浏览器/搜索能力，不声称隔离 Codex 客户端自身的网络连接。
 - 使用 `mktemp -d "${TMPDIR:-/tmp}/vault-query.XXXXXX"` 创建每次调用独占的临时目录，最终回答、stdout 和 stderr 分别写入其中；`trap` 在 `EXIT HUP INT TERM` 时终止子进程并删除临时目录。
 - 使用 `--output-last-message <临时文件>`；只有 Codex 退出码为 0 且最终回答文件非空时才把内容写到原脚本的 stdout。
 - 超时固定为 300 秒。脚本以后台子进程运行 Codex，并启动 watcher；超时时先发送 `TERM`，5 秒后仍未退出则发送 `KILL`，最终返回退出码 124。
@@ -175,7 +175,7 @@ MemOS 中的 Claude/OpenCode 命中主要属于框架能力、测试或上游代
 | DataPlatform | `app/services/task_planner.py`、`app/crawl/llm_extraction.py`；OpenAI Chat Completions | 源码树与部署树的 `.env.distributed.local`：`DP_OPENAI_API_KEY=local-only`、`DP_OPENAI_BASE_URL=http://127.0.0.1:3300/v1`、`DP_LLM_EXTRACTION_MODEL=codex-login/gpt-5.5` | `.env.distributed.example` 只补不含密钥的说明 | 迁移；不改 Ark multimodal/embedding |
 | round-table | `lib/llm/client.ts`；OpenAI SDK | `.env`：`OPENAI_API_KEY`、`OPENAI_BASE_URL`、`OPENAI_MODEL_NAME` 映射到 Agent-im | 无 | 迁移；Ark 电影视觉/审阅配置保持不变 |
 | looplab | `looplab/engine/solver.py`；OpenAI SDK | 新建已被 `.gitignore` 排除的 `.env`：`OPENAI_API_KEY`、`OPENAI_BASE_URL`、`OPENAI_MODEL` | 无 | 迁移可选 LLM solver；heuristic 不变 |
-| research_framework | `computational_discovery/llm.py`；OpenAI Chat Completions | `.env`：使用该项目现有优先级最高的 `ANTHROPIC_API_KEY`、`ANTHROPIC_BASE_URL`、`ANTHROPIC_MODEL` 指向 Agent-im | 无 | 迁移通用在线生成 profile；多模型 vendor override 不改 |
+| research_framework | `computational_discovery/llm.py::OpenAICompatibleGenerator`；OpenAI Chat Completions | `.env`：清空仅用于旧代理的 `ANTHROPIC_*` 三项，设置协议级 `OPENAI_API_KEY=local-only`、`OPENAI_BASE_URL=http://127.0.0.1:3300/v1`、`OPENAI_MODEL=codex-login/gpt-5.5` | 无 | `OPENAI_*` 在该类中明确表示 OpenAI-compatible 协议；模型名明确显示 Codex，不覆盖 ERA/evolve 等 vendor-specific 变量或实验标签 |
 | xflow reviewer | `server/llm-client.mjs`、`server/task-reviewer.mjs`；OpenAI Chat Completions | `.env`：`OPENAI_API_KEY`、`OPENAI_BASE_URL`、`OPENAI_MODEL`、`LLM_MODEL` 指向 Agent-im | 无 | 只迁移 LLM reviewer；默认 `codex-login` Agent 与可选 CLI 代码不变 |
 | article-writer audit | `article_writer/services/llm.py::chat_audit`；OpenAI SDK | `.env`：`OPENAI_API_KEY=local-only`、`OPENAI_BASE_URL=http://127.0.0.1:3300/v1`、`AUDIT_OPENAI_MODEL=codex-login/gpt-5.5`；清空 `DEEPSEEK_FALLBACK_API_KEY` | `.env.example` 补本地 audit 示例；必要测试只改 `tests/test_llm.py` | 迁移 audit；Volcengine 主模型不改，失效 DeepSeek fallback 禁用 |
 | ai_psychology | `run_experiment.py`、`run_multimodel.py` 经 `framework/models.py` | `.env` 新增独立的 `AGENT_IM_API_KEY`、`AGENT_IM_BASE_URL`、`AGENT_IM_MODEL_NAME` | `ai_psychology_research/framework/models.py`、`run_experiment.py`、`run_multimodel.py`、`.env.example`，新增 `tests/test_agent_im_provider.py` | 新增明确显示为 Agent-im Codex 的实验项；不把 Claude/Gemini/DeepSeek 标签改指 Codex |
@@ -202,11 +202,11 @@ MemOS 中的 Claude/OpenCode 命中主要属于框架能力、测试或上游代
 1. 未提供 `response_format`
    - 保持现有文本、图片和 streaming 行为，不增加 JSON 处理。
 2. `{ "type": "json_object" }`
-   - 在标准化 prompt 尾部添加“只返回一个合法 JSON value，不含 Markdown”的系统约束。
-   - 完整结果用 `JSON.parse` 验证，不做 schema 验证。
+   - 在标准化 prompt 尾部添加“只返回一个合法 JSON object，不含 Markdown”的系统约束。
+   - 完整结果先用 `JSON.parse` 解析，再要求结果满足 `typeof value === "object" && value !== null && !Array.isArray(value)`；数组、字符串、数值、布尔值和 `null` 都视为无效并进入单次修复流程。
 3. `{ "type": "json_schema", "json_schema": { "name": "...", "description": "...", "strict": true, "schema": {...} } }`
    - `json_schema`、非空 `name` 和对象类型 `schema` 必填；`description` 可选。
-   - `strict` 允许省略、`true` 或 `false`。无论该值如何，Codex 生成都使用 schema 约束；这对 `strict: false` 是允许范围内更严格的结果，不会返回 schema 外字段。
+   - `strict` 允许省略、`true` 或 `false`。无论该值如何，Codex 生成都使用 schema 约束；最终验收严格服从调用方提供的 schema，包括 `additionalProperties`。只有 schema 自己禁止额外字段时才拒绝额外字段，不额外收紧调用方 schema。
    - 只把 `json_schema.schema` 原样传为 Codex SDK `thread.runStreamed(input, { outputSchema })` 的 `outputSchema`；`name` 和 `description` 只用于请求校验与日志标识。
    - 使用 Ajv 2020 编译 schema；schema 自身非法时在调用模型前返回 HTTP 400。
    - 模型结果先 `JSON.parse`，再用同一 Ajv validator 校验。验证错误只记录字段路径和关键字，不记录完整模型响应。
@@ -276,7 +276,7 @@ MemOS 中的 Claude/OpenCode 命中主要属于框架能力、测试或上游代
 3. 流式 Chat Completions。
 4. `json_schema` 结构化输出。
 5. `json_schema` 非法 schema、strict 三种取值、schema 验证失败与单次修复上限。
-6. `json_object` 输出、非法 JSON 与单次修复上限。
+6. `json_object` 输出、数组/标量/null 拒绝、非法 JSON 与单次修复上限。
 7. 结构化 streaming 在验证前不发送 delta，验证后只发送合法完整 JSON。
 8. 图片输入保持兼容。
 9. 非法请求、上游失败和超时的错误映射。
@@ -309,6 +309,7 @@ MemOS 中的 Claude/OpenCode 命中主要属于框架能力、测试或上游代
 
 - `crontab -l` 的原始文本与 SHA-256。
 - `/Users/daniel/Library/LaunchAgents/*.plist` 的文件列表与逐文件 SHA-256。
+- `~/.codex/config.toml` 的 SHA-256；五个 vault smoke test 后必须一致，以证明 invocation-local `--disable` 没有改写全局 Codex 配置。
 - `launchctl print gui/$(id -u)/com.agent-im.web` 与 `com.dataplatform.center` 的运行状态快照。
 
 全部实施结束后重新生成同样快照。`crontab` 与所有 plist 必须逐字节一致；允许变化的只有服务 PID、启动时间和运行状态。Agent-im 的 loopback 修改发生在 `ecosystem.config.cjs`，不修改它的 launchd plist。
