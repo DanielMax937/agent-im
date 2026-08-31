@@ -1,0 +1,641 @@
+import type { Config, RunnerConfig } from '../config';
+import { normalizeRunnersWithProcessEnvOverride } from '../config';
+import type { LLMProvider } from '../lib/bridge/host';
+import { getKanbanLogger } from './kanban-logger';
+import type { Project } from './types';
+import { consumeAgentStream, type StreamConsumeResult } from './stream-consumer';
+import {
+  assertVercelApiFrameworkSlug,
+  formatVercelFrameworkSlugListForLlm,
+} from './vercel-project-frameworks';
+
+/** Runner used for batch spec LLM: project’s codex-senior mapping, else first Codex runner. */
+export function pickRunnerForCodexSenior(project: Project, config: Config): RunnerConfig | undefined {
+  const runners = normalizeRunnersWithProcessEnvOverride(config);
+  const id = project.kanbanRoleRunners?.['codex-senior']?.trim();
+  if (id) {
+    const r = runners.find((x) => x.id === id);
+    if (r) return r;
+  }
+  return runners.find((r) => r.runtime === 'codex') ?? runners[0];
+}
+
+export interface BatchTaskPlanItem {
+  title: string;
+  /** Indices into the same `tasks` array; must refer only to earlier tasks (0 .. i-1). */
+  dependsOnIndices: number[];
+}
+
+/**
+ * Extract a balanced `{ ... }` slice starting at `start` (must point at `{`).
+ * Handles `{` / `}` inside JSON strings. Avoids naive first-`{`/last-`}` bugs when
+ * the model adds prose or multiple objects.
+ */
+export function extractBalancedJsonSlice(text: string, start: number): string | null {
+  if (text[start] !== '{') return null;
+  let depth = 0;
+  let inString = false;
+  let escape = false;
+  for (let i = start; i < text.length; i++) {
+    const c = text[i];
+    if (inString) {
+      if (escape) {
+        escape = false;
+      } else if (c === '\\') {
+        escape = true;
+      } else if (c === '"') {
+        inString = false;
+      }
+      continue;
+    }
+    if (c === '"') {
+      inString = true;
+      continue;
+    }
+    if (c === '{') depth += 1;
+    else if (c === '}') {
+      depth -= 1;
+      if (depth === 0) return text.slice(start, i + 1);
+    }
+  }
+  return null;
+}
+
+function tryParseJsonString(s: string): unknown | undefined {
+  try {
+    return JSON.parse(s);
+  } catch {
+    return undefined;
+  }
+}
+
+function collectJsonCandidatesFromText(trimmed: string, into: unknown[]): void {
+  const add = (json: string) => {
+    const v = tryParseJsonString(json);
+    if (v !== undefined) into.push(v);
+  };
+
+  const fenceRe = /```(?:json)?\s*([\s\S]*?)```/gi;
+  let m: RegExpExecArray | null;
+  while ((m = fenceRe.exec(trimmed)) !== null) {
+    const inner = m[1].trim();
+    add(inner);
+    for (let i = 0; i < inner.length; i++) {
+      if (inner[i] !== '{') continue;
+      const bal = extractBalancedJsonSlice(inner, i);
+      if (bal) add(bal);
+    }
+  }
+
+  for (let i = 0; i < trimmed.length; i++) {
+    if (trimmed[i] !== '{') continue;
+    const bal = extractBalancedJsonSlice(trimmed, i);
+    if (bal) add(bal);
+  }
+}
+
+function isRecordWithTasksArray(v: unknown): v is Record<string, unknown> {
+  if (typeof v !== 'object' || v === null || Array.isArray(v)) return false;
+  return Array.isArray((v as Record<string, unknown>).tasks);
+}
+
+/** Prefer the object whose shape matches batch-spec (`tasks` array), including after prose / fences. */
+function pickBatchSpecJsonObject(candidates: unknown[]): unknown {
+  const withTasks = candidates.filter(isRecordWithTasksArray);
+  const nonEmpty = withTasks.filter((o) => (o.tasks as unknown[]).length > 0);
+  if (nonEmpty.length) return nonEmpty[0];
+  if (withTasks.length) return withTasks[0];
+  if (candidates.length === 1) return candidates[0];
+  if (candidates.length > 1) {
+    const objs = candidates.filter((c): c is Record<string, unknown> => typeof c === 'object' && c !== null && !Array.isArray(c));
+    if (objs.length) return objs[0];
+  }
+  if (candidates.length) return candidates[0];
+  throw new Error('Model output did not contain a parseable JSON object');
+}
+
+export function extractJsonObjectFromAssistantText(text: string): unknown {
+  const trimmed = text.trim();
+  const candidates: unknown[] = [];
+  collectJsonCandidatesFromText(trimmed, candidates);
+  return pickBatchSpecJsonObject(candidates);
+}
+
+/** Validates POST body for `/api/workflows/tasks/batch-spec/preview`. */
+export function parsePreviewBatchSpecBody(raw: unknown): { projectId: string; sprintId: string; rawText: string } {
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) {
+    throw new Error('Request body must be a JSON object');
+  }
+  const o = raw as Record<string, unknown>;
+  const projectId = typeof o.projectId === 'string' ? o.projectId.trim() : '';
+  const sprintId = typeof o.sprintId === 'string' ? o.sprintId.trim() : '';
+  const rawText = typeof o.rawText === 'string' ? o.rawText.trim() : '';
+  if (!projectId) {
+    throw new Error('projectId is required');
+  }
+  if (!sprintId) {
+    throw new Error('sprintId is required');
+  }
+  if (!rawText) {
+    throw new Error('rawText is required');
+  }
+  return { projectId, sprintId, rawText };
+}
+
+export function normalizeBatchTaskPlan(raw: unknown): BatchTaskPlanItem[] {
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) {
+    throw new Error('Expected JSON object with a "tasks" array');
+  }
+  const tasks = (raw as Record<string, unknown>).tasks;
+  if (!Array.isArray(tasks) || tasks.length === 0) {
+    throw new Error('tasks must be a non-empty array');
+  }
+  const out: BatchTaskPlanItem[] = [];
+  let i = 0;
+  for (const row of tasks) {
+    if (typeof row !== 'object' || row === null) {
+      throw new Error(`tasks[${i}] must be an object`);
+    }
+    const o = row as Record<string, unknown>;
+    const title = typeof o.title === 'string' ? o.title.trim() : '';
+    if (!title) {
+      throw new Error(`tasks[${i}].title is required`);
+    }
+    let deps: number[] = [];
+    if (o.dependsOnIndices !== undefined) {
+      if (!Array.isArray(o.dependsOnIndices)) {
+        throw new Error(`tasks[${i}].dependsOnIndices must be an array of numbers`);
+      }
+      deps = o.dependsOnIndices.map((x, j) => {
+        if (typeof x !== 'number' || !Number.isInteger(x)) {
+          throw new Error(`tasks[${i}].dependsOnIndices[${j}] must be an integer`);
+        }
+        return x;
+      });
+    }
+    const seen = new Set<number>();
+    for (const j of deps) {
+      if (j < 0 || j >= i) {
+        throw new Error(
+          `tasks[${i}]: dependsOnIndices may only reference earlier tasks (indices 0 .. ${i - 1}), got ${j}`,
+        );
+      }
+      if (seen.has(j)) {
+        throw new Error(`tasks[${i}]: duplicate dependency index ${j}`);
+      }
+      seen.add(j);
+    }
+    out.push({ title, dependsOnIndices: deps });
+    i += 1;
+  }
+  return out;
+}
+
+function normalizeBatchTaskPlanLoose(raw: unknown): BatchTaskPlanItem[] {
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) {
+    throw new Error('Expected JSON object with a "tasks" array');
+  }
+  const tasks = (raw as Record<string, unknown>).tasks;
+  if (!Array.isArray(tasks) || tasks.length === 0) {
+    throw new Error('tasks must be a non-empty array');
+  }
+  return tasks.map((row, i) => {
+    if (typeof row !== 'object' || row === null) {
+      throw new Error(`tasks[${i}] must be an object`);
+    }
+    const o = row as Record<string, unknown>;
+    const title = typeof o.title === 'string' ? o.title.trim() : '';
+    if (!title) {
+      throw new Error(`tasks[${i}].title is required`);
+    }
+    const depsRaw = o.dependsOnIndices;
+    if (depsRaw === undefined) {
+      return { title, dependsOnIndices: [] };
+    }
+    if (!Array.isArray(depsRaw)) {
+      throw new Error(`tasks[${i}].dependsOnIndices must be an array of numbers`);
+    }
+    const dependsOnIndices = depsRaw.map((x, j) => {
+      if (typeof x !== 'number' || !Number.isInteger(x)) {
+        throw new Error(`tasks[${i}].dependsOnIndices[${j}] must be an integer`);
+      }
+      return x;
+    });
+    return { title, dependsOnIndices };
+  });
+}
+
+function batchSpecTimeoutMs(): number {
+  const raw = process.env.CTI_KANBAN_BATCH_SPEC_TIMEOUT_MS;
+  if (raw === undefined || raw === '') return 180_000;
+  const n = parseInt(raw, 10);
+  if (!Number.isFinite(n) || n <= 0) return 180_000;
+  return n;
+}
+
+const BATCH_SPEC_SYSTEM = [
+  'You split a requirement into Kanban tasks that **software developers will implement in the repository** (features, screens, APIs, services, persistence, integrations—each task is a unit of coding work).',
+  'Each `title` must name a **concrete implementation deliverable** (what to build or change in code), not a process step around the work.',
+  'Strict exclusions — **do not** create tasks for: drafting or approving requirements/PRD/用户故事; test plans or standalone “write tests” / QA-only work; regression passes; UAT or sign-off gates; pure documentation; research/spikes with no shipped code; deployment/ops checklists that are not product code changes.',
+  'If the spec mentions testing, regression, or verification, **omit** separate tasks for those—the board’s dev/review/test lanes handle quality gates; your list is only implementation slices.',
+  'Do not add meta tasks like “声明需求”, “需求评审”, “补充验收标准”, “回归验证”, “联调测试计划” unless they are purely about writing application code that embodies a feature.',
+  'Hard rule: your entire message must be ONE JSON object. No other characters before or after.',
+  'Do NOT use Markdown: no ## headings, no **bold**, no bullet lines, no numbered lists outside JSON, no ``` fences.',
+  'Required shape: {"tasks":[{"title":"<string>","dependsOnIndices":[<ints>]}, ...]}',
+  'Example (copy structure only): {"tasks":[{"title":"Add share page route","dependsOnIndices":[]},{"title":"Implement share API handler and persistence","dependsOnIndices":[0]}]}',
+  'dependsOnIndices: 0-based indices of **earlier** tasks in the same `tasks` array that must finish before **this** task can start.',
+  'Dependency rule (critical): if task B truly depends on work from task A, and A appears earlier in `tasks` at index i, then you MUST list i inside B\'s dependsOnIndices. Do not omit real dependencies; the system will create real Kanban links from this field.',
+  'If tasks are parallel with no ordering constraint, use dependsOnIndices: [] for those tasks.',
+  'Index 0 must use dependsOnIndices: []. For task at index i>0, only use indices from 0 to i-1.',
+  'Order tasks topologically (dependencies point backward). Titles must be concise and describe **what code to implement**.',
+].join('\n');
+
+function batchSpecSystemWithFramework(vercelDeploymentFramework?: string): string {
+  const fw = vercelDeploymentFramework?.trim();
+  if (!fw) return BATCH_SPEC_SYSTEM;
+  return [
+    BATCH_SPEC_SYSTEM,
+    '',
+    `Deployment target: the repository is intended for Vercel using framework preset "${fw}". Align tasks with that stack’s typical layout, tooling, and runtime (use the conventions developers expect for this Vercel framework slug).`,
+  ].join('\n');
+}
+
+function batchSpecDependencyReviewSystemWithFramework(vercelDeploymentFramework?: string): string {
+  const fw = vercelDeploymentFramework?.trim();
+  if (!fw) return BATCH_SPEC_DEPENDENCY_REVIEW_SYSTEM;
+  return `${BATCH_SPEC_DEPENDENCY_REVIEW_SYSTEM}\n\nVercel framework preset for this repo: ${fw}. Keep tasks appropriate for that stack.`;
+}
+
+/** Second pass when the model returns prose/Markdown instead of JSON. */
+const BATCH_SPEC_REPAIR_SYSTEM = [
+  'You convert planning text into exactly one JSON object for a Kanban batch import of **developer implementation tasks**.',
+  'Reply with ONLY valid JSON. First character must be {. Last character must be }.',
+  'No Markdown, no code fences, no explanations, no labels before or after the JSON.',
+  'Shape: {"tasks":[{"title":"string","dependsOnIndices":number[]}]}',
+  'Each task must be something engineers **implement in code**. Drop or merge items that are only requirements docs, testing/regression/UAT gates, or other non-coding process work.',
+  'dependsOnIndices: task index 0 uses []. Later tasks only reference earlier indices (0 .. i-1).',
+  'Preserve every real **implementation** dependency from the source: if item j must wait on item i (i<j), include i in tasks[j].dependsOnIndices.',
+].join('\n');
+
+/** Third pass: validate / repair dependency graph after a syntactically valid plan already exists. */
+const BATCH_SPEC_DEPENDENCY_REVIEW_SYSTEM = [
+  'You review and repair a Kanban task plan JSON object for **implementation (coding) work only**.',
+  'Reply with ONLY one valid JSON object. First character must be {. Last character must be }.',
+  'Shape: {"tasks":[{"title":"string","dependsOnIndices":number[]}]}',
+  'Keep task titles unchanged unless you must fix wording so a task clearly describes code work, or you remove a non-implementation task.',
+  'Primary goals: (1) dependency correctness, (2) remove any task whose sole purpose is requirements, testing-only, regression/UAT, or other non-coding process; after removals, fix dependsOnIndices and keep valid topological order.',
+  'Rules:',
+  '- dependsOnIndices may contain only unique integers pointing to earlier tasks.',
+  '- Remove self-dependencies, forward references, invalid indices, and duplicates.',
+  '- Add any missing earlier-task dependency that is clearly required by the task titles or requirement text.',
+  '- Keep independent tasks with [].',
+  '- Prefer minimal edits; when removing non-implementation tasks, renumber indices consistently.',
+  '- Preserve topological order: every dependency must point backward.',
+].join('\n');
+
+/** When not `0`, also mirror batch-spec dumps to stdout (Next dev terminal). Bridge log always receives structured lines when this runs. */
+function batchSpecConsoleLogEnabled(): boolean {
+  return process.env.CTI_KANBAN_BATCH_SPEC_LOG !== '0';
+}
+
+function logBatchSpecRunnerOutput(phase: string, rawChunks: string[], result: StreamConsumeResult): void {
+  const rawJoined = rawChunks.join('');
+  getKanbanLogger()
+    .child({ scope: 'batch-spec' })
+    .info(
+      {
+        phase,
+        rawSseChunkCount: rawChunks.length,
+        rawSseCharLength: rawJoined.length,
+        rawRunnerSse: rawJoined,
+        aggregatedAssistantText: result.responseText,
+        hasError: result.hasError,
+        streamErrorMessage: result.errorMessage || null,
+        providerSessionId: result.providerSessionId,
+      },
+      'batch-spec preview: runner SSE + aggregated assistant text',
+    );
+
+  if (!batchSpecConsoleLogEnabled()) return;
+  console.log(`\n[batch-spec] ========== ${phase} ==========`);
+  console.log('[batch-spec] raw runner SSE stream (full):\n', rawJoined);
+  console.log('[batch-spec] aggregated assistant text (full):\n', result.responseText);
+  console.log('[batch-spec] hasError:', result.hasError, 'errorMessage:', result.errorMessage || '(none)');
+  console.log('[batch-spec] providerSessionId:', result.providerSessionId);
+}
+
+async function runBatchSpecLlmPass(params: {
+  provider: LLMProvider;
+  workingDirectory: string;
+  systemPrompt: string;
+  userPrompt: string;
+  sessionId: string;
+  phase: string;
+}): Promise<{ text: string; streamResult: StreamConsumeResult }> {
+  const rawChunks: string[] = [];
+  const stream = params.provider.streamChat({
+    prompt: params.userPrompt,
+    sessionId: params.sessionId,
+    systemPrompt: params.systemPrompt,
+    workingDirectory: params.workingDirectory,
+    conversationHistory: [],
+    disableLlmStreaming: true,
+    /**
+     * Codex maps this to a permissive approval policy so headless batch JSON extraction
+     * does not stall waiting for tool/shell approval (see codex-provider `toApprovalPolicy`).
+     */
+    permissionMode: 'acceptEdits',
+  });
+
+  const streamResult = await consumeAgentStream(stream, {
+    timeoutMs: batchSpecTimeoutMs(),
+    rawStreamChunks: rawChunks,
+  });
+  logBatchSpecRunnerOutput(params.phase, rawChunks, streamResult);
+
+  if (streamResult.timedOut) {
+    throw new Error(streamResult.errorMessage || 'Batch spec LLM timed out');
+  }
+  if (streamResult.hasError) {
+    throw new Error(streamResult.errorMessage || 'Batch spec LLM failed');
+  }
+  const text = streamResult.responseText.trim();
+  if (!text) {
+    throw new Error('Model returned empty text');
+  }
+  return { text, streamResult };
+}
+
+function normalizeFromAssistantTextOrThrow(text: string): BatchTaskPlanItem[] {
+  const json = extractJsonObjectFromAssistantText(text);
+  return normalizeBatchTaskPlan(json);
+}
+
+function normalizeLooseFromAssistantTextOrThrow(text: string): BatchTaskPlanItem[] {
+  const json = extractJsonObjectFromAssistantText(text);
+  return normalizeBatchTaskPlanLoose(json);
+}
+
+async function repairBatchTaskPlanDependencies(params: {
+  provider: LLMProvider;
+  workingDirectory: string;
+  rawText: string;
+  tasks: BatchTaskPlanItem[];
+  vercelDeploymentFramework?: string;
+}): Promise<BatchTaskPlanItem[]> {
+  const reviewUserPrompt = [
+    params.vercelDeploymentFramework?.trim()
+      ? `Vercel framework preset: ${params.vercelDeploymentFramework.trim()} (tasks must stay appropriate for that stack).`
+      : '',
+    'Review this task plan for dependency correctness and repair it if needed.',
+    'Ensure every task describes **implementation work**; remove stray non-coding process tasks if any slipped in, then fix dependsOnIndices.',
+    'Validate that every dependsOnIndices entry points only to earlier tasks and that obvious missing blockers are included.',
+    'Return the repaired JSON object only.',
+    '',
+    'Original requirement/spec:',
+    '---',
+    params.rawText.trim().slice(0, 20_000),
+    '---',
+    '',
+    'Candidate task plan JSON:',
+    JSON.stringify({ tasks: params.tasks }),
+  ]
+    .filter(Boolean)
+    .join('\n');
+
+  const pass = await runBatchSpecLlmPass({
+    provider: params.provider,
+    workingDirectory: params.workingDirectory,
+    systemPrompt: batchSpecDependencyReviewSystemWithFramework(params.vercelDeploymentFramework),
+    userPrompt: reviewUserPrompt,
+    sessionId: `batch-spec-dependency-review-${Date.now()}`,
+    phase: 'batch-spec preview pass 3 (dependency review)',
+  });
+
+  try {
+    return normalizeFromAssistantTextOrThrow(pass.text);
+  } catch (e) {
+    const preview = pass.text.length > 500 ? `${pass.text.slice(0, 500)}…` : pass.text;
+    const base = e instanceof Error ? e.message : String(e);
+    throw new Error(`${base} — dependency review output preview: ${preview}`);
+  }
+}
+
+/**
+ * LLM call(s): pasted spec → validated task plan (高级开发 / codex runner).
+ * If the first reply is prose/Markdown, a second pass asks the model to emit JSON only.
+ */
+export async function runBatchTaskSpecLlm(params: {
+  provider: LLMProvider;
+  workingDirectory: string;
+  rawText: string;
+  /** Vercel `framework` slug for this project — included in prompts so tasks match the stack. */
+  vercelDeploymentFramework?: string;
+}): Promise<BatchTaskPlanItem[]> {
+  const raw = params.rawText.trim();
+  if (!raw) {
+    throw new Error('rawText is empty');
+  }
+
+  const userPrompt = [
+    params.vercelDeploymentFramework?.trim()
+      ? `Vercel framework preset for this repository: ${params.vercelDeploymentFramework.trim()}.`
+      : '',
+    'Break the following pasted content into Kanban tasks for **coding implementation** only (features and code changes developers will ship).',
+    'Do not create separate tasks for declaring requirements, writing test-only plans, regression verification, UAT, or similar non-implementation work.',
+    'For each task you MUST set dependsOnIndices:',
+    '- List the 0-based indices of earlier tasks this task cannot start until those are done.',
+    '- If the spec implies a chain or blocking order, reflect it in dependsOnIndices (do not leave dependencies implicit).',
+    '- Independent work uses dependsOnIndices: [].',
+    '',
+    '---',
+    raw,
+    '---',
+    '',
+    'Output constraint: your entire reply must be that single JSON object only. First character {. Last character }.',
+  ]
+    .filter(Boolean)
+    .join('\n');
+
+  const t0 = Date.now();
+  const pass1 = await runBatchSpecLlmPass({
+    provider: params.provider,
+    workingDirectory: params.workingDirectory,
+    systemPrompt: batchSpecSystemWithFramework(params.vercelDeploymentFramework),
+    userPrompt,
+    sessionId: `batch-spec-${t0}`,
+    phase: 'batch-spec preview pass 1',
+  });
+
+  try {
+    const plan = normalizeFromAssistantTextOrThrow(pass1.text);
+    return await repairBatchTaskPlanDependencies({
+      provider: params.provider,
+      workingDirectory: params.workingDirectory,
+      rawText: raw,
+      tasks: plan,
+      vercelDeploymentFramework: params.vercelDeploymentFramework,
+    });
+  } catch {
+    try {
+      const loosePlan = normalizeLooseFromAssistantTextOrThrow(pass1.text);
+      return await repairBatchTaskPlanDependencies({
+        provider: params.provider,
+        workingDirectory: params.workingDirectory,
+        rawText: raw,
+        tasks: loosePlan,
+        vercelDeploymentFramework: params.vercelDeploymentFramework,
+      });
+    } catch {
+      /* fall through to repair pass */
+    }
+  }
+
+  const repairUserPrompt = [
+    'The previous assistant reply was not valid JSON (it may have been Markdown or prose).',
+    'Extract **implementation (code) work items** and any "blocks / depends on / after" relationships from the text below.',
+    'Skip items that are only requirements, testing/regression/UAT, or other non-coding process steps.',
+    'Encode dependencies ONLY via dependsOnIndices on each task (earlier task index i for blocker i).',
+    'Reply with ONLY one JSON object. First character {. Last character }. No markdown, no commentary.',
+    'Shape: {"tasks":[{"title":"string","dependsOnIndices":number[]}]}',
+    '',
+    '---',
+    pass1.text.slice(0, 20_000),
+    '---',
+  ].join('\n');
+
+  const repairSystem = [
+    BATCH_SPEC_REPAIR_SYSTEM,
+    params.vercelDeploymentFramework?.trim()
+      ? `Vercel framework preset: ${params.vercelDeploymentFramework.trim()}.`
+      : '',
+  ]
+    .filter(Boolean)
+    .join('\n');
+
+  const pass2 = await runBatchSpecLlmPass({
+    provider: params.provider,
+    workingDirectory: params.workingDirectory,
+    systemPrompt: repairSystem,
+    userPrompt: repairUserPrompt,
+    sessionId: `batch-spec-repair-${Date.now()}`,
+    phase: 'batch-spec preview pass 2 (JSON repair)',
+  });
+
+  try {
+    const plan = normalizeFromAssistantTextOrThrow(pass2.text);
+    return await repairBatchTaskPlanDependencies({
+      provider: params.provider,
+      workingDirectory: params.workingDirectory,
+      rawText: raw,
+      tasks: plan,
+      vercelDeploymentFramework: params.vercelDeploymentFramework,
+    });
+  } catch (e) {
+    try {
+      const loosePlan = normalizeLooseFromAssistantTextOrThrow(pass2.text);
+      return await repairBatchTaskPlanDependencies({
+        provider: params.provider,
+        workingDirectory: params.workingDirectory,
+        rawText: raw,
+        tasks: loosePlan,
+        vercelDeploymentFramework: params.vercelDeploymentFramework,
+      });
+    } catch {
+      /* fall through to final error */
+    }
+    const preview = pass2.text.length > 500 ? `${pass2.text.slice(0, 500)}…` : pass2.text;
+    const base = e instanceof Error ? e.message : String(e);
+    throw new Error(`${base} — model output preview: ${preview}`);
+  }
+}
+
+const BOOTSTRAP_FRAMEWORK_SYSTEM = [
+  'You select exactly one Vercel project `framework` slug for a new repository that will be deployed on Vercel.',
+  'Read the product requirement and pick the single best slug from the list in the user message.',
+  'The slug must be copied verbatim from that list (same spelling and casing).',
+  'Reply with ONLY one JSON object. No markdown, no code fences, no commentary. First character {. Last character }.',
+  'Required shape: {"framework":"<slug>"}',
+].join('\n');
+
+const BOOTSTRAP_FRAMEWORK_REPAIR_SYSTEM = [
+  'Convert the assistant text into exactly one JSON object: {"framework":"<slug>"}.',
+  'The slug must be exactly one line from the allowed list the user gave. Copy it verbatim.',
+  'Reply with ONLY valid JSON. First character {. Last character }.',
+].join('\n');
+
+function normalizeFrameworkJsonOrThrow(text: string): string {
+  const json = extractJsonObjectFromAssistantText(text);
+  if (typeof json !== 'object' || json === null || Array.isArray(json)) {
+    throw new Error('Expected JSON object with "framework" field');
+  }
+  const fw = (json as Record<string, unknown>).framework;
+  if (typeof fw !== 'string' || !fw.trim()) {
+    throw new Error('framework must be a non-empty string');
+  }
+  return fw.trim();
+}
+
+/**
+ * Same runner/provider path as batch task spec: **codex-senior** resolves to {@link LLMProvider}.
+ * On success returns a Vercel API framework slug; throws if the model output is invalid or not allowed.
+ */
+export async function runBootstrapVercelFrameworkLlm(params: {
+  provider: LLMProvider;
+  workingDirectory: string;
+  requirement: string;
+}): Promise<string> {
+  const req = params.requirement.trim();
+  if (!req) throw new Error('requirement is empty');
+
+  const userPrompt = [
+    'Allowed `framework` slugs (pick exactly one; use as the JSON "framework" value):',
+    formatVercelFrameworkSlugListForLlm(),
+    '',
+    'Product requirement:',
+    '---',
+    req.slice(0, 24_000),
+    '---',
+  ].join('\n');
+
+  const pass1 = await runBatchSpecLlmPass({
+    provider: params.provider,
+    workingDirectory: params.workingDirectory,
+    systemPrompt: BOOTSTRAP_FRAMEWORK_SYSTEM,
+    userPrompt,
+    sessionId: `bootstrap-framework-${Date.now()}`,
+    phase: 'bootstrap framework selection pass 1',
+  });
+
+  try {
+    const slug = normalizeFrameworkJsonOrThrow(pass1.text);
+    assertVercelApiFrameworkSlug(slug);
+    return slug;
+  } catch {
+    /* fall through */
+  }
+
+  const repairUserPrompt = [
+    'The model reply was not a valid {"framework":"<slug>"} object or the slug was not in the allowed list.',
+    'Allowed slugs:',
+    formatVercelFrameworkSlugListForLlm(),
+    '',
+    'Invalid reply to fix:',
+    '---',
+    pass1.text.slice(0, 12_000),
+    '---',
+  ].join('\n');
+
+  const pass2 = await runBatchSpecLlmPass({
+    provider: params.provider,
+    workingDirectory: params.workingDirectory,
+    systemPrompt: BOOTSTRAP_FRAMEWORK_REPAIR_SYSTEM,
+    userPrompt: repairUserPrompt,
+    sessionId: `bootstrap-framework-repair-${Date.now()}`,
+    phase: 'bootstrap framework selection pass 2 (repair)',
+  });
+
+  const slug = normalizeFrameworkJsonOrThrow(pass2.text);
+  assertVercelApiFrameworkSlug(slug);
+  return slug;
+}

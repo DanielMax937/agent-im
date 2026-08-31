@@ -1,0 +1,101 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Agentic RAG Interface</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <div class="container">
+    <header>
+      <h1>Agentic RAG System</h1>
+      <p>智能检索增强生成系统</p>
+    </header>
+
+    <main>
+      <section class="panel-section">
+        <h2>查询输入</h2>
+        <textarea id="queryInput" placeholder="输入您的问题..." rows="4"></textarea>
+      </section>
+
+      <section class="panel-section">
+        <h2>知识库选择</h2>
+        <div id="kindsContainer" class="kinds-grid">
+          <label class="check-row">
+            <input type="checkbox" value="code" checked />
+            <span>代码</span>
+          </label>
+          <label class="check-row">
+            <input type="checkbox" value="docs" checked />
+            <span>文档</span>
+          </label>
+          <label class="check-row">
+            <input type="checkbox" value="reference" checked />
+            <span>参考资料</span>
+          </label>
+        </div>
+      </section>
+
+      <section class="panel-section">
+        <h2>检索配置</h2>
+        <div class="config-row">
+          <label for="iterationSelect">最大迭代次数:</label>
+          <select id="iterationSelect">
+            <option value="3">3</option>
+            <option value="5" selected>5</option>
+            <option value="7">7</option>
+            <option value="10">10</option>
+          </select>
+        </div>
+        <div class="config-row">
+          <label for="gateSelect">严格程度:</label>
+          <select id="gateSelect">
+            <option value="relaxed">宽松</option>
+            <option value="moderate" selected>适中</option>
+            <option value="strict">严格</option>
+          </select>
+        </div>
+      </section>
+
+      <section class="panel-section">
+        <label class="check-row">
+          <input type="checkbox" id="enableWebEnhancement" />
+          <span>🌐 启用网络增强 (自动Google搜索补充)</span>
+        </label>
+        <small style="color: #888; display: block; margin-top: 4px;">
+          证据不足时自动搜索Google前20个结果
+        </small>
+      </section>
+
+      <section class="panel-section">
+        <button id="runButton" class="primary-button">运行查询</button>
+      </section>
+
+      <div id="resultsContainer" style="display: none;">
+        <section class="panel-section">
+          <h2>查询结果</h2>
+          <div id="answerPanel" class="result-panel"></div>
+        </section>
+
+        <div id="webSourcesPanel" class="evidence-panel" style="display: none;">
+          <h3>🌐 网络来源</h3>
+          <div id="webSourcesList"></div>
+        </div>
+
+        <div id="evidencePanel" class="evidence-panel" style="display: none;">
+          <h3>📚 证据来源</h3>
+          <div id="evidenceList"></div>
+        </div>
+
+        <div id="tracePanel" class="trace-panel" style="display: none;">
+          <h3>🔍 执行轨迹</h3>
+          <div id="traceDetails"></div>
+        </div>
+      </div>
+    </main>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>

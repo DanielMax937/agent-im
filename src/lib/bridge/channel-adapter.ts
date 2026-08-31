@@ -1,0 +1,213 @@
+/**
+ * Abstract base class for IM channel adapters.
+ *
+ * Each adapter (Telegram, Discord, Slack, ...) extends this class to provide
+ * platform-specific message consumption and delivery.
+ * 
+ * Supports multi-instance: each adapter can have multiple concurrent instances
+ * with unique instanceId values.
+ */
+
+import type {
+  ChannelType,
+  InboundMessage,
+  OutboundMessage,
+  PreviewCapabilities,
+  SendResult,
+} from './types';
+
+export abstract class BaseChannelAdapter {
+  /** Which channel type this adapter handles (includes instanceId for routing) */
+  readonly channelType: ChannelType;
+  
+  /** Instance identifier for this adapter (e.g., "1", "2", "main", "default") */
+  readonly instanceId: string;
+  
+  /** Base channel type without instance suffix (e.g., "telegram", "discord") */
+  readonly baseChannelType: string;
+
+  /**
+   * Constructor for channel adapters.
+   * @param baseType - Base channel type (e.g., "telegram", "discord")
+   * @param instanceId - Instance identifier (e.g., "1", "main", "default")
+   */
+  constructor(baseType: string, instanceId: string) {
+    this.baseChannelType = baseType;
+    this.instanceId = instanceId;
+    // For routing: telegram:1, discord:main, agent:test, etc.
+    // "default" instance uses bare base type (e.g. telegram) for routing keys
+    this.channelType = instanceId === 'default' ? baseType : `${baseType}:${instanceId}`;
+  }
+
+  /**
+   * Start the adapter (connect, begin polling/websocket, etc.).
+   * Must be idempotent — calling start() on an already-running adapter is a no-op.
+   */
+  abstract start(): Promise<void>;
+
+  /**
+   * Stop the adapter gracefully.
+   * Must be idempotent — calling stop() on an already-stopped adapter is a no-op.
+   */
+  abstract stop(): Promise<void>;
+
+  /** Whether the adapter is currently running and consuming messages */
+  abstract isRunning(): boolean;
+
+  /**
+   * Consume the next inbound message from the internal queue.
+   * Blocks until a message is available or the adapter is stopped.
+   * Returns null if the adapter was stopped while waiting.
+   */
+  abstract consumeOne(): Promise<InboundMessage | null>;
+
+  /**
+   * Send an outbound message to the channel.
+   * Handles platform-specific formatting and API calls.
+   */
+  abstract send(message: OutboundMessage): Promise<SendResult>;
+
+  /**
+   * Answer a callback query (e.g. Telegram inline button press).
+   * Not all platforms support this — default implementation is a no-op.
+   */
+  async answerCallback(_callbackQueryId: string, _text?: string): Promise<void> {
+    // No-op by default; override in adapters that support callback queries
+  }
+
+  /**
+   * Validate that the adapter's configuration is complete.
+   * Returns null if valid, or an error message string if invalid.
+   */
+  abstract validateConfig(): string | null;
+
+  /**
+   * Check whether a user is authorized to use this bridge.
+   * Returns true if authorized, false otherwise.
+   */
+  abstract isAuthorized(userId: string, chatId: string): boolean;
+
+  /** Called when message processing starts (e.g., typing indicator). */
+  onMessageStart?(_chatId: string): void;
+
+  /** Called when message processing ends. */
+  onMessageEnd?(_chatId: string): void;
+
+  /**
+   * Acknowledge that an update has been fully processed.
+   * Adapters that defer offset commits until after handleMessage should implement this.
+   * Default is a no-op; override in adapters that need deferred offset tracking.
+   */
+  acknowledgeUpdate?(_updateId: number): void;
+
+  /**
+   * Return preview capabilities for a given chat.
+   * Returning null means streaming preview is not available for this chat.
+   */
+  getPreviewCapabilities?(_chatId: string): PreviewCapabilities | null;
+
+  /**
+   * Send (or update) a streaming preview draft.
+   * Returns 'sent' on success, 'skip' for transient failures (caller should
+   * retry later), or 'degrade' for permanent failures (caller should stop).
+   */
+  sendPreview?(_chatId: string, _text: string, _draftId: number): Promise<'sent' | 'skip' | 'degrade'>;
+
+  /**
+   * Signal the end of a preview cycle. The final message is sent via the
+   * normal delivery path, so this is typically a no-op.
+   */
+  endPreview?(_chatId: string, _draftId: number): void;
+
+  /**
+   * Hybrid Auto mode: duplicate the full assistant reply to Redis slave `out` once before Telegram send.
+   * Default no-op; Telegram overrides for `deliverySource === 'slave'`.
+   */
+  hybridDuplicateAssistantToRedis?(
+    _text: string,
+    _deliverySource: 'runner' | 'slave',
+  ): Promise<void>;
+
+  /** After a master assistant reply in hybrid Auto mode, LPUSH `master:out` (before Telegram send). */
+  hybridDuplicateMasterAssistantToRedis?(_text: string, _masterRunnerId: string): Promise<void>;
+
+  /**
+   * After master reply is delivered to Telegram: hand off to slave `input` and increment master turns.
+   */
+  afterAutoModeMasterTurn?(_payload: {
+    userPrompt: string;
+    responseText: string;
+    outboundChatId?: string;
+  }): Promise<void>;
+
+  /** After a successful LLM turn for `deliverySource: slave`, increment Redis `resp` cap. */
+  async recordAutoModeSlaveTurnCompleted(): Promise<void> {
+    return;
+  }
+
+  /** After an auto-mode master/slave turn fails or times out, clear adapter-specific busy state. */
+  async recordAutoModeTurnFailed(_payload: {
+    source: 'master' | 'slave';
+    errorMessage?: string;
+    outboundChatId?: string;
+  }): Promise<void> {
+    return;
+  }
+
+  /**
+   * Slave-only: wall-clock session timeout — push a recoverable report to Redis master and clear slave busy.
+   * Telegram hybrid overrides; default no-op.
+   */
+  async handleSlaveSessionTimeoutReport(_payload: {
+    partialText: string;
+    errorMessage: string;
+    outboundChatId?: string;
+  }): Promise<void> {
+    return;
+  }
+
+  /**
+   * Reset auto mode Redis state and restart slave process.
+   * Returns a human-readable status message.  `null` means auto mode is not active.
+   */
+  async resetAutoModeState?(): Promise<string | null>;
+
+  /**
+   * Stop in-flight tasks for both master and slave runners without tearing down the bridge.
+   * Returns a human-readable status message.  `null` means auto mode is not active.
+   */
+  async stopAutoModeTasks?(activeTasks: Map<string, AbortController>): Promise<string | null>;
+}
+
+// ── Adapter Registry ────────────────────────────────────────────
+
+type AdapterFactory = (instanceId: string) => BaseChannelAdapter;
+
+const adapterFactories = new Map<string, AdapterFactory>();
+
+/**
+ * Register a factory function for creating channel adapters.
+ * The factory receives an instanceId and returns a configured adapter.
+ * 
+ * @param channelType - Base channel type (e.g., "telegram", "discord")
+ * @param factory - Function that creates an adapter for a given instance ID
+ */
+export function registerAdapterFactory(channelType: string, factory: AdapterFactory): void {
+  adapterFactories.set(channelType, factory);
+}
+
+/**
+ * Create a channel adapter instance.
+ * 
+ * @param channelType - Base channel type (e.g., "telegram", "discord")
+ * @param instanceId - Instance identifier (e.g., "1", "main", "default")
+ * @returns Configured adapter or null if factory not found
+ */
+export function createAdapter(channelType: string, instanceId = 'default'): BaseChannelAdapter | null {
+  const factory = adapterFactories.get(channelType);
+  return factory ? factory(instanceId) : null;
+}
+
+export function getRegisteredTypes(): string[] {
+  return Array.from(adapterFactories.keys());
+}

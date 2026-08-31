@@ -1,0 +1,1 @@
+开发可用 worktree（CTI_KANBAN_USE_WORKTREE=1）。功能测试仅验证本 task 功能点；合入 master、解决合并冲突与 PR 为后续步骤。回归测试须针对 origin 上主分支最新；若主分支出现新的合并，须废弃用于回归的旧分支或 checkout，重新拉取最新代码后再跑全量用例，可配合 refreshRegressionIfMasterAdvanced。
