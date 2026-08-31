@@ -275,7 +275,10 @@ export class CodexProvider implements LLMProvider {
               /** Last JSON `error` / `turn.failed` message from Codex stdout (real cause). */
               let lastCodexStreamError: string | undefined;
               try {
-                const { events } = await thread.runStreamed(input);
+                const { events } = await thread.runStreamed(
+                  input,
+                  params.outputSchema ? { outputSchema: params.outputSchema } : undefined,
+                );
 
                 for await (const event of events) {
                   sawAnyEvent = true;

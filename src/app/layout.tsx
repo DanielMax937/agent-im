@@ -1,14 +1,6 @@
 import './globals.css';
 
 import type { ReactNode } from 'react';
-import { Noto_Sans_SC } from 'next/font/google';
-
-const notoSansSc = Noto_Sans_SC({
-  subsets: ['latin'],
-  weight: ['400', '500', '600', '700'],
-  display: 'swap',
-  variable: '--font-sans',
-});
 
 export const metadata = {
   title: 'agent-im 平台',
@@ -21,8 +13,8 @@ interface RootLayoutProps {
 
 export default function RootLayout({ children }: RootLayoutProps) {
   return (
-    <html lang="zh-CN" className={notoSansSc.variable}>
-      <body className={notoSansSc.className}>{children}</body>
+    <html lang="zh-CN">
+      <body>{children}</body>
     </html>
   );
 }

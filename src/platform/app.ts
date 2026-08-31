@@ -1,6 +1,7 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
+import Ajv2020, { type ValidateFunction } from 'ajv/dist/2020.js';
 
 import * as bridgeManager from '../lib/bridge/bridge-manager';
 import {
@@ -510,9 +511,30 @@ interface OpenAIChatCompletionsRequest {
   };
   temperature?: number;
   max_tokens?: number;
+  response_format?: unknown;
   session_id?: string;
   working_directory?: string;
 }
+
+export type ParsedOpenAIResponseFormat =
+  | { kind: 'text' }
+  | { kind: 'json_object' }
+  | {
+      kind: 'json_schema';
+      name: string;
+      description?: string;
+      strict?: boolean;
+      outputSchema: Record<string, unknown>;
+      validator: ValidateFunction;
+    };
+
+type OpenAIResponseFormatParseResult =
+  | { ok: true; value: ParsedOpenAIResponseFormat }
+  | { ok: false; message: string };
+
+export type OpenAIStructuredValidationResult =
+  | { ok: true; value: unknown }
+  | { ok: false; message: string };
 
 interface ParsedOpenAIPrompt {
   prompt: string;
@@ -537,6 +559,102 @@ const DEFAULT_OPENAI_COMPAT_MODEL = 'codex-login/gpt-5.5';
 const apiProviderCache = new Map<string, Promise<LLMProvider>>();
 const apiProviderPermissions = new PendingPermissions();
 const apiSessionModelKeys = new Map<string, string>();
+const openAIResponseFormatAjv = new Ajv2020({ allErrors: true, strict: false });
+
+export const OPENAI_CHAT_CODEX_SAFETY_OPTIONS = Object.freeze({
+  sandboxMode: 'read-only' as const,
+  networkAccessEnabled: false,
+  webSearchMode: 'disabled' as const,
+});
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+export function parseOpenAIResponseFormat(input: unknown): OpenAIResponseFormatParseResult {
+  if (input === undefined || input === null) {
+    return { ok: true, value: { kind: 'text' } };
+  }
+  if (!isRecord(input) || typeof input.type !== 'string') {
+    return { ok: false, message: 'response_format must be an object with a type' };
+  }
+  if (input.type === 'json_object') {
+    return { ok: true, value: { kind: 'json_object' } };
+  }
+  if (input.type !== 'json_schema') {
+    return { ok: false, message: `unsupported response_format type: ${input.type}` };
+  }
+
+  const wrapper = input.json_schema;
+  if (!isRecord(wrapper)) {
+    return { ok: false, message: 'response_format.json_schema is required' };
+  }
+  const name = typeof wrapper.name === 'string' ? wrapper.name.trim() : '';
+  if (!name) {
+    return { ok: false, message: 'response_format.json_schema.name is required' };
+  }
+  if (!isRecord(wrapper.schema)) {
+    return { ok: false, message: 'response_format.json_schema.schema must be an object' };
+  }
+  if (wrapper.strict !== undefined && typeof wrapper.strict !== 'boolean') {
+    return { ok: false, message: 'response_format.json_schema.strict must be a boolean' };
+  }
+  if (wrapper.description !== undefined && typeof wrapper.description !== 'string') {
+    return { ok: false, message: 'response_format.json_schema.description must be a string' };
+  }
+
+  try {
+    const validator = openAIResponseFormatAjv.compile(wrapper.schema);
+    return {
+      ok: true,
+      value: {
+        kind: 'json_schema',
+        name,
+        ...(typeof wrapper.description === 'string' ? { description: wrapper.description } : {}),
+        ...(typeof wrapper.strict === 'boolean' ? { strict: wrapper.strict } : {}),
+        outputSchema: wrapper.schema,
+        validator,
+      },
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      message: `response_format.json_schema.schema is invalid: ${
+        error instanceof Error ? error.message : String(error)
+      }`,
+    };
+  }
+}
+
+function summarizeSchemaErrors(validator: ValidateFunction): string {
+  const summary = (validator.errors ?? [])
+    .slice(0, 5)
+    .map((error) => `${error.instancePath || '/'}:${error.keyword}`)
+    .join(', ');
+  return summary || 'schema validation failed';
+}
+
+export function validateOpenAIStructuredOutput(
+  format: ParsedOpenAIResponseFormat,
+  text: string,
+): OpenAIStructuredValidationResult {
+  if (format.kind === 'text') return { ok: true, value: text };
+
+  let value: unknown;
+  try {
+    value = JSON.parse(text);
+  } catch {
+    return { ok: false, message: 'model output is not valid JSON' };
+  }
+  if (format.kind === 'json_object') {
+    return isRecord(value)
+      ? { ok: true, value }
+      : { ok: false, message: 'model output must be a non-null JSON object' };
+  }
+  return format.validator(value)
+    ? { ok: true, value }
+    : { ok: false, message: summarizeSchemaErrors(format.validator) };
+}
 
 export function parseBase64DataUrl(url: string): { mime: string; base64: string } | null {
   const match = /^data:([^;,]+);base64,(.+)$/i.exec(url.trim());
@@ -721,7 +839,7 @@ function parseSSEPayload(data: unknown): unknown {
   }
 }
 
-async function collectProviderResponse(stream: ReadableStream<string>): Promise<{
+export async function collectProviderResponse(stream: ReadableStream<string>): Promise<{
   text: string;
   usage: { input: number; output: number };
   sessionId?: string;
@@ -752,11 +870,11 @@ async function collectProviderResponse(stream: ReadableStream<string>): Promise<
         continue;
       }
       if (!event?.type) continue;
-      const payload = parseSSEPayload(event.data);
       if (event.type === 'text') {
-        text += typeof payload === 'string' ? payload : String(payload ?? '');
+        text += typeof event.data === 'string' ? event.data : String(event.data ?? '');
         continue;
       }
+      const payload = parseSSEPayload(event.data);
       if (event.type === 'result' && payload && typeof payload === 'object') {
         const result = payload as {
           session_id?: string;
@@ -872,10 +990,8 @@ export function createOpenAIChatCompletionStream(
           return;
         }
         if (!event?.type) return;
-        const payload = parseSSEPayload(event.data);
-
         if (event.type === 'text') {
-          const content = typeof payload === 'string' ? payload : String(payload ?? '');
+          const content = typeof event.data === 'string' ? event.data : String(event.data ?? '');
           if (!content) return;
           send(openAIStreamChunk({
             requestId: options.requestId,
@@ -886,6 +1002,8 @@ export function createOpenAIChatCompletionStream(
           }));
           return;
         }
+
+        const payload = parseSSEPayload(event.data);
 
         if ((event.type === 'result' || event.type === 'status') && payload && typeof payload === 'object') {
           const result = payload as {
@@ -950,6 +1068,153 @@ export function createOpenAIChatCompletionStream(
       }
     },
   });
+}
+
+function promptForOpenAIResponseFormat(prompt: string, format: ParsedOpenAIResponseFormat): string {
+  if (format.kind === 'text') return prompt;
+  const requirement = format.kind === 'json_object'
+    ? 'Return only one valid JSON object. Do not return an array, scalar, null, Markdown, or explanatory text.'
+    : `Return only JSON that validates against the requested schema named "${format.name}". Do not return Markdown or explanatory text.`;
+  return `SYSTEM: ${requirement}\n\n${prompt}`;
+}
+
+function structuredRepairPrompt(
+  format: ParsedOpenAIResponseFormat,
+  invalidOutput: string,
+  validationMessage: string,
+): string {
+  const target = format.kind === 'json_schema'
+    ? `the JSON Schema named "${format.name}"`
+    : 'a non-null JSON object';
+  return [
+    'SYSTEM: Repair the candidate output. Return JSON only, with no Markdown or explanation.',
+    `The repaired output must satisfy ${target}.`,
+    `Validation error: ${validationMessage}`,
+    'Candidate output:',
+    invalidOutput,
+  ].join('\n\n');
+}
+
+function isRetryableOpenAIProviderFailure(completion: Awaited<ReturnType<typeof collectProviderResponse>>): boolean {
+  if (completion.text.trim() || completion.errors.length === 0) return false;
+  return completion.errors.some((message) =>
+    /(?:\b429\b|\b502\b|\b503\b|\b504\b|timeout|timed out|connection reset|econnreset)/i.test(message),
+  );
+}
+
+async function collectOpenAIProviderResponse(
+  streamFactory: (attempt: number) => ReadableStream<string>,
+  allowTransportRetry: boolean,
+): Promise<Awaited<ReturnType<typeof collectProviderResponse>>> {
+  const first = await collectProviderResponse(streamFactory(0));
+  if (!allowTransportRetry || !isRetryableOpenAIProviderFailure(first)) return first;
+  await new Promise((resolve) => setTimeout(resolve, 1_000));
+  return collectProviderResponse(streamFactory(1));
+}
+
+function mergeOpenAIUsage(
+  first: { input: number; output: number },
+  second: { input: number; output: number },
+): { input: number; output: number } {
+  return {
+    input: first.input + second.input,
+    output: first.output + second.output,
+  };
+}
+
+export function createBufferedOpenAIChatCompletionStream(options: {
+  requestId: string;
+  modelKey: string;
+  content: string;
+  usage: { input: number; output: number };
+  includeUsage?: boolean;
+  apiSessionId?: string;
+  created?: number;
+}): ReadableStream<Uint8Array> {
+  const encoder = new TextEncoder();
+  const created = options.created ?? Math.floor(Date.now() / 1000);
+  const chunks = [
+    openAIStreamChunk({
+      requestId: options.requestId,
+      created,
+      modelKey: options.modelKey,
+      delta: { role: 'assistant' },
+      finishReason: null,
+    }),
+    openAIStreamChunk({
+      requestId: options.requestId,
+      created,
+      modelKey: options.modelKey,
+      delta: { content: options.content },
+      finishReason: null,
+    }),
+    openAIStreamChunk({
+      requestId: options.requestId,
+      created,
+      modelKey: options.modelKey,
+      delta: {},
+      finishReason: 'stop',
+      usage: options.includeUsage ? options.usage : undefined,
+      apiSessionId: options.apiSessionId,
+    }),
+  ];
+  return new ReadableStream<Uint8Array>({
+    start(controller) {
+      for (const chunk of chunks) {
+        controller.enqueue(encoder.encode(`data: ${JSON.stringify(chunk)}\n\n`));
+      }
+      controller.enqueue(encoder.encode('data: [DONE]\n\n'));
+      controller.close();
+    },
+  });
+}
+
+function registerOpenAICompletionSession(
+  completion: Awaited<ReturnType<typeof collectProviderResponse>>,
+  parsedModel: ParsedOpenAIModel,
+): string | undefined {
+  if (!completion.sessionId) return undefined;
+  const apiSessionId = encodeApiSessionId({
+    v: 1,
+    provider: parsedModel.provider,
+    model: parsedModel.runtimeModel,
+    providerSessionId: completion.sessionId,
+  });
+  apiSessionModelKeys.set(completion.sessionId, parsedModel.key);
+  apiSessionModelKeys.set(apiSessionId, parsedModel.key);
+  return apiSessionId;
+}
+
+function openAIChatCompletionJson(options: {
+  requestId: string;
+  parsedModel: ParsedOpenAIModel;
+  completion: Awaited<ReturnType<typeof collectProviderResponse>>;
+  apiSessionId?: string;
+}): Record<string, unknown> {
+  return {
+    id: options.requestId,
+    object: 'chat.completion',
+    created: Math.floor(Date.now() / 1000),
+    model: options.parsedModel.key,
+    choices: [
+      {
+        index: 0,
+        message: {
+          role: 'assistant',
+          content: options.completion.text,
+        },
+        finish_reason: options.completion.errors.length > 0 ? 'length' : 'stop',
+      },
+    ],
+    usage: {
+      prompt_tokens: options.completion.usage.input,
+      completion_tokens: options.completion.usage.output,
+      total_tokens: options.completion.usage.input + options.completion.usage.output,
+    },
+    ...(options.apiSessionId
+      ? { _session_id: options.apiSessionId, session_id: options.apiSessionId }
+      : {}),
+  };
 }
 
 async function readRequestBody<T>(request: Request): Promise<T> {
@@ -1149,6 +1414,19 @@ export function createPlatformApp(options: CreatePlatformAppOptions): PlatformAp
             400,
           );
         }
+        const parsedResponseFormat = parseOpenAIResponseFormat(body.response_format);
+        if (!parsedResponseFormat.ok) {
+          return jsonResponse(
+            {
+              error: {
+                message: parsedResponseFormat.message,
+                type: 'invalid_request_error',
+              },
+            },
+            400,
+          );
+        }
+        const responseFormat = parsedResponseFormat.value;
         const shouldStream = body.stream === true;
         const parsedModel = normalizeOpenAICompatModel(body.model);
         if (!parsedModel) {
@@ -1208,16 +1486,114 @@ export function createPlatformApp(options: CreatePlatformAppOptions): PlatformAp
         const requestId = `chatcmpl-${crypto.randomUUID()}`;
         const model = parsedModel.runtimeModel;
         const workingDirectory = body.working_directory?.trim() || process.cwd();
-        const stream = llm.streamChat({
-          prompt,
-          files,
-          sessionId: requestId,
-          sdkSessionId,
+        const formattedPrompt = promptForOpenAIResponseFormat(prompt, responseFormat);
+        const outputSchema = responseFormat.kind === 'json_schema'
+          ? responseFormat.outputSchema
+          : undefined;
+        const makeProviderStream = (input: {
+          prompt: string;
+          files: FileAttachment[];
+          sessionId: string;
+          sdkSessionId?: string;
+          disableLlmStreaming: boolean;
+        }) => llm.streamChat({
+          ...input,
           model,
           workingDirectory,
-          disableLlmStreaming: !shouldStream,
+          outputSchema,
+          ...OPENAI_CHAT_CODEX_SAFETY_OPTIONS,
         });
+
+        if (responseFormat.kind !== 'text') {
+          let completion = await collectOpenAIProviderResponse(
+            (attempt) => makeProviderStream({
+              prompt: formattedPrompt,
+              files,
+              sessionId: attempt === 0 ? requestId : `${requestId}-retry`,
+              sdkSessionId: attempt === 0 ? sdkSessionId : undefined,
+              disableLlmStreaming: true,
+            }),
+            true,
+          );
+          if (completion.errors.length > 0 && !completion.text.trim()) {
+            return jsonResponse(
+              {
+                error: {
+                  message: completion.errors[0],
+                  type: 'upstream_error',
+                },
+              },
+              502,
+            );
+          }
+
+          let validation = validateOpenAIStructuredOutput(responseFormat, completion.text);
+          if (!validation.ok) {
+            const initialUsage = completion.usage;
+            const validationMessage = validation.message;
+            const repair = await collectOpenAIProviderResponse(
+              () => makeProviderStream({
+                prompt: structuredRepairPrompt(responseFormat, completion.text, validationMessage),
+                files: [],
+                sessionId: `${requestId}-repair`,
+                disableLlmStreaming: true,
+              }),
+              false,
+            );
+            completion = {
+              ...repair,
+              usage: mergeOpenAIUsage(initialUsage, repair.usage),
+            };
+            validation = validateOpenAIStructuredOutput(responseFormat, completion.text);
+          }
+          if (!validation.ok) {
+            return jsonResponse(
+              {
+                error: {
+                  message: `model returned invalid structured output: ${validation.message}`,
+                  type: 'invalid_response_error',
+                },
+              },
+              502,
+            );
+          }
+
+          const apiSessionId = registerOpenAICompletionSession(completion, parsedModel);
+          if (shouldStream) {
+            return new Response(
+              createBufferedOpenAIChatCompletionStream({
+                requestId,
+                modelKey: parsedModel.key,
+                content: completion.text,
+                usage: completion.usage,
+                includeUsage: body.stream_options?.include_usage === true,
+                apiSessionId,
+              }),
+              {
+                headers: {
+                  'content-type': 'text/event-stream; charset=utf-8',
+                  'cache-control': 'no-cache, no-transform',
+                  connection: 'keep-alive',
+                },
+              },
+            );
+          }
+          return jsonResponse(openAIChatCompletionJson({
+            requestId,
+            parsedModel,
+            completion,
+            apiSessionId,
+          }));
+        }
+
         if (shouldStream) {
+          const stream = makeProviderStream({
+            prompt: formattedPrompt,
+            files,
+            sessionId: requestId,
+            sdkSessionId,
+            disableLlmStreaming: false,
+          });
           return new Response(
             createOpenAIChatCompletionStream(stream, {
               requestId,
@@ -1239,19 +1615,17 @@ export function createPlatformApp(options: CreatePlatformAppOptions): PlatformAp
             },
           );
         }
-        const completion = await collectProviderResponse(stream);
-        const apiSessionId = completion.sessionId
-          ? encodeApiSessionId({
-              v: 1,
-              provider: parsedModel.provider,
-              model: parsedModel.runtimeModel,
-              providerSessionId: completion.sessionId,
-            })
-          : undefined;
-        if (completion.sessionId) {
-          apiSessionModelKeys.set(completion.sessionId, parsedModel.key);
-          if (apiSessionId) apiSessionModelKeys.set(apiSessionId, parsedModel.key);
-        }
+        const completion = await collectOpenAIProviderResponse(
+          (attempt) => makeProviderStream({
+            prompt: formattedPrompt,
+            files,
+            sessionId: attempt === 0 ? requestId : `${requestId}-retry`,
+            sdkSessionId: attempt === 0 ? sdkSessionId : undefined,
+            disableLlmStreaming: true,
+          }),
+          true,
+        );
+        const apiSessionId = registerOpenAICompletionSession(completion, parsedModel);
         if (completion.errors.length > 0 && !completion.text.trim()) {
           return jsonResponse(
             {
@@ -1263,31 +1637,12 @@ export function createPlatformApp(options: CreatePlatformAppOptions): PlatformAp
             502,
           );
         }
-
-        return jsonResponse({
-          id: requestId,
-          object: 'chat.completion',
-          created: Math.floor(Date.now() / 1000),
-          model: parsedModel.key,
-          choices: [
-            {
-              index: 0,
-              message: {
-                role: 'assistant',
-                content: completion.text,
-              },
-              finish_reason: completion.errors.length > 0 ? 'length' : 'stop',
-            },
-          ],
-          usage: {
-            prompt_tokens: completion.usage.input,
-            completion_tokens: completion.usage.output,
-            total_tokens: completion.usage.input + completion.usage.output,
-          },
-          ...(apiSessionId
-            ? { _session_id: apiSessionId, session_id: apiSessionId }
-            : {}),
-        });
+        return jsonResponse(openAIChatCompletionJson({
+          requestId,
+          parsedModel,
+          completion,
+          apiSessionId,
+        }));
       }
 
       if (request.method === 'GET' && pathname === '/api/bridge/logs') {

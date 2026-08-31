@@ -2,11 +2,16 @@ import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
+  OPENAI_CHAT_CODEX_SAFETY_OPTIONS,
+  collectProviderResponse,
+  createBufferedOpenAIChatCompletionStream,
   createOpenAIChatCompletionStream,
   normalizeOpenAICompatModel,
   parseBase64DataUrl,
   parseOpenAIMessagesAsPrompt,
   parseOpenAIProviderModel,
+  parseOpenAIResponseFormat,
+  validateOpenAIStructuredOutput,
 } from '../platform/app';
 
 async function readUint8Stream(stream: ReadableStream<Uint8Array>): Promise<string> {
@@ -92,6 +97,116 @@ describe('OpenAI chat completions parsing', () => {
     assert.equal(normalizeOpenAICompatModel('gpt-5-mini'), null);
   });
 
+  it('accepts an omitted response format as plain text', () => {
+    assert.deepEqual(parseOpenAIResponseFormat(undefined), {
+      ok: true,
+      value: { kind: 'text' },
+    });
+  });
+
+  it('locks OpenAI-compatible Codex calls to read-only, offline tool settings', () => {
+    assert.deepEqual(OPENAI_CHAT_CODEX_SAFETY_OPTIONS, {
+      sandboxMode: 'read-only',
+      networkAccessEnabled: false,
+      webSearchMode: 'disabled',
+    });
+  });
+
+  it('rejects unsupported and incomplete response formats', () => {
+    const unsupported = parseOpenAIResponseFormat({ type: 'xml' });
+    assert.equal(unsupported.ok, false);
+
+    const missingSchema = parseOpenAIResponseFormat({
+      type: 'json_schema',
+      json_schema: { name: 'answer' },
+    });
+    assert.equal(missingSchema.ok, false);
+
+    const invalidSchema = parseOpenAIResponseFormat({
+      type: 'json_schema',
+      json_schema: {
+        name: 'answer',
+        schema: { type: 'not-a-real-json-schema-type' },
+      },
+    });
+    assert.equal(invalidSchema.ok, false);
+  });
+
+  it('requires json_object output to be a non-null, non-array object', () => {
+    const parsed = parseOpenAIResponseFormat({ type: 'json_object' });
+    assert.equal(parsed.ok, true);
+    if (!parsed.ok) return;
+
+    assert.equal(validateOpenAIStructuredOutput(parsed.value, '{"ok":true}').ok, true);
+    for (const invalid of ['[]', '"text"', '1', 'true', 'null', '{broken']) {
+      assert.equal(validateOpenAIStructuredOutput(parsed.value, invalid).ok, false, invalid);
+    }
+  });
+
+  it('validates json_schema output with caller-controlled additionalProperties', () => {
+    const strictObject = parseOpenAIResponseFormat({
+      type: 'json_schema',
+      json_schema: {
+        name: 'answer',
+        strict: true,
+        schema: {
+          type: 'object',
+          properties: { answer: { type: 'string' } },
+          required: ['answer'],
+          additionalProperties: false,
+        },
+      },
+    });
+    assert.equal(strictObject.ok, true);
+    if (!strictObject.ok) return;
+    assert.equal(validateOpenAIStructuredOutput(strictObject.value, '{"answer":"ok"}').ok, true);
+    assert.equal(validateOpenAIStructuredOutput(strictObject.value, '{"answer":"ok","extra":1}').ok, false);
+
+    const permissiveObject = parseOpenAIResponseFormat({
+      type: 'json_schema',
+      json_schema: {
+        name: 'answer',
+        strict: false,
+        schema: {
+          type: 'object',
+          properties: { answer: { type: 'string' } },
+          required: ['answer'],
+          additionalProperties: true,
+        },
+      },
+    });
+    assert.equal(permissiveObject.ok, true);
+    if (!permissiveObject.ok) return;
+    assert.equal(validateOpenAIStructuredOutput(permissiveObject.value, '{"answer":"ok","extra":1}').ok, true);
+  });
+
+  it('emits a buffered structured response only as complete OpenAI SSE chunks', async () => {
+    const raw = await readUint8Stream(createBufferedOpenAIChatCompletionStream({
+      requestId: 'chatcmpl-buffered',
+      modelKey: 'codex-login/gpt-5.5',
+      content: '{"answer":"ok"}',
+      usage: { input: 3, output: 2 },
+      includeUsage: true,
+      apiSessionId: 'session-1',
+      created: 123,
+    }));
+    const events = raw
+      .split('\n\n')
+      .filter((event) => event.startsWith('data: ') && event !== 'data: [DONE]')
+      .map((event) => JSON.parse(event.slice('data: '.length)));
+
+    assert.equal(events.length, 3);
+    assert.deepEqual(events[0].choices[0].delta, { role: 'assistant' });
+    assert.deepEqual(events[1].choices[0].delta, { content: '{"answer":"ok"}' });
+    assert.equal(events[2].choices[0].finish_reason, 'stop');
+    assert.deepEqual(events[2].usage, {
+      prompt_tokens: 3,
+      completion_tokens: 2,
+      total_tokens: 5,
+    });
+    assert.match(raw, /data: \[DONE\]/);
+  });
+
   it('converts provider SSE into OpenAI chat completion chunks', async () => {
     const providerStream = new ReadableStream<string>({
       start(controller) {
@@ -138,5 +253,46 @@ describe('OpenAI chat completions parsing', () => {
     assert.equal(chunks[3].usage.total_tokens, 5);
     assert.equal(chunks[3].session_id, sessions[0].apiSessionId);
     assert.equal(sessions[0].providerSessionId, 'thread-1');
+  });
+
+  it('preserves JSON text events instead of coercing them to object strings', async () => {
+    const providerStream = new ReadableStream<string>({
+      start(controller) {
+        controller.enqueue(`data: ${JSON.stringify({
+          type: 'text',
+          data: '{"status":"ok"}',
+        })}\n`);
+        controller.close();
+      },
+    });
+    const output = await readUint8Stream(createOpenAIChatCompletionStream(providerStream, {
+      requestId: 'chatcmpl-json-text',
+      modelKey: 'codex-login/gpt-5.5',
+      provider: 'codex-login',
+      runtimeModel: 'gpt-5.5',
+      created: 123,
+    }));
+    const chunks = output
+      .split('\n\n')
+      .filter((line) => line.startsWith('data: {'))
+      .map((line) => JSON.parse(line.slice('data: '.length)));
+
+    assert.equal(chunks[1].choices[0].delta.content, '{"status":"ok"}');
+    assert.doesNotMatch(output, /\[object Object\]/);
+  });
+
+  it('preserves JSON text while collecting a non-streamed provider response', async () => {
+    const providerStream = new ReadableStream<string>({
+      start(controller) {
+        controller.enqueue(`data: ${JSON.stringify({
+          type: 'text',
+          data: '{"status":"ok"}',
+        })}\n`);
+        controller.close();
+      },
+    });
+
+    const completion = await collectProviderResponse(providerStream);
+    assert.equal(completion.text, '{"status":"ok"}');
   });
 });

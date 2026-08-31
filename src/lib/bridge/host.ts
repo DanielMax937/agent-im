@@ -232,6 +232,8 @@ export interface StreamChatParams {
   networkAccessEnabled?: boolean;
   /** Codex thread: web search behavior. */
   webSearchMode?: 'disabled' | 'cached' | 'live';
+  /** Codex turn: optional JSON Schema for the final response. */
+  outputSchema?: Record<string, unknown>;
 }
 
 export interface LLMProvider {

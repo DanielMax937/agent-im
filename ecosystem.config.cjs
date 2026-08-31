@@ -53,7 +53,7 @@ module.exports = {
     {
       name: 'agent-im',
       script: 'npm',
-      args: ['start'],
+      args: ['start', '--', '-H', '127.0.0.1'],
       cwd: __dirname,
       env: {
         ...baseEnv,

@@ -336,6 +336,54 @@ describe('CodexProvider', () => {
     assert.equal(capturedStartOptions?.model, 'gpt-5-codex');
   });
 
+  it('forwards sandbox, network, web-search, and output schema options to Codex SDK', async () => {
+    const { CodexProvider } = await import('../codex-provider');
+    const { PendingPermissions } = await import('../permission-gateway');
+    const provider = new CodexProvider(new PendingPermissions());
+
+    let capturedStartOptions: Record<string, unknown> | undefined;
+    let capturedRunOptions: Record<string, unknown> | undefined;
+    const schema = {
+      type: 'object',
+      properties: { answer: { type: 'string' } },
+      required: ['answer'],
+      additionalProperties: false,
+    };
+    const mockThread = {
+      runStreamed: (_input: unknown, options?: Record<string, unknown>) => {
+        capturedRunOptions = options;
+        return {
+          events: (async function* () {
+            yield { type: 'turn.completed', usage: { input_tokens: 1, output_tokens: 1 } };
+          })(),
+        };
+      },
+    };
+    (provider as any).sdk = { Codex: class { constructor() {} } };
+    (provider as any).codex = {
+      startThread: (options: Record<string, unknown>) => {
+        capturedStartOptions = options;
+        return mockThread;
+      },
+    };
+
+    const stream = provider.streamChat({
+      prompt: 'Return JSON',
+      sessionId: 'structured-options-session',
+      model: 'gpt-5.5',
+      sandboxMode: 'read-only',
+      networkAccessEnabled: false,
+      webSearchMode: 'disabled',
+      outputSchema: schema,
+    });
+    await collectStream(stream);
+
+    assert.equal(capturedStartOptions?.sandboxMode, 'read-only');
+    assert.equal(capturedStartOptions?.networkAccessEnabled, false);
+    assert.equal(capturedStartOptions?.webSearchMode, 'disabled');
+    assert.deepEqual(capturedRunOptions, { outputSchema: schema });
+  });
+
   it('retries with fresh thread when resume fails before any events', async () => {
     const { CodexProvider } = await import('../codex-provider');
     const { PendingPermissions } = await import('../permission-gateway');
